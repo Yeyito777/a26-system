@@ -5,6 +5,10 @@ from the A26 shell. It creates a conventional, window-manager-controlled
 1080x2340 window named `a26-system`; it is deliberately **not** an
 override-redirect window.
 
+![A26 System app](docs/system-view.png)
+
+Companion window manager: <https://github.com/Yeyito777/a26-shell>
+
 The view keeps the original navy, mint, blue, and white card layout and shows:
 
 - aggregate CPU utilization calculated from consecutive `/proc/stat` samples;
@@ -33,6 +37,7 @@ scripts/check.sh            host format, test, clippy, and debug-build checks
 scripts/build.sh            checked static aarch64 musl release build
 scripts/install.sh          build and ADB installation
 src/                        X11 client, renderer, telemetry, IPC, and font
+docs/system-view.png        capture of the separately managed app on-device
 ```
 
 `assets/system-app.bgrx` is exactly 220x220 pixels, four bytes per pixel in
