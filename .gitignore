@@ -1,0 +1,16 @@
+# Rust build output and locally staged packages
+/target/
+/build/
+
+# Python cache created by the asset preparation tool
+__pycache__/
+*.py[cod]
+
+# Editor, operating-system, and diagnostic leftovers
+/.idea/
+/.vscode/
+*.log
+*.tmp
+*~
+.DS_Store
+
