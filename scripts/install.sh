@@ -4,51 +4,101 @@ set -euo pipefail
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$PROJECT_ROOT/scripts/common.sh"
 
-for command in adb sha256sum; do
-    if ! command -v "$command" >/dev/null 2>&1; then
+for command in adb curl sha256sum; do
+    command -v "$command" >/dev/null 2>&1 || {
         echo "required command not found: $command" >&2
         exit 1
-    fi
+    }
 done
 
 SERIAL="$(a26_resolve_serial)"
 TARGET="aarch64-unknown-linux-musl"
-BINARY="$PROJECT_ROOT/target/$TARGET/release/a26-system"
-ICON="$PROJECT_ROOT/assets/system-app.bgrx"
-STAGED_BINARY="/data/local/tmp/a26-system.install"
-STAGED_ICON="/data/local/tmp/system-app.bgrx.install"
+HOST_STAGE="$(mktemp -d)"
+DEVICE_STAGE="/data/local/tmp/a26-system-install-$$-$RANDOM"
 
 cleanup() {
-    adb -s "$SERIAL" shell "rm -f '$STAGED_BINARY' '$STAGED_ICON'" >/dev/null 2>&1 || true
+    rm -rf "$HOST_STAGE"
+    adb -s "$SERIAL" shell "/data/local/tmp/su -c 'rm -rf $DEVICE_STAGE'" \
+        >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 "$PROJECT_ROOT/scripts/build.sh"
+"$PROJECT_ROOT/scripts/fetch-wifi-packages.sh" >/dev/null
 adb -s "$SERIAL" get-state >/dev/null
-adb -s "$SERIAL" push "$BINARY" "$STAGED_BINARY" >/dev/null
-adb -s "$SERIAL" push "$ICON" "$STAGED_ICON" >/dev/null
 
-adb -s "$SERIAL" shell '/data/local/tmp/su -c '\''set -eu
-root=/data/local/a26-linux/opt/a26-system
-mkdir -p "$root/bin" "$root/share"
-cp /data/local/tmp/a26-system.install "$root/bin/a26-system.new"
-cp /data/local/tmp/system-app.bgrx.install "$root/share/system-app.bgrx.new"
-chown 0:0 "$root/bin/a26-system.new" "$root/share/system-app.bgrx.new"
-chmod 0755 "$root/bin/a26-system.new"
-chmod 0644 "$root/share/system-app.bgrx.new"
-mv -f "$root/bin/a26-system.new" "$root/bin/a26-system"
-mv -f "$root/share/system-app.bgrx.new" "$root/share/system-app.bgrx"'\'''
+mkdir -p "$HOST_STAGE/wifi-packages"
+cp "$PROJECT_ROOT/target/$TARGET/release/a26-system" "$HOST_STAGE/a26-system"
+cp "$PROJECT_ROOT/target/$TARGET/release/a26-wifi-service" "$HOST_STAGE/a26-wifi-service"
+cp "$PROJECT_ROOT/target/$TARGET/release/a26-wifi-ctl" "$HOST_STAGE/a26-wifi-ctl"
+cp "$PROJECT_ROOT/target/$TARGET/release/a26-systemctl" "$HOST_STAGE/a26-systemctl"
+cp "$PROJECT_ROOT/assets/system-app.bgrx" "$HOST_STAGE/system-app.bgrx"
+cp "$PROJECT_ROOT/scripts/phone/a26-udhcpc.script" "$HOST_STAGE/a26-udhcpc.script"
+cp "$PROJECT_ROOT/scripts/phone/a26-wifi-start" "$HOST_STAGE/a26-wifi-start"
+cp "$PROJECT_ROOT/scripts/phone/a26-wifi-stop" "$HOST_STAGE/a26-wifi-stop"
+cp "$PROJECT_ROOT/scripts/phone/a26-wifi-cleanup-android.sh" \
+    "$HOST_STAGE/a26-wifi-cleanup-android.sh"
+cp "$PROJECT_ROOT/scripts/phone/install-wifi-packages.sh" \
+    "$HOST_STAGE/install-wifi-packages.sh"
+cp "$PROJECT_ROOT/build/wifi-packages/"*.apk "$HOST_STAGE/wifi-packages/"
 
-expected_binary="$(sha256sum "$BINARY" | awk '{print $1}')"
-expected_icon="$(sha256sum "$ICON" | awk '{print $1}')"
-installed_hashes="$(
-    adb -s "$SERIAL" shell \
-        '/data/local/tmp/su -c "sha256sum /data/local/a26-linux/opt/a26-system/bin/a26-system /data/local/a26-linux/opt/a26-system/share/system-app.bgrx"' \
-        | tr -d '\r'
-)"
+(
+    cd "$HOST_STAGE"
+    find . -type f ! -name MANIFEST.sha256 -print0 \
+        | sort -z | xargs -0 sha256sum >MANIFEST.sha256
+)
 
-grep -q "^$expected_binary  .*a26-system$" <<<"$installed_hashes"
-grep -q "^$expected_icon  .*system-app.bgrx$" <<<"$installed_hashes"
+adb -s "$SERIAL" shell "umask 077; mkdir '$DEVICE_STAGE'"
+for file in "$HOST_STAGE"/*; do
+    adb -s "$SERIAL" push "$file" "$DEVICE_STAGE/" >/dev/null
+done
 
-echo "installed a26-system under /opt/a26-system in the device Linux rootfs"
+adb -s "$SERIAL" shell "/data/local/tmp/su -c 'set -eu
+stage=$DEVICE_STAGE
+root=/data/local/a26-linux
+test -d \"\$stage\" && test ! -L \"\$stage\"
+chown -R 0:0 \"\$stage\"
+chmod 0700 \"\$stage\" \"\$stage/wifi-packages\"
+find \"\$stage\" -type f -exec chmod 0600 {} \\;
+test -z \"\$(find \"\$stage\" -type l -print -quit)\"
+test \"\$(find \"\$stage\" -type f | wc -l)\" -eq 16
+cd \"\$stage\"
+sha256sum -c MANIFEST.sha256
 
+pkg=\"\$root/tmp/a26-system-wifi-packages-install\"
+rm -rf \"\$pkg\"
+mkdir -m 0700 \"\$pkg\"
+cp wifi-packages/*.apk \"\$pkg/\"
+cp install-wifi-packages.sh \"\$root/tmp/a26-install-wifi-packages.sh\"
+chmod 0700 \"\$root/tmp/a26-install-wifi-packages.sh\"
+\"\$root/busybox.static\" chroot \"\$root\" /bin/sh \
+    /tmp/a26-install-wifi-packages.sh /tmp/a26-system-wifi-packages-install
+
+dest=\"\$root/opt/a26-system\"
+mkdir -p \"\$dest/bin\" \"\$dest/share\" \"\$dest/libexec\"
+for name in a26-system a26-wifi-service a26-wifi-ctl a26-systemctl; do
+    cp \"\$stage/\$name\" \"\$dest/bin/\$name.new\"
+    chown 0:0 \"\$dest/bin/\$name.new\"
+    chmod 0755 \"\$dest/bin/\$name.new\"
+    mv -f \"\$dest/bin/\$name.new\" \"\$dest/bin/\$name\"
+done
+cp \"\$stage/system-app.bgrx\" \"\$dest/share/system-app.bgrx.new\"
+chown 0:0 \"\$dest/share/system-app.bgrx.new\"
+chmod 0644 \"\$dest/share/system-app.bgrx.new\"
+mv -f \"\$dest/share/system-app.bgrx.new\" \"\$dest/share/system-app.bgrx\"
+for name in a26-udhcpc.script a26-wifi-start a26-wifi-stop; do
+    cp \"\$stage/\$name\" \"\$dest/libexec/\$name.new\"
+    chown 0:0 \"\$dest/libexec/\$name.new\"
+    chmod 0755 \"\$dest/libexec/\$name.new\"
+    mv -f \"\$dest/libexec/\$name.new\" \"\$dest/libexec/\$name\"
+done
+cp \"\$stage/a26-wifi-cleanup-android.sh\" \
+    /data/local/tmp/a26-wifi-cleanup-android.sh.new
+chown 0:0 /data/local/tmp/a26-wifi-cleanup-android.sh.new
+chmod 0755 /data/local/tmp/a26-wifi-cleanup-android.sh.new
+mv -f /data/local/tmp/a26-wifi-cleanup-android.sh.new \
+    /data/local/tmp/a26-wifi-cleanup-android.sh
+rm -rf \"\$pkg\" \"\$root/tmp/a26-install-wifi-packages.sh\" \"\$stage\"'"
+
+"$PROJECT_ROOT/scripts/integrate-native-session.sh"
+echo "installed a26-system and native Wi-Fi support (service activation unchanged)"

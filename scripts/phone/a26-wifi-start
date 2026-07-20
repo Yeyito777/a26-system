@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+BB=/bin/busybox
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+STATE=/proc/1/root/data/local/tmp/a26-xorg-control/framework-suspended
+SERVICE=/opt/a26-system/bin/a26-wifi-service
+CTL=/opt/a26-system/bin/a26-wifi-ctl
+LOG=/var/log/a26-wifi-service.log
+
+[ "$($BB cat "$STATE" 2>/dev/null || true)" = 1 ] || {
+    echo "refusing Wi-Fi start outside a suspended native session" >&2
+    exit 20
+}
+[ -z "$($BB pidof system_server 2>/dev/null || true)" ] || exit 21
+[ -z "$($BB pidof surfaceflinger 2>/dev/null || true)" ] || exit 22
+[ -n "$($BB pidof Xorg 2>/dev/null || true)" ] || exit 23
+[ -x "$SERVICE" ] && [ -x "$CTL" ]
+
+if ! "$CTL" status >/dev/null 2>&1; then
+    # A fresh /run means this is the first start of a new native session. Clean
+    # up any exactly matched orphan from an earlier mount namespace before the
+    # new singleton creates its pidfiles.
+    if [ ! -f /run/a26-wifi/service.pid ]; then
+        /opt/a26-system/libexec/a26-wifi-stop
+    else
+        echo "Wi-Fi service pidfile exists but health check failed" >&2
+        exit 24
+    fi
+    : >"$LOG"
+    $BB setsid "$SERVICE" >>"$LOG" 2>&1 </dev/null &
+fi
+
+for _ in $($BB seq 1 100); do
+    if "$CTL" status >/dev/null 2>&1; then
+        exit 0
+    fi
+    $BB sleep 0.1
+done
+
+$BB cat "$LOG" >&2 2>/dev/null || true
+exit 30

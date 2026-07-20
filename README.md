@@ -38,11 +38,12 @@ never produce an app action. The app does not recognize, grab, or close on
 swipes. A26 Shell remains the owner of the global bottom-edge swipe and
 terminates this process when the user closes the app.
 
-Wi-Fi I/O is defined by the root-only protocol in
+Wi-Fi I/O uses the root-only protocol in
 [`docs/wifi-backend-protocol.md`](docs/wifi-backend-protocol.md). The UI only
-talks to `/run/a26-wifi/control.sock` from a worker thread. It contains no
-privileged networking implementation and safely renders the service as
-unavailable when no backend is installed.
+talks to `/run/a26-wifi/control.sock` from a worker thread; the separately built
+`a26-wifi-service` owns `wpa_supplicant`, DHCP, Android's per-interface policy
+routing table, DNS, scanning, and the root-only saved-network store. The UI
+safely renders the service as unavailable when the backend is stopped.
 
 ## Repository layout
 
@@ -51,8 +52,13 @@ assets/                     System icon source and generated BGRX pixels
 scripts/prepare-assets.py   deterministic PNG-to-BGRX conversion
 scripts/check.sh            host format, test, clippy, and debug-build checks
 scripts/build.sh            checked static aarch64 musl release build
-scripts/install.sh          build and ADB installation
-src/                        X11 client, model, renderer, telemetry, IPC, and font
+scripts/install.sh          build, pinned package, and ADB installation
+scripts/integrate-native-session.sh  idempotent device-local lifecycle hooks
+scripts/wifi-start.sh        start the native Wi-Fi supervisor over root ADB
+scripts/wifi-stop.sh         stop native Wi-Fi before restoring Android
+scripts/phone/               DHCP routing/DNS and offline package installers
+src/                        X11 UI, Wi-Fi backend, telemetry, controls, and font
+wifi-packages/               pinned Alpine package sources and SHA-256 manifest
 docs/system-view.png        capture of the separately managed app on-device
 docs/wifi-backend-protocol.md  root-only backend contract and secret rules
 ```
@@ -66,7 +72,8 @@ The PNG is the editable/source asset.
 - Rust with `rustup`
 - `aarch64-linux-musl-gcc`
 - Python 3 with the Pillow version pinned in `requirements-assets.txt`
-- ADB, only for installation
+- ADB, only for installation and lifecycle control
+- `curl` for the pinned Alpine Wi-Fi packages
 - `readelf` (normally supplied by binutils) for the static-link check
 
 Install the pinned asset dependency in an isolated environment if desired:
@@ -92,9 +99,10 @@ Create the static target build:
 scripts/build.sh
 ```
 
-The resulting untracked executable is
-`target/aarch64-unknown-linux-musl/release/a26-system`. The build script adds
-the Rust target when necessary and rejects an ELF containing a dynamic program
+The resulting untracked executables are `a26-system`, `a26-wifi-service`,
+`a26-wifi-ctl`, and `a26-systemctl` under
+`target/aarch64-unknown-linux-musl/release/`. The build script adds the Rust
+target when necessary and rejects an ELF containing a dynamic program
 interpreter.
 
 ## Installation
@@ -112,9 +120,20 @@ hashes, and removes its staging files.
 Within the Linux root filesystem rooted at `/data/local/a26-linux`, it installs:
 
 - `/opt/a26-system/bin/a26-system`
+- `/opt/a26-system/bin/a26-wifi-service`
+- `/opt/a26-system/bin/a26-wifi-ctl`
+- `/opt/a26-system/bin/a26-systemctl`
+- `/opt/a26-system/libexec/a26-udhcpc.script`
+- `/opt/a26-system/libexec/a26-wifi-start`
+- `/opt/a26-system/libexec/a26-wifi-stop`
 - `/opt/a26-system/share/system-app.bgrx`
 
-Running the installer is the only repository workflow that contacts a device.
+It also installs the pinned Alpine 3.24 `wpa_supplicant`, `iw`, and required
+libraries from verified APKs. Installation does **not** activate or restart the
+backend. Instead, the idempotent integration step starts native Wi-Fi only from
+the already-suspended Xorg session and stops it device-locally before Android's
+graphics and Java framework are resumed. `scripts/wifi-start.sh` and
+`scripts/wifi-stop.sh` remain explicit host-side diagnostic controls.
 
 ## Runtime and integration assumptions
 
@@ -135,22 +154,30 @@ Running the installer is the only repository workflow that contacts a device.
 - The window manager retains the global bottom-swipe gesture, kills or closes
   `a26-system`, and then reveals the launcher. No such policy is implemented
   by this client.
-- A separately managed root service may expose `/run/a26-wifi/control.sock`
-  according to the documented version-1 protocol. The directory is expected
-  to be root-owned mode `0700`, the socket root-owned mode `0600`, and the
-  service must enforce UID 0 with `SO_PEERCRED`. Without it, metrics and volume
-  continue to work and the Wi-Fi view reports that the service is unavailable.
+- `a26-wifi-service` exposes `/run/a26-wifi/control.sock` according to the
+  documented version-1 protocol. The directory is root-owned mode `0700`, the
+  socket root-owned mode `0600`, and the service enforces UID 0 with
+  `SO_PEERCRED`. Without it, metrics and volume continue to work and the Wi-Fi
+  view reports that the service is unavailable.
 - Passwords are accepted only through the on-screen keyboard. They are never
-  accepted through argv or environment variables, never logged or persisted,
-  never returned by status, always masked on screen, serialized directly to
-  the local socket, and held in zeroizing non-cloneable buffers only while
-  entry or request delivery requires them.
+  accepted through argv or environment variables, never logged or returned by
+  status, always masked on screen, serialized directly to the local socket,
+  and held in zeroizing buffers. For WPA2 Personal, the backend derives the
+  256-bit PSK into a tmpfs-backed supplicant configuration and, only after
+  association to the exact requested SSID succeeds, atomically persists that derived key in
+  `/var/lib/a26-wifi/networks.json`, owned by root with mode `0600`; it never
+  persists the original passphrase. WPA3-SAE and enterprise authentication are
+  intentionally rejected by the initial backend rather than handled unsafely.
 - Launcher integration can use the installed BGRX icon directly; the app does
   not load the icon while rendering the System scene.
 
-No Wi-Fi backend, service definition, privileged networking implementation, or
-window-manager configuration is installed by this repository. Integration
-policy remains the responsibility of the surrounding phone shell.
+The service derives Android's Wi-Fi policy table as `1000 + wlan0 ifindex`,
+keeps a foreground renewing `udhcpc` child, installs a native-session-only
+priority-`10550` lookup rule for root-run Linux clients, writes DNS directly
+into the rootfs-mounted resolver file, and owns its exact supplicant and DHCP PIDs. The
+native-session cleanup runs both from the Xorg supervisor and from Android's
+restore script, removing addresses, routes, neighbors, runtime sockets, and
+owned processes before Android Wi-Fi is allowed to return.
 
 ## License
 

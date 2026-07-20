@@ -182,9 +182,10 @@ impl AppModel {
                 self.busy = false;
                 match result {
                     Ok(status) => {
+                        let connected = matches!(status.state, LinkState::Connected { .. });
                         self.set_status(status);
                         self.reconcile_connected_network();
-                        self.notice = Some("CONNECTED");
+                        self.notice = Some(if connected { "CONNECTED" } else { "CONNECTING" });
                     }
                     Err(error) => {
                         if let Some(status) = &mut self.wifi_status {
@@ -238,8 +239,8 @@ impl AppModel {
         if network.connected {
             return Vec::new();
         }
-        if network.security == Security::Enterprise {
-            self.notice = Some("ENTERPRISE WI-FI IS NOT SUPPORTED");
+        if matches!(network.security, Security::Enterprise | Security::Wpa3) {
+            self.notice = Some("THIS WI-FI SECURITY IS NOT SUPPORTED");
             return Vec::new();
         }
 
@@ -408,7 +409,7 @@ mod tests {
     fn protected_network_requires_valid_zeroizing_entry_before_connect() {
         let mut model = AppModel {
             view: View::Wifi,
-            networks: vec![network("A26 Lab", 90, Security::Wpa3)],
+            networks: vec![network("A26 Lab", 90, Security::Wpa2)],
             ..AppModel::default()
         };
         assert!(model.handle(Action::SelectNetwork(0)).is_empty());
@@ -439,6 +440,18 @@ mod tests {
             }
             _ => panic!("expected password connect request"),
         }
+    }
+
+    #[test]
+    fn unsupported_network_does_not_open_password_dialog() {
+        let mut model = AppModel {
+            view: View::Wifi,
+            networks: vec![network("Future", 90, Security::Wpa3)],
+            ..AppModel::default()
+        };
+        assert!(model.handle(Action::SelectNetwork(0)).is_empty());
+        assert!(model.password_dialog.is_none());
+        assert_eq!(model.notice, Some("THIS WI-FI SECURITY IS NOT SUPPORTED"));
     }
 
     #[test]

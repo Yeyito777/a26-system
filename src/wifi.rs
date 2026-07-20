@@ -1,6 +1,7 @@
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::Shutdown;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -23,36 +24,55 @@ const MAX_SSID_BYTES: usize = 32;
 /// It deliberately has no `Clone`, `Display`, or serialization implementation.
 /// Its `Debug` implementation is always redacted and its allocation is wiped
 /// when moved out of the UI model and eventually dropped by the worker.
-#[derive(Default, Zeroize, ZeroizeOnDrop)]
-pub struct SecretString(String);
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SecretString {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl Default for SecretString {
+    fn default() -> Self {
+        Self {
+            bytes: [0; 64],
+            len: 0,
+        }
+    }
+}
 
 impl SecretString {
     pub fn push(&mut self, character: char) -> bool {
-        if !character.is_ascii() || !matches!(character, ' '..='~') || self.0.len() >= 64 {
+        if !character.is_ascii() || !matches!(character, ' '..='~') || self.len >= self.bytes.len()
+        {
             return false;
         }
-        self.0.push(character);
+        self.bytes[self.len] = character as u8;
+        self.len += 1;
         true
     }
 
     pub fn pop(&mut self) {
-        self.0.pop();
+        if self.len > 0 {
+            self.len -= 1;
+            self.bytes[self.len] = 0;
+        }
     }
 
     pub fn clear(&mut self) {
-        self.0.zeroize();
+        self.bytes.zeroize();
+        self.len = 0;
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.len
     }
 
     pub fn is_valid_wpa_psk(&self) -> bool {
-        valid_wpa_psk(&self.0)
+        valid_wpa_psk(self.expose_for_socket())
     }
 
     fn expose_for_socket(&self) -> &str {
-        &self.0
+        // `push` accepts printable ASCII only, so this prefix is always UTF-8.
+        std::str::from_utf8(&self.bytes[..self.len]).expect("ASCII secret buffer")
     }
 }
 
@@ -287,6 +307,12 @@ fn disconnect(socket: &Path, request_id: u64) -> Result<WifiStatus, WifiError> {
 
 fn transact<T: Serialize>(socket: &Path, request_id: u64, request: &T) -> Result<Value, WifiError> {
     let mut stream = UnixStream::connect(socket).map_err(map_io_error)?;
+    let uid = peer_uid(&stream).map_err(map_io_error)?;
+    // SAFETY: geteuid has no pointer arguments or memory-safety preconditions.
+    let own_uid = unsafe { libc::geteuid() };
+    if uid != 0 && !(cfg!(test) && uid == own_uid) {
+        return Err(WifiError::Unavailable);
+    }
     stream
         .set_read_timeout(Some(IO_TIMEOUT))
         .map_err(map_io_error)?;
@@ -317,6 +343,30 @@ fn transact<T: Serialize>(socket: &Path, request_id: u64, request: &T) -> Result
         Some(false) => Err(parse_rejection(&document)),
         None => Err(WifiError::Protocol),
     }
+}
+
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the output storage is valid for the supplied length and the
+    // connected Unix-stream descriptor remains live during getsockopt.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if length as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(std::io::Error::other("unexpected peer credential length"));
+    }
+    // SAFETY: successful getsockopt initialized the complete ucred value.
+    Ok(unsafe { credentials.assume_init() }.uid)
 }
 
 fn map_io_error(error: std::io::Error) -> WifiError {

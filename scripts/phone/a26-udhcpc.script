@@ -1,0 +1,99 @@
+#!/bin/sh
+set -uf
+
+interface=${interface:-wlan0}
+BB=/bin/busybox
+IP=/sbin/ip
+ifindex=$($BB cat "/sys/class/net/$interface/ifindex")
+table=$((1000 + ifindex))
+rule_priority=10550
+
+valid_ipv4() {
+    value=$1
+    old_ifs=$IFS
+    IFS=.
+    set -- $value
+    IFS=$old_ifs
+    [ "$#" -eq 4 ] || return 1
+    for octet in "$@"; do
+        case "$octet" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$octet" -le 255 ] || return 1
+    done
+}
+
+clear_native_rule() {
+    while $IP rule del priority "$rule_priority" 2>/dev/null; do :; done
+}
+
+clear_network() {
+    $IP -4 addr flush dev "$interface" 2>/dev/null || true
+    clear_native_rule
+    $IP route flush table "$table" 2>/dev/null || true
+    $IP neigh flush dev "$interface" 2>/dev/null || true
+}
+
+write_dns() {
+    : > /etc/resolv.conf
+    for server in ${dns:-}; do
+        case "$server" in
+            *[!0-9a-fA-F:.]*) continue ;;
+        esac
+        valid_ipv4 "$server" || case "$server" in *:*) : ;; *) continue ;; esac
+        printf 'nameserver %s\n' "$server" >> /etc/resolv.conf
+    done
+    if [ ! -s /etc/resolv.conf ]; then
+        printf '%s\n' 'nameserver 1.1.1.1' 'nameserver 8.8.8.8' >> /etc/resolv.conf
+    fi
+    printf '%s\n' 'options timeout:2 attempts:2' >> /etc/resolv.conf
+    $BB chmod 0644 /etc/resolv.conf
+}
+
+configure_network() {
+    valid_ipv4 "${ip:-}" || return 1
+    case "${mask:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$mask" -le 32 ] || return 1
+    if [ -n "${broadcast:-}" ]; then valid_ipv4 "$broadcast" || return 1; fi
+    $IP link set dev "$interface" up
+    $IP -4 addr flush dev "$interface"
+    $IP -4 addr add "$ip/$mask" dev "$interface" ${broadcast:+broadcast "$broadcast"}
+    connected=$($IP -4 route show dev "$interface" scope link | $BB awk 'NR == 1 { print $1 }')
+    [ -n "$connected" ]
+    $IP route replace table "$table" "$connected" dev "$interface" scope link src "$ip"
+    clear_native_rule
+    $IP rule add priority "$rule_priority" lookup "$table"
+
+    gateway=
+    set -- ${router:-}
+    if [ "$#" -gt 0 ]; then
+        gateway=$1
+    elif [ -n "${staticroutes:-}" ]; then
+        set -- $staticroutes
+        while [ "$#" -ge 2 ]; do
+            case "$1" in
+                0.0.0.0/0|default) gateway=$2; break ;;
+            esac
+            shift 2
+        done
+    fi
+    if [ -n "$gateway" ]; then
+        valid_ipv4 "$gateway" || return 1
+        $IP route replace table "$table" default via "$gateway" dev "$interface"
+    fi
+    write_dns
+}
+
+case "${1:-}" in
+    deconfig)
+        clear_network
+        ;;
+    bound|renew)
+        configure_network
+        ;;
+    leasefail|nak)
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+
+exit 0

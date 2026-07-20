@@ -2,9 +2,9 @@
 
 `a26-system` is a presentation-only client, even when the launcher runs it as
 UID 0 to access this root-only endpoint. It does not invoke `iw`, `wpa_cli`,
-NetworkManager, or any other privileged networking tool. A separately
-installed, root-owned backend is responsible for scanning and link management.
-This repository intentionally does not provide that backend.
+NetworkManager, or any other privileged networking tool. The separately built
+and installed `a26-wifi-service` binary in this repository is responsible for
+scanning, saved networks, association, DHCP, policy routing, and DNS.
 
 ## Transport and access control
 
@@ -98,8 +98,8 @@ Result:
 ```
 
 `security` is `open`, `wpa2`, `wpa3`, or `enterprise`. The current UI labels
-enterprise networks as unsupported. `requires_password` is false for open
-networks and may also be false when the backend has a credential in its own
+WPA3 and enterprise networks as unsupported. `requires_password` is false for
+open networks and may also be false when the backend has a credential in its own
 root-only credential store. A scan result never describes or returns that
 credential. The UI de-duplicates SSIDs and sorts connected first, then by
 descending signal and SSID.
@@ -153,9 +153,22 @@ Success returns the same result shape as `status`, normally `disconnected`.
 ## Backend implementation boundary
 
 Backend policy—radio control, saved-network handling, association timeouts,
-DHCP, routing, and DNS—is outside this UI process. The backend should serialize
-mutating operations, return `busy` rather than queueing unbounded work, merge
-multiple BSSIDs for one SSID, and use fixed error codes. The UI's worker thread
+DHCP, routing, and DNS—is outside the UI process. `a26-wifi-service` serializes
+requests, merges duplicate SSIDs, acknowledges association transitions without
+waiting for DHCP, and reports only fixed error codes. The UI's worker thread
 keeps all socket waits off the X11 event loop, but its timeout is not a
-network-association deadline; the backend is expected to acknowledge a
-transition quickly and expose progress through `status`.
+network-association deadline; progress is exposed through `status`.
+
+The initial backend supports open and WPA2-Personal networks. It converts an
+8–63 byte WPA2 passphrase into the standard PBKDF2-derived 256-bit PSK and wipes
+the submitted passphrase. The candidate key remains only in memory and a
+temporary root-only supplicant configuration until the supplicant reports
+`COMPLETED` for the exact requested SSID; only then is the derived key
+atomically committed to the root-owned mode-`0600` store. WPA3-SAE and
+enterprise authentication are reported as `unsupported` until they can be
+implemented without retaining a plaintext credential.
+
+Duplicate BSSIDs are aggregated conservatively. Conflicting protected/open
+observations, OWE, DPP, and unknown security flags are omitted rather than
+treated as open. A saved key is reusable only when its security class matches
+the current scan.

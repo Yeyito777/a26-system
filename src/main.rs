@@ -75,6 +75,7 @@ impl TapTracker {
 
 fn main() -> Result<(), Box<dyn Error>> {
     parse_arguments()?;
+    disable_process_dumps()?;
 
     let (conn, screen_number) = RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_number];
@@ -195,6 +196,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         thread::sleep(EVENT_LOOP_SLEEP);
     }
 
+    Ok(())
+}
+
+fn disable_process_dumps() -> std::io::Result<()> {
+    let limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: setrlimit reads the complete local rlimit value; prctl is called
+    // with PR_SET_DUMPABLE and scalar arguments only.
+    if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) } != 0
+        || unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(())
 }
 
