@@ -1,9 +1,9 @@
 # a26-system
 
 `a26-system` is a standalone Rust/X11 application containing the System scene
-from the A26 shell. It creates a conventional, window-manager-controlled
-1080x2340 window named `a26-system`; it is deliberately **not** an
-override-redirect window.
+from the A26 shell plus a touch-first Wi-Fi configuration view. It creates a
+conventional, window-manager-controlled 1080x2340 window named `a26-system`; it
+is deliberately **not** an override-redirect window.
 
 ![A26 System app](docs/system-view.png)
 
@@ -19,14 +19,30 @@ The view keeps the original navy, mint, blue, and white card layout and shows:
   control cards; and
 - the bottom close instruction and gesture indicator.
 
+The original System metrics view remains the default. Its large `WI-FI` target
+opens a phone-sized connection view with current link state, a disconnect
+control, manual refresh, signal/security metadata, deterministic five-row scan
+pages, and large whole-row SSID targets. Protected networks open a masked
+password view with a four-row lowercase/shift/symbol on-screen keyboard. The
+entry accepts WPA Personal passphrases of 8-63 printable ASCII bytes or a
+64-digit hexadecimal key.
+
 Telemetry and the displayed logical volume are refreshed once per second. The
 volume is read by connecting to `/run/a26-shell/control.sock`, sending
 `state\n`, and parsing the shell's JSON response. It is rendered as `--` when
 the socket cannot be reached, times out, or returns an invalid response.
 
-The program has no touch or navigation handling. The window manager is
-expected to own the global bottom-edge swipe and terminate this process when
-the user closes the app.
+Core X11 pointer events, including touch-to-pointer emulation, drive only
+tap-sized controls. A 32-pixel movement cancels a tap, and the bottom 170 pixels
+never produce an app action. The app does not recognize, grab, or close on
+swipes. A26 Shell remains the owner of the global bottom-edge swipe and
+terminates this process when the user closes the app.
+
+Wi-Fi I/O is defined by the root-only protocol in
+[`docs/wifi-backend-protocol.md`](docs/wifi-backend-protocol.md). The UI only
+talks to `/run/a26-wifi/control.sock` from a worker thread. It contains no
+privileged networking implementation and safely renders the service as
+unavailable when no backend is installed.
 
 ## Repository layout
 
@@ -36,8 +52,9 @@ scripts/prepare-assets.py   deterministic PNG-to-BGRX conversion
 scripts/check.sh            host format, test, clippy, and debug-build checks
 scripts/build.sh            checked static aarch64 musl release build
 scripts/install.sh          build and ADB installation
-src/                        X11 client, renderer, telemetry, IPC, and font
+src/                        X11 client, model, renderer, telemetry, IPC, and font
 docs/system-view.png        capture of the separately managed app on-device
+docs/wifi-backend-protocol.md  root-only backend contract and secret rules
 ```
 
 `assets/system-app.bgrx` is exactly 220x220 pixels, four bytes per pixel in
@@ -63,6 +80,11 @@ Run all native host checks:
 ```sh
 scripts/check.sh
 ```
+
+The deterministic unit suite covers touch/drag discrimination, reserved shell
+gesture space, hit targets, keyboard modes, password validation/redaction,
+scan sorting/de-duplication/paging, model transitions, protocol bounds and
+error mapping, and exact Unix-socket request/response behavior.
 
 Create the static target build:
 
@@ -113,12 +135,22 @@ Running the installer is the only repository workflow that contacts a device.
 - The window manager retains the global bottom-swipe gesture, kills or closes
   `a26-system`, and then reveals the launcher. No such policy is implemented
   by this client.
+- A separately managed root service may expose `/run/a26-wifi/control.sock`
+  according to the documented version-1 protocol. The directory is expected
+  to be root-owned mode `0700`, the socket root-owned mode `0600`, and the
+  service must enforce UID 0 with `SO_PEERCRED`. Without it, metrics and volume
+  continue to work and the Wi-Fi view reports that the service is unavailable.
+- Passwords are accepted only through the on-screen keyboard. They are never
+  accepted through argv or environment variables, never logged or persisted,
+  never returned by status, always masked on screen, serialized directly to
+  the local socket, and held in zeroizing non-cloneable buffers only while
+  entry or request delivery requires them.
 - Launcher integration can use the installed BGRX icon directly; the app does
   not load the icon while rendering the System scene.
 
-No service definition or window-manager configuration is installed by this
-repository. Integration policy remains the responsibility of the surrounding
-phone shell.
+No Wi-Fi backend, service definition, privileged networking implementation, or
+window-manager configuration is installed by this repository. Integration
+policy remains the responsibility of the surrounding phone shell.
 
 ## License
 
