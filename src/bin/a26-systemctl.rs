@@ -14,8 +14,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .next()
         .ok_or("usage: a26-systemctl wifi|system|tap X Y")?;
     let (x, y) = match command.as_str() {
-        "wifi" if arguments.next().is_none() => (900, 120),
-        "system" if arguments.next().is_none() => (900, 120),
+        "wifi" if arguments.next().is_none() => (430, 120),
+        "system" if arguments.next().is_none() => (170, 120),
         "tap" => {
             let x = arguments.next().ok_or("tap requires X Y")?.parse::<i16>()?;
             let y = arguments.next().ok_or("tap requires X Y")?.parse::<i16>()?;

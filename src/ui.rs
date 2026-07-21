@@ -19,8 +19,8 @@ const ACCENT_2: u32 = 0x60a5fa;
 const WARNING: u32 = 0xfbbf24;
 const DANGER: u32 = 0xfb7185;
 
-const WIFI_BUTTON: UiRect = UiRect::new(735, 75, 290, 110);
-const SYSTEM_BUTTON: UiRect = UiRect::new(735, 75, 290, 110);
+const SYSTEM_TAB: UiRect = UiRect::new(55, 65, 250, 120);
+const WIFI_TAB: UiRect = UiRect::new(325, 65, 220, 120);
 const STATUS_ACTION: UiRect = UiRect::new(735, 285, 270, 120);
 const REFRESH_BUTTON: UiRect = UiRect::new(765, 495, 240, 105);
 const NETWORK_X: i16 = 55;
@@ -120,7 +120,6 @@ impl Renderer {
                 View::Wifi => self.render_wifi(conn, app)?,
             }
         }
-        self.footer(conn)?;
         conn.flush()?;
         Ok(())
     }
@@ -141,9 +140,9 @@ impl Renderer {
         }
 
         match app.view {
-            View::System => WIFI_BUTTON.contains(x, y).then_some(Action::ShowWifi),
+            View::System => WIFI_TAB.contains(x, y).then_some(Action::ShowWifi),
             View::Wifi => {
-                if SYSTEM_BUTTON.contains(x, y) {
+                if SYSTEM_TAB.contains(x, y) {
                     return Some(Action::ShowSystem);
                 }
                 if REFRESH_BUTTON.contains(x, y) {
@@ -181,8 +180,7 @@ impl Renderer {
         system: &SystemInfo,
         volume: Option<u8>,
     ) -> Result<(), Box<dyn Error>> {
-        self.text(conn, "SYSTEM", 70, 100, 10, ACCENT)?;
-        self.button(conn, WIFI_BUTTON, "WI-FI", false, true)?;
+        self.navigation(conn, View::System)?;
         let volume = volume.map_or_else(|| "--".into(), |value| value.to_string());
         self.text(conn, &format!("VOLUME {volume}"), 70, 260, 5, MUTED)?;
 
@@ -219,8 +217,7 @@ impl Renderer {
     }
 
     fn render_wifi<C: Connection>(&self, conn: &C, app: &AppModel) -> Result<(), Box<dyn Error>> {
-        self.text(conn, "WI-FI", 55, 95, 9, ACCENT)?;
-        self.button(conn, SYSTEM_BUTTON, "SYSTEM", false, true)?;
+        self.navigation(conn, View::Wifi)?;
 
         self.panel(conn, UiRect::new(55, 235, 970, 225), ACCENT)?;
         self.text(conn, "CONNECTION", 85, 270, 3, MUTED)?;
@@ -274,6 +271,33 @@ impl Renderer {
             )?;
         }
         Ok(())
+    }
+
+    fn navigation<C: Connection>(&self, conn: &C, active: View) -> Result<(), Box<dyn Error>> {
+        let system_color = if active == View::System {
+            ACCENT
+        } else {
+            MUTED
+        };
+        let wifi_color = if active == View::Wifi { ACCENT } else { MUTED };
+        self.text(conn, "SYSTEM", 70, 100, 6, system_color)?;
+        self.text(conn, "WI-FI", 345, 100, 6, wifi_color)?;
+
+        let active_tab = if active == View::System {
+            SYSTEM_TAB
+        } else {
+            WIFI_TAB
+        };
+        self.fill(
+            conn,
+            ACCENT,
+            UiRect::new(active_tab.x + 15, 171, active_tab.width - 30, 4).x11(),
+        )?;
+        self.fill(
+            conn,
+            BG_CARD,
+            UiRect::new(55, 200, self.width.saturating_sub(110), 1).x11(),
+        )
     }
 
     fn render_password<C: Connection>(
@@ -500,20 +524,6 @@ impl Renderer {
         let glyph_height = 7_u16.saturating_mul(scale);
         let y = bounds.y + (bounds.height.saturating_sub(glyph_height) / 2) as i16;
         self.text(conn, label, x, y, scale, foreground)
-    }
-
-    fn footer<C: Connection>(&self, conn: &C) -> Result<(), Box<dyn Error>> {
-        self.center_text(conn, "SWIPE UP FROM BELOW TO CLOSE", 2150, 4, MUTED)?;
-        self.fill(
-            conn,
-            FG,
-            Rectangle {
-                x: self.width.saturating_div(2).saturating_sub(145) as i16,
-                y: self.height.saturating_sub(55) as i16,
-                width: 290,
-                height: 14,
-            },
-        )
     }
 
     fn center_text<C: Connection>(
@@ -767,7 +777,8 @@ mod tests {
     fn system_and_wifi_hit_targets_are_large_and_deterministic() {
         let renderer = Renderer::new(1, 2, 1080, 2340);
         let mut app = AppModel::default();
-        assert_eq!(renderer.action_at(&app, 900, 120), Some(Action::ShowWifi));
+        assert_eq!(renderer.action_at(&app, 430, 120), Some(Action::ShowWifi));
+        assert_eq!(renderer.action_at(&app, 170, 120), None);
         assert_eq!(renderer.action_at(&app, 540, 2290), None);
 
         app.view = View::Wifi;
@@ -782,7 +793,8 @@ mod tests {
             renderer.action_at(&app, 500, NETWORK_Y + 100),
             Some(Action::SelectNetwork(0))
         );
-        assert_eq!(renderer.action_at(&app, 900, 120), Some(Action::ShowSystem));
+        assert_eq!(renderer.action_at(&app, 170, 120), Some(Action::ShowSystem));
+        assert_eq!(renderer.action_at(&app, 430, 120), None);
     }
 
     #[test]
