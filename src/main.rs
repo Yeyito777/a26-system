@@ -106,22 +106,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     let protocols = configure_window_metadata(&conn, window)?;
     let gc = conn.generate_id()?;
     conn.create_gc(gc, window, &CreateGCAux::new().graphics_exposures(0))?;
-
-    // Mapping a normal window lets the window manager intercept MapRequest and
-    // apply its own fullscreen placement policy.
-    conn.map_window(window)?;
-    conn.flush()?;
-
-    let mut renderer = Renderer::new(window, gc, REQUESTED_WIDTH, REQUESTED_HEIGHT);
+    let mut back_buffer = conn.generate_id()?;
+    conn.create_pixmap(
+        screen.root_depth,
+        back_buffer,
+        window,
+        REQUESTED_WIDTH,
+        REQUESTED_HEIGHT,
+    )?;
+    let mut renderer = Renderer::new(window, back_buffer, gc, REQUESTED_WIDTH, REQUESTED_HEIGHT);
     let mut system = SystemInfo::collect();
     let mut volume = control::read_volume();
     let mut app = AppModel::default();
     let wifi_worker = WifiWorker::spawn();
     let mut tap = None;
-    let mut redraw = true;
+    let mut redraw = false;
     let mut running = true;
     let mut next_refresh = Instant::now() + REFRESH_INTERVAL;
     let mut next_wifi_status = Instant::now() + WIFI_STATUS_INTERVAL;
+
+    // Draw the first complete frame while the window is still unmapped. Moon
+    // can then reveal this fast-starting app directly instead of exposing an
+    // empty X11 background for one scanout.
+    renderer.render(&conn, &system, volume, &app)?;
+    conn.map_window(window)?;
+    conn.flush()?;
 
     while running {
         while let Some(event) = wifi_worker.try_recv() {
@@ -135,7 +144,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     redraw = true;
                 }
                 Event::ConfigureNotify(event) if event.window == window => {
-                    renderer.resize(event.width, event.height);
+                    if renderer.size() != (event.width, event.height) {
+                        let replacement = conn.generate_id()?;
+                        conn.create_pixmap(
+                            screen.root_depth,
+                            replacement,
+                            window,
+                            event.width,
+                            event.height,
+                        )?;
+                        renderer.resize(replacement, event.width, event.height);
+                        conn.free_pixmap(back_buffer)?;
+                        back_buffer = replacement;
+                    }
                     tap = None;
                     redraw = true;
                 }
@@ -196,6 +217,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         thread::sleep(EVENT_LOOP_SLEEP);
     }
 
+    let _ = conn.free_pixmap(back_buffer);
+    let _ = conn.free_gc(gc);
+    let _ = conn.destroy_window(window);
+    let _ = conn.flush();
     Ok(())
 }
 

@@ -79,24 +79,31 @@ struct KeySpec {
 
 pub struct Renderer {
     window: Window,
+    back_buffer: u32,
     gc: Gcontext,
     width: u16,
     height: u16,
 }
 
 impl Renderer {
-    pub fn new(window: Window, gc: Gcontext, width: u16, height: u16) -> Self {
+    pub fn new(window: Window, back_buffer: u32, gc: Gcontext, width: u16, height: u16) -> Self {
         Self {
             window,
+            back_buffer,
             gc,
             width,
             height,
         }
     }
 
-    pub fn resize(&mut self, width: u16, height: u16) {
+    pub fn resize(&mut self, back_buffer: u32, width: u16, height: u16) {
+        self.back_buffer = back_buffer;
         self.width = width;
         self.height = height;
+    }
+
+    pub fn size(&self) -> (u16, u16) {
+        (self.width, self.height)
     }
 
     pub fn height(&self) -> u16 {
@@ -120,7 +127,7 @@ impl Renderer {
                 View::Wifi => self.render_wifi(conn, app)?,
             }
         }
-        conn.flush()?;
+        self.present(conn)?;
         Ok(())
     }
 
@@ -551,7 +558,7 @@ impl Renderer {
         let rectangles = font::rectangles(text, x, y, scale);
         conn.change_gc(self.gc, &ChangeGCAux::new().foreground(color))?;
         if !rectangles.is_empty() {
-            conn.poly_fill_rectangle(self.window, self.gc, &rectangles)?;
+            conn.poly_fill_rectangle(self.back_buffer, self.gc, &rectangles)?;
         }
         Ok(())
     }
@@ -563,7 +570,26 @@ impl Renderer {
         rectangle: Rectangle,
     ) -> Result<(), Box<dyn Error>> {
         conn.change_gc(self.gc, &ChangeGCAux::new().foreground(color))?;
-        conn.poly_fill_rectangle(self.window, self.gc, &[rectangle])?;
+        conn.poly_fill_rectangle(self.back_buffer, self.gc, &[rectangle])?;
+        Ok(())
+    }
+
+    fn present<C: Connection>(&self, conn: &C) -> Result<(), Box<dyn Error>> {
+        // The panel scans out at 120 Hz. Assemble each complete one-second
+        // metrics frame off-screen so it becomes visible in one copy rather
+        // than exposing the background and each card as separate repaints.
+        conn.copy_area(
+            self.back_buffer,
+            self.window,
+            self.gc,
+            0,
+            0,
+            0,
+            0,
+            self.width,
+            self.height,
+        )?;
+        conn.flush()?;
         Ok(())
     }
 }
@@ -775,7 +801,7 @@ mod tests {
 
     #[test]
     fn system_and_wifi_hit_targets_are_large_and_deterministic() {
-        let renderer = Renderer::new(1, 2, 1080, 2340);
+        let renderer = Renderer::new(1, 3, 2, 1080, 2340);
         let mut app = AppModel::default();
         assert_eq!(renderer.action_at(&app, 430, 120), Some(Action::ShowWifi));
         assert_eq!(renderer.action_at(&app, 170, 120), None);
@@ -799,7 +825,7 @@ mod tests {
 
     #[test]
     fn password_keyboard_mapping_matches_rendered_keys() {
-        let renderer = Renderer::new(1, 2, 1080, 2340);
+        let renderer = Renderer::new(1, 3, 2, 1080, 2340);
         let mut app = AppModel::default();
         app.networks.push(WifiNetwork {
             ssid: "secure".into(),
