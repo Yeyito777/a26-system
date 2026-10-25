@@ -14,7 +14,7 @@ use crate::gfx::{Canvas, Path, RectF, Rgb};
 use crate::metrics::{SystemInfo, usage_text};
 use crate::present::Presenter;
 use crate::text::{self, Weight};
-use crate::wifi::{LinkState, Security, WifiNetwork};
+use crate::wifi::{LinkState, WifiNetwork};
 
 pub const BG: Rgb = 0x000000;
 const CELL: Rgb = 0x1c1c1e;
@@ -962,7 +962,7 @@ fn draw_wifi(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) {
 fn network_row(canvas: &mut Canvas, rect: RectF, network: &WifiNetwork, busy: bool) {
     let cy = rect.y + rect.h / 2.0;
     let right = rect.x + rect.w - 44.0;
-    let unsupported = matches!(network.security, Security::Enterprise | Security::Wpa3);
+    let unsupported = !network.joinable();
     let mut name_x = TEXT_X;
     if network.connected {
         checkmark(canvas, TEXT_X + 14.0, cy);

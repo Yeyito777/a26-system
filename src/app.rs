@@ -248,7 +248,7 @@ impl AppModel {
         if network.connected {
             return Vec::new();
         }
-        if matches!(network.security, Security::Enterprise | Security::Wpa3) {
+        if !network.joinable() {
             self.notice = Some("This network’s security is not supported");
             return Vec::new();
         }
@@ -456,6 +456,35 @@ mod tests {
         let mut model = AppModel {
             view: View::Wifi,
             networks: vec![network("Future", 90, Security::Wpa3)],
+            ..AppModel::default()
+        };
+        assert!(model.handle(Action::SelectNetwork(0)).is_empty());
+        assert!(model.password_dialog.is_none());
+        assert_eq!(
+            model.notice,
+            Some("This network’s security is not supported")
+        );
+    }
+
+    #[test]
+    fn saved_enterprise_network_connects_without_a_password() {
+        let mut saved = network("UofT", 80, Security::Enterprise);
+        saved.requires_password = false;
+        let mut model = AppModel {
+            view: View::Wifi,
+            networks: vec![saved],
+            ..AppModel::default()
+        };
+        let requests = model.handle(Action::SelectNetwork(0));
+        assert!(model.password_dialog.is_none());
+        assert!(matches!(
+            requests.as_slice(),
+            [WifiRequest::Connect { ssid, password: None }] if ssid == "UofT"
+        ));
+
+        let mut model = AppModel {
+            view: View::Wifi,
+            networks: vec![network("eduroam", 80, Security::Enterprise)],
             ..AppModel::default()
         };
         assert!(model.handle(Action::SelectNetwork(0)).is_empty());

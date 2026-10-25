@@ -117,6 +117,20 @@ pub struct WifiNetwork {
     pub connected: bool,
 }
 
+impl WifiNetwork {
+    /// Whether this UI can join the network. WPA3 cannot be joined, and an
+    /// enterprise network only once the backend holds its credential (it
+    /// then reports `requires_password: false`): enterprise provisioning
+    /// needs an identity, which this UI does not ask for.
+    pub fn joinable(&self) -> bool {
+        match self.security {
+            Security::Wpa3 => false,
+            Security::Enterprise => !self.requires_password,
+            _ => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkState {
     Disconnected,
