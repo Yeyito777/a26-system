@@ -19,6 +19,8 @@ pub struct SystemInfo {
     pub gpu_usage: Option<u8>,
     pub storage_used: String,
     pub storage_free: String,
+    /// Used fraction of the root filesystem, for the storage bar.
+    pub storage_fraction: Option<f32>,
     previous_cpu: Option<CpuTimes>,
 }
 
@@ -30,7 +32,8 @@ impl SystemInfo {
             .ok()
             .and_then(|text| parse_total_memory(&text))
             .unwrap_or_else(|| "UNKNOWN".into());
-        let (storage_used, storage_free) = storage_usage("/")
+        let usage = storage_usage("/");
+        let (storage_used, storage_free) = usage
             .map(|(used, free)| (format_bytes(used), format_bytes(free)))
             .unwrap_or_else(|| ("UNKNOWN".into(), "UNKNOWN".into()));
 
@@ -42,6 +45,7 @@ impl SystemInfo {
             gpu_usage: read_gpu_usage(),
             storage_used,
             storage_free,
+            storage_fraction: usage.and_then(|(used, free)| used_fraction(used, free)),
             previous_cpu: read_cpu_times(),
         }
     }
@@ -57,6 +61,7 @@ impl SystemInfo {
         if let Some((used, free)) = storage_usage("/") {
             self.storage_used = format_bytes(used);
             self.storage_free = format_bytes(free);
+            self.storage_fraction = used_fraction(used, free);
         }
     }
 }
@@ -69,7 +74,7 @@ fn parse_total_memory(meminfo: &str) -> Option<String> {
     meminfo.lines().find_map(|line| {
         let value = line.strip_prefix("MemTotal:")?.split_whitespace().next()?;
         let kib: u64 = value.parse().ok()?;
-        Some(format!("{} MB", kib / 1024))
+        Some(format!("{:.1} GB", kib as f64 / (1024.0 * 1024.0)))
     })
 }
 
@@ -134,6 +139,11 @@ fn storage_usage(path: &str) -> Option<(u64, u64)> {
     Some((total.saturating_sub(free), available))
 }
 
+fn used_fraction(used: u64, free: u64) -> Option<f32> {
+    let total = used.saturating_add(free);
+    (total > 0).then(|| used as f32 / total as f32)
+}
+
 fn format_bytes(bytes: u64) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     format!("{:.1} GB", bytes as f64 / GIB)
@@ -170,7 +180,7 @@ mod tests {
     fn memory_and_storage_values_are_human_readable() {
         assert_eq!(
             parse_total_memory("MemTotal:       6144000 kB\n"),
-            Some("6000 MB".into())
+            Some("5.9 GB".into())
         );
         assert_eq!(format_bytes(16 * 1024 * 1024 * 1024), "16.0 GB");
     }

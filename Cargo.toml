@@ -7,6 +7,7 @@ description = "Standalone X11 system-information view for the Samsung Galaxy A26
 license = "MIT"
 
 [dependencies]
+fontdue = { version = "0.9", default-features = false, features = ["std", "simd"] }
 libc = "0.2"
 md4 = "0.10"
 pbkdf2 = "0.12"

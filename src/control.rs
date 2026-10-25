@@ -1,22 +1,47 @@
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const CONTROL_SOCKET: &str = "/run/a26-shell/control.sock";
 const RESPONSE_LIMIT: u64 = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// Moon's control socket; `A26_SHELL_SOCKET` overrides it on development
+/// hosts, as it does for `a26-shellctl`.
+fn socket() -> PathBuf {
+    std::env::var_os("A26_SHELL_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(CONTROL_SOCKET))
+}
+
 pub fn read_volume() -> Option<u8> {
-    read_volume_from(Path::new(CONTROL_SOCKET))
+    read_volume_from(&socket())
 }
 
 fn read_volume_from(path: &Path) -> Option<u8> {
+    parse_volume_response(&request(path, b"state\n")?)
+}
+
+/// Asks Moon to show its system keyboard for password entry. Returns whether
+/// the keyboard is now visible; Moon refuses while locked or launching.
+pub fn show_password_keyboard() -> bool {
+    request(&socket(), b"keyboard show password\n")
+        .as_deref()
+        .and_then(parse_keyboard_visible)
+        .unwrap_or(false)
+}
+
+pub fn hide_keyboard() {
+    let _ = request(&socket(), b"keyboard hide\n");
+}
+
+fn request(path: &Path, command: &[u8]) -> Option<String> {
     let mut stream = UnixStream::connect(path).ok()?;
     stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
-    stream.write_all(b"state\n").ok()?;
+    stream.write_all(command).ok()?;
     stream.shutdown(Shutdown::Write).ok()?;
 
     let mut response = String::new();
@@ -24,7 +49,19 @@ fn read_volume_from(path: &Path) -> Option<u8> {
         .take(RESPONSE_LIMIT)
         .read_to_string(&mut response)
         .ok()?;
-    parse_volume_response(&response)
+    Some(response)
+}
+
+fn parse_keyboard_visible(response: &str) -> Option<bool> {
+    let document: serde_json::Value = serde_json::from_str(response).ok()?;
+    if !document.get("ok")?.as_bool()? {
+        return None;
+    }
+    document
+        .get("result")?
+        .get("keyboard")?
+        .get("visible")?
+        .as_bool()
 }
 
 fn parse_volume_response(response: &str) -> Option<u8> {
@@ -61,6 +98,19 @@ mod tests {
             None
         );
         assert_eq!(parse_volume_response("not json"), None);
+    }
+
+    #[test]
+    fn parses_keyboard_visibility() {
+        assert_eq!(
+            parse_keyboard_visible(r#"{"ok":true,"result":{"keyboard":{"visible":true}}}"#),
+            Some(true)
+        );
+        assert_eq!(
+            parse_keyboard_visible(r#"{"ok":true,"result":{"keyboard":{"visible":false}}}"#),
+            Some(false)
+        );
+        assert_eq!(parse_keyboard_visible(r#"{"ok":false}"#), None);
     }
 
     #[test]

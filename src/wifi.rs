@@ -97,15 +97,6 @@ pub enum Security {
 }
 
 impl Security {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Open => "OPEN",
-            Self::Wpa2 => "WPA2",
-            Self::Wpa3 => "WPA3",
-            Self::Enterprise => "ENTERPRISE",
-        }
-    }
-
     fn parse(value: &str) -> Option<Self> {
         match value {
             "open" => Some(Self::Open),
@@ -200,7 +191,12 @@ pub struct WifiWorker {
 
 impl WifiWorker {
     pub fn spawn() -> Self {
-        Self::spawn_for(PathBuf::from(WIFI_SOCKET))
+        // A26_WIFI_SOCKET lets development hosts point the UI at a stand-in
+        // backend; the phone always uses the root-only default.
+        let socket = std::env::var_os("A26_WIFI_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(WIFI_SOCKET));
+        Self::spawn_for(socket)
     }
 
     fn spawn_for(socket: PathBuf) -> Self {
@@ -310,7 +306,10 @@ fn transact<T: Serialize>(socket: &Path, request_id: u64, request: &T) -> Result
     let uid = peer_uid(&stream).map_err(map_io_error)?;
     // SAFETY: geteuid has no pointer arguments or memory-safety preconditions.
     let own_uid = unsafe { libc::geteuid() };
-    if uid != 0 && !(cfg!(test) && uid == own_uid) {
+    // A development stand-in on an overridden socket may run as the same
+    // unprivileged user; the phone's default endpoint must be root's.
+    let development = cfg!(test) || socket != Path::new(WIFI_SOCKET);
+    if uid != 0 && !(development && uid == own_uid) {
         return Err(WifiError::Unavailable);
     }
     stream

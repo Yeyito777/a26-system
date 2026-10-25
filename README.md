@@ -5,32 +5,42 @@ from the A26 shell plus a touch-first Wi-Fi configuration view. It creates a
 conventional, window-manager-controlled 1080x2340 window named `a26-system`; it
 is deliberately **not** an override-redirect window.
 
-![A26 System app](docs/system-view.png)
+<p>
+  <img src="docs/system-view.png" width="32%" alt="System page">
+  <img src="docs/wifi-view.png" width="32%" alt="Wi-Fi page">
+  <img src="docs/password-view.png" width="32%" alt="Password entry with Moon's keyboard">
+</p>
 
-Companion window manager: <https://github.com/Yeyito777/a26-shell>
+Companion window manager: Moon, in <https://github.com/Yeyito777/OSS-Phone-V1>
 
-The view keeps the original navy, mint, blue, and white card layout and shows:
+The interface follows the iOS Settings app in dark appearance, sharing Moon's
+palette, anti-aliased renderer (`gfx.rs`, `present.rs`, `text.rs`, vendored
+from Moon), and the Inter typeface (SIL OFL 1.1, `assets/fonts/OFL.txt`). The
+System page shows:
 
-- aggregate CPU utilization calculated from consecutive `/proc/stat` samples;
-- Samsung Mali utilization from
-  `/sys/class/misc/mali0/device/utilization`;
-- root-filesystem used and available space from `statvfs(3)`;
-- device, kernel, Alpine release, total memory, display, window-manager, and
-  control cards; and
-- the bottom close instruction and gesture indicator.
+- Wi-Fi (the current network; tap to open the Wi-Fi page) and the shell volume;
+- aggregate CPU utilization calculated from consecutive `/proc/stat` samples
+  and Samsung Mali utilization from
+  `/sys/class/misc/mali0/device/utilization`, as meters;
+- root-filesystem used and available space from `statvfs(3)`, as a bar; and
+- device, software, kernel, total memory, and display rows.
 
-The original System metrics view remains the default. Its large `WI-FI` target
-opens a phone-sized connection view with current link state, a disconnect
-control, manual refresh, signal/security metadata, deterministic five-row scan
-pages, and large whole-row SSID targets. Protected networks open a masked
-password view with a four-row lowercase/shift/symbol on-screen keyboard. The
-entry accepts WPA Personal passphrases of 8-63 printable ASCII bytes or a
-64-digit hexadecimal key.
+The Wi-Fi page, pushed with a "‹ System" back button, shows the current link
+with its IP address and a Disconnect row, a Scan control, inline status, and
+seven-row scan pages with lock and signal glyphs and whole-row SSID targets.
+Protected networks open a password page. The app asks Moon for its system
+keyboard (`keyboard show password` on Moon's control socket) and decodes the
+resulting XTEST key presses on its own window; Return joins. If Moon refuses,
+an in-app keyboard is shown instead. The entry accepts WPA Personal
+passphrases of 8-63 printable ASCII bytes or a 64-digit hexadecimal key.
 
 Telemetry and the displayed logical volume are refreshed once per second. The
 volume is read by connecting to `/run/a26-shell/control.sock`, sending
 `state\n`, and parsing the shell's JSON response. It is rendered as `--` when
 the socket cannot be reached, times out, or returns an invalid response.
+
+The event loop blocks in `poll(2)` on the X connection until input, the next
+one-second refresh, or (only while Wi-Fi work is in flight) a 125 ms tick.
 
 Core X11 pointer events, including touch-to-pointer emulation, drive only
 tap-sized controls. A 32-pixel movement cancels a tap, and the bottom 170 pixels
