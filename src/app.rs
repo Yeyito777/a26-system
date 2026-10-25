@@ -5,7 +5,7 @@ use crate::wifi::{
     WifiStatus,
 };
 
-pub const NETWORKS_PER_PAGE: usize = 5;
+pub const NETWORKS_PER_PAGE: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -27,6 +27,8 @@ pub struct PasswordDialog {
     password: SecretString,
     pub keyboard_mode: KeyboardMode,
     pub submit_attempted: bool,
+    /// Moon's system keyboard is up; the in-app keyboard is only a fallback.
+    pub system_keyboard: bool,
 }
 
 impl PasswordDialog {
@@ -37,6 +39,7 @@ impl PasswordDialog {
             password: SecretString::default(),
             keyboard_mode: KeyboardMode::Lower,
             submit_attempted: false,
+            system_keyboard: false,
         }
     }
 
@@ -72,6 +75,8 @@ pub enum Action {
     Disconnect,
     CancelPassword,
     SubmitPassword,
+    /// Tap on the password field: bring Moon's keyboard back if dismissed.
+    FocusPassword,
     Key(KeyAction),
 }
 
@@ -185,7 +190,11 @@ impl AppModel {
                         let connected = matches!(status.state, LinkState::Connected { .. });
                         self.set_status(status);
                         self.reconcile_connected_network();
-                        self.notice = Some(if connected { "CONNECTED" } else { "CONNECTING" });
+                        self.notice = Some(if connected {
+                            "Connected"
+                        } else {
+                            "Connecting…"
+                        });
                     }
                     Err(error) => {
                         if let Some(status) = &mut self.wifi_status {
@@ -202,7 +211,7 @@ impl AppModel {
                     Ok(status) => {
                         self.set_status(status);
                         self.reconcile_connected_network();
-                        self.notice = Some("DISCONNECTED");
+                        self.notice = Some("Disconnected");
                     }
                     Err(error) => self.notice = Some(error_notice(error)),
                 }
@@ -215,7 +224,7 @@ impl AppModel {
         self.scanning = false;
         self.wifi_status = None;
         self.password_dialog = None;
-        self.notice = Some("WI-FI SERVICE UNAVAILABLE");
+        self.notice = Some("Wi-Fi service unavailable");
     }
 
     pub fn page_count(&self) -> usize {
@@ -240,7 +249,7 @@ impl AppModel {
             return Vec::new();
         }
         if matches!(network.security, Security::Enterprise | Security::Wpa3) {
-            self.notice = Some("THIS WI-FI SECURITY IS NOT SUPPORTED");
+            self.notice = Some("This network’s security is not supported");
             return Vec::new();
         }
 
@@ -364,15 +373,15 @@ fn normalized_networks(mut networks: Vec<WifiNetwork>) -> Vec<WifiNetwork> {
 
 fn error_notice(error: WifiError) -> &'static str {
     match error {
-        WifiError::Unavailable => "WI-FI SERVICE UNAVAILABLE",
-        WifiError::Timeout => "WI-FI SERVICE TIMED OUT",
-        WifiError::Protocol => "WI-FI SERVICE ERROR",
-        WifiError::Rejected(Rejection::AuthenticationFailed) => "PASSWORD NOT ACCEPTED",
-        WifiError::Rejected(Rejection::NetworkNotFound) => "NETWORK NOT FOUND",
-        WifiError::Rejected(Rejection::RadioDisabled) => "WI-FI IS TURNED OFF",
-        WifiError::Rejected(Rejection::Busy) => "WI-FI SERVICE IS BUSY",
-        WifiError::Rejected(Rejection::Unsupported) => "NETWORK IS NOT SUPPORTED",
-        WifiError::Rejected(Rejection::Other) => "CONNECTION FAILED",
+        WifiError::Unavailable => "Wi-Fi service unavailable",
+        WifiError::Timeout => "Wi-Fi service timed out",
+        WifiError::Protocol => "Wi-Fi service error",
+        WifiError::Rejected(Rejection::AuthenticationFailed) => "Incorrect password",
+        WifiError::Rejected(Rejection::NetworkNotFound) => "Network not found",
+        WifiError::Rejected(Rejection::RadioDisabled) => "Wi-Fi is turned off",
+        WifiError::Rejected(Rejection::Busy) => "Wi-Fi service is busy",
+        WifiError::Rejected(Rejection::Unsupported) => "Network is not supported",
+        WifiError::Rejected(Rejection::Other) => "Could not connect",
     }
 }
 
@@ -451,7 +460,10 @@ mod tests {
         };
         assert!(model.handle(Action::SelectNetwork(0)).is_empty());
         assert!(model.password_dialog.is_none());
-        assert_eq!(model.notice, Some("THIS WI-FI SECURITY IS NOT SUPPORTED"));
+        assert_eq!(
+            model.notice,
+            Some("This network’s security is not supported")
+        );
     }
 
     #[test]
@@ -502,7 +514,7 @@ mod tests {
             1
         );
         assert_eq!(model.networks[0].ssid, "strong");
-        assert_eq!(model.page_count(), 3);
+        assert_eq!(model.page_count(), 2);
         assert_eq!(model.page_range(), 0..NETWORKS_PER_PAGE);
         model.handle(Action::NextNetworks);
         assert_eq!(model.page, 1);
@@ -514,6 +526,6 @@ mod tests {
         model.apply_wifi_event(WifiEvent::Connect(Err(WifiError::Rejected(
             Rejection::AuthenticationFailed,
         ))));
-        assert_eq!(model.notice, Some("PASSWORD NOT ACCEPTED"));
+        assert_eq!(model.notice, Some("Incorrect password"));
     }
 }

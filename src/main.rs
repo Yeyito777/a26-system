@@ -1,16 +1,20 @@
 mod app;
 mod control;
-mod font;
+mod gfx;
+mod keys;
 mod metrics;
+mod present;
+mod text;
 mod ui;
 mod wifi;
 
 use std::env;
 use std::error::Error;
-use std::thread;
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use app::AppModel;
+use app::{Action, AppModel, KeyAction};
+use keys::{KeyInput, KeyMap};
 use metrics::SystemInfo;
 use ui::Renderer;
 use wifi::{WifiRequest, WifiWorker};
@@ -18,8 +22,7 @@ use x11rb::COPY_DEPTH_FROM_PARENT;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, PropMode, Window,
-    WindowClass,
+    AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
@@ -29,7 +32,10 @@ const REQUESTED_WIDTH: u16 = 1080;
 const REQUESTED_HEIGHT: u16 = 2340;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const WIFI_STATUS_INTERVAL: Duration = Duration::from_secs(5);
-const EVENT_LOOP_SLEEP: Duration = Duration::from_millis(16);
+/// While Wi-Fi work is in flight, wake this often to collect worker results
+/// and step the activity indicator. Otherwise the loop blocks until X input
+/// or the next one-second metrics refresh.
+const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(125);
 const TAP_MOVEMENT_LIMIT: i16 = 32;
 const BOTTOM_GESTURE_RESERVE: i16 = 170;
 
@@ -99,36 +105,39 @@ fn main() -> Result<(), Box<dyn Error>> {
                     | EventMask::STRUCTURE_NOTIFY
                     | EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
-                    | EventMask::POINTER_MOTION,
+                    | EventMask::POINTER_MOTION
+                    | EventMask::KEY_PRESS,
             ),
     )?;
 
     let protocols = configure_window_metadata(&conn, window)?;
-    let gc = conn.generate_id()?;
-    conn.create_gc(gc, window, &CreateGCAux::new().graphics_exposures(0))?;
-    let mut back_buffer = conn.generate_id()?;
-    conn.create_pixmap(
-        screen.root_depth,
-        back_buffer,
+    let key_map = KeyMap::query(&conn)?;
+    let mut renderer = Renderer::new(
+        &conn,
         window,
+        screen.root_depth,
         REQUESTED_WIDTH,
         REQUESTED_HEIGHT,
     )?;
-    let mut renderer = Renderer::new(window, back_buffer, gc, REQUESTED_WIDTH, REQUESTED_HEIGHT);
     let mut system = SystemInfo::collect();
     let mut volume = control::read_volume();
     let mut app = AppModel::default();
     let wifi_worker = WifiWorker::spawn();
+    // The System page summarizes the current network, so ask once up front.
+    dispatch_requests(&wifi_worker, &mut app, vec![WifiRequest::Status]);
     let mut tap = None;
+    let mut pressed: Option<Action> = None;
     let mut redraw = false;
     let mut running = true;
+    let mut keyboard_requested = false;
     let mut next_refresh = Instant::now() + REFRESH_INTERVAL;
     let mut next_wifi_status = Instant::now() + WIFI_STATUS_INTERVAL;
+    let mut next_busy_frame = Instant::now();
 
     // Draw the first complete frame while the window is still unmapped. Moon
     // can then reveal this fast-starting app directly instead of exposing an
     // empty X11 background for one scanout.
-    renderer.render(&conn, &system, volume, &app)?;
+    renderer.render(&conn, &system, volume, &app, None)?;
     conn.map_window(window)?;
     conn.flush()?;
 
@@ -141,45 +150,62 @@ fn main() -> Result<(), Box<dyn Error>> {
         while let Some(event) = conn.poll_for_event()? {
             match event {
                 Event::Expose(event) if event.window == window && event.count == 0 => {
-                    redraw = true;
+                    renderer.expose(&conn)?;
                 }
                 Event::ConfigureNotify(event) if event.window == window => {
                     if renderer.size() != (event.width, event.height) {
-                        let replacement = conn.generate_id()?;
-                        conn.create_pixmap(
-                            screen.root_depth,
-                            replacement,
-                            window,
-                            event.width,
-                            event.height,
-                        )?;
-                        renderer.resize(replacement, event.width, event.height);
-                        conn.free_pixmap(back_buffer)?;
-                        back_buffer = replacement;
+                        renderer.resize(&conn, event.width, event.height)?;
+                        redraw = true;
                     }
                     tap = None;
-                    redraw = true;
+                    pressed = None;
                 }
                 Event::ButtonPress(event)
                     if event.event == window && event.detail == 1 && tap.is_none() =>
                 {
                     tap = TapTracker::new(event.event_x, event.event_y, renderer.height());
+                    if tap.is_some() {
+                        pressed = renderer.action_at(&app, event.event_x, event.event_y);
+                        redraw |= pressed.is_some();
+                    }
                 }
                 Event::MotionNotify(event) if event.event == window => {
                     if let Some(tap) = &mut tap {
                         tap.observe(event.event_x, event.event_y);
+                        if tap.moved && pressed.take().is_some() {
+                            redraw = true;
+                        }
                     }
                 }
                 Event::ButtonRelease(event) if event.event == window && event.detail == 1 => {
+                    if pressed.take().is_some() {
+                        redraw = true;
+                    }
                     if let Some(position) = tap
                         .take()
                         .and_then(|tap| tap.finish(event.event_x, event.event_y, renderer.height()))
                     {
                         if let Some(action) = renderer.action_at(&app, position.0, position.1) {
-                            let requests = app.handle(action);
-                            dispatch_requests(&wifi_worker, &mut app, requests);
+                            perform(&wifi_worker, &mut app, action, &mut keyboard_requested);
                             redraw = true;
                         }
+                    }
+                }
+                Event::KeyPress(event) if event.event == window => {
+                    // Keys come from Moon's system keyboard; only the password
+                    // field accepts them.
+                    if app.password_dialog.is_some()
+                        && let Some(input) = key_map.decode(event.detail, event.state)
+                    {
+                        let action = match input {
+                            KeyInput::Character(character) => {
+                                Action::Key(KeyAction::Character(character))
+                            }
+                            KeyInput::Backspace => Action::Key(KeyAction::Backspace),
+                            KeyInput::Enter => Action::SubmitPassword,
+                        };
+                        perform(&wifi_worker, &mut app, action, &mut keyboard_requested);
+                        redraw = true;
                     }
                 }
                 Event::ClientMessage(event)
@@ -209,18 +235,71 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             next_wifi_status = now + WIFI_STATUS_INTERVAL;
         }
+        let busy = app.busy || app.scanning;
+        if busy && now >= next_busy_frame {
+            redraw = true;
+            next_busy_frame = now + BUSY_POLL_INTERVAL;
+        }
 
         if redraw && running {
-            renderer.render(&conn, &system, volume, &app)?;
+            renderer.render(&conn, &system, volume, &app, pressed)?;
             redraw = false;
         }
-        thread::sleep(EVENT_LOOP_SLEEP);
+
+        let mut deadline = next_refresh.min(next_wifi_status);
+        if busy {
+            deadline = deadline.min(next_busy_frame);
+        }
+        wait_for_x(&conn, deadline.saturating_duration_since(Instant::now()))?;
     }
 
-    let _ = conn.free_pixmap(back_buffer);
-    let _ = conn.free_gc(gc);
+    if keyboard_requested {
+        control::hide_keyboard();
+    }
+    renderer.destroy(&conn);
     let _ = conn.destroy_window(window);
     let _ = conn.flush();
+    Ok(())
+}
+
+/// Applies a UI action and keeps Moon's system keyboard in step with the
+/// password field.
+fn perform(worker: &WifiWorker, app: &mut AppModel, action: Action, keyboard_requested: &mut bool) {
+    let requests = app.handle(action);
+    dispatch_requests(worker, app, requests);
+    match app.password_dialog.as_mut() {
+        Some(dialog) => {
+            let wants_keyboard = !dialog.system_keyboard
+                || action == Action::FocusPassword
+                || (action == Action::SubmitPassword && dialog.submit_attempted);
+            if wants_keyboard {
+                dialog.system_keyboard = control::show_password_keyboard();
+                *keyboard_requested |= dialog.system_keyboard;
+            }
+        }
+        None if *keyboard_requested => {
+            control::hide_keyboard();
+            *keyboard_requested = false;
+        }
+        None => {}
+    }
+}
+
+fn wait_for_x(conn: &RustConnection, timeout: Duration) -> std::io::Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd: conn.stream().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let milliseconds = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: one initialized pollfd that outlives the call.
+    let result = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
     Ok(())
 }
 

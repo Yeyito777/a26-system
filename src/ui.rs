@@ -1,715 +1,1191 @@
+//! The System app's interface, styled after the iOS Settings app in dark
+//! appearance so it reads as part of the Moon shell: a large title, inset
+//! grouped lists, and a pushed Wi-Fi page with a back button.
+//!
+//! Geometry is in window pixels (1080 wide). One iPhone point is ~2.77 px.
+
 use std::error::Error;
 
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ChangeGCAux, ConnectionExt as _, Gcontext, Rectangle, Window};
+use x11rb::protocol::xproto::Window;
 
 use crate::app::{Action, AppModel, KeyAction, KeyboardMode, PasswordDialog, View};
-use crate::font;
+use crate::gfx::{Canvas, Path, RectF, Rgb};
 use crate::metrics::{SystemInfo, usage_text};
-use crate::wifi::{LinkState, WifiNetwork};
+use crate::present::Presenter;
+use crate::text::{self, Weight};
+use crate::wifi::{LinkState, Security, WifiNetwork};
 
-pub const BG: u32 = 0x0b1020;
-const BG_CARD: u32 = 0x182235;
-const BG_KEY: u32 = 0x24334d;
-const BG_DISABLED: u32 = 0x263043;
-const FG: u32 = 0xf5f7fb;
-const MUTED: u32 = 0x94a3b8;
-const ACCENT: u32 = 0x5eead4;
-const ACCENT_2: u32 = 0x60a5fa;
-const WARNING: u32 = 0xfbbf24;
-const DANGER: u32 = 0xfb7185;
+pub const BG: Rgb = 0x000000;
+const CELL: Rgb = 0x1c1c1e;
+const CELL_PRESSED: Rgb = 0x3a3a3c;
+const SEPARATOR: Rgb = 0x38383a;
+const WHITE: Rgb = 0xffffff;
+const SECONDARY: Rgb = 0xebebf5;
+const SECONDARY_ALPHA: f32 = 0.6;
+const TERTIARY_ALPHA: f32 = 0.3;
+const BLUE: Rgb = 0x0a84ff;
+const GREEN: Rgb = 0x30d158;
+const RED: Rgb = 0xff453a;
+const PINK: Rgb = 0xff375f;
+const TRACK: Rgb = 0x3a3a3c;
 
-const SYSTEM_TAB: UiRect = UiRect::new(55, 65, 250, 120);
-const WIFI_TAB: UiRect = UiRect::new(325, 65, 220, 120);
-const STATUS_ACTION: UiRect = UiRect::new(735, 285, 270, 120);
-const REFRESH_BUTTON: UiRect = UiRect::new(765, 495, 240, 105);
-const NETWORK_X: i16 = 55;
-const NETWORK_Y: i16 = 670;
-const NETWORK_WIDTH: u16 = 970;
-const NETWORK_HEIGHT: u16 = 210;
-const NETWORK_STEP: i16 = 230;
-const PREVIOUS_BUTTON: UiRect = UiRect::new(55, 1870, 190, 110);
-const NEXT_BUTTON: UiRect = UiRect::new(835, 1870, 190, 110);
-const CANCEL_BUTTON: UiRect = UiRect::new(755, 75, 270, 110);
-const CONNECT_BUTTON: UiRect = UiRect::new(55, 1490, 970, 160);
+const MARGIN: f32 = 44.0;
+const CARD_WIDTH: f32 = 1080.0 - 2.0 * MARGIN;
+const CARD_RADIUS: f32 = 30.0;
+const ROW: f32 = 128.0;
+const INFO_ROW: f32 = 118.0;
+const TEXT_X: f32 = MARGIN + 44.0;
+const LABEL_SIZE: f32 = 47.0;
+const HEADER_SIZE: f32 = 36.0;
+const LARGE_TITLE_SIZE: f32 = 92.0;
+/// Moon owns the bottom of the screen for its swipe-up gesture.
+const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UiRect {
-    x: i16,
-    y: i16,
-    width: u16,
-    height: u16,
+// System page.
+const SYSTEM_CARD_Y: f32 = 190.0;
+const ACTIVITY_Y: f32 = 584.0;
+const ACTIVITY_HEIGHT: f32 = 236.0;
+const STORAGE_Y: f32 = 920.0;
+const STORAGE_HEIGHT: f32 = 236.0;
+const ABOUT_Y: f32 = 1256.0;
+
+// Wi-Fi page.
+const BACK_BUTTON: RectF = RectF::new(0.0, 0.0, 420.0, 140.0);
+const STATUS_CARD_Y: f32 = 290.0;
+const NETWORK_ROW: f32 = 118.0;
+
+// Password page.
+const NAV_HEIGHT: f32 = 150.0;
+const CANCEL_BUTTON: RectF = RectF::new(0.0, 0.0, 330.0, NAV_HEIGHT);
+const JOIN_BUTTON: RectF = RectF::new(750.0, 0.0, 330.0, NAV_HEIGHT);
+const PASSWORD_CARD_Y: f32 = 300.0;
+const FALLBACK_KEYBOARD_Y: f32 = 640.0;
+
+pub struct Renderer {
+    window: Window,
+    depth: u8,
+    canvas: Canvas,
+    presenter: Presenter,
 }
 
-impl UiRect {
-    const fn new(x: i16, y: i16, width: u16, height: u16) -> Self {
-        Self {
+impl Renderer {
+    pub fn new<C: Connection>(
+        conn: &C,
+        window: Window,
+        depth: u8,
+        width: u16,
+        height: u16,
+    ) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            window,
+            depth,
+            canvas: Canvas::new(i32::from(width), i32::from(height)),
+            presenter: Presenter::create(conn, window, depth, width, height)?,
+        })
+    }
+
+    pub fn resize<C: Connection>(
+        &mut self,
+        conn: &C,
+        width: u16,
+        height: u16,
+    ) -> Result<(), Box<dyn Error>> {
+        let presenter = Presenter::create(conn, self.window, self.depth, width, height)?;
+        self.presenter.destroy(conn);
+        self.presenter = presenter;
+        self.canvas = Canvas::new(i32::from(width), i32::from(height));
+        Ok(())
+    }
+
+    pub fn size(&self) -> (u16, u16) {
+        (self.canvas.width as u16, self.canvas.height as u16)
+    }
+
+    pub fn height(&self) -> u16 {
+        self.canvas.height as u16
+    }
+
+    pub fn render<C: Connection>(
+        &mut self,
+        conn: &C,
+        system: &SystemInfo,
+        volume: Option<u8>,
+        app: &AppModel,
+        pressed: Option<Action>,
+    ) -> Result<(), Box<dyn Error>> {
+        let canvas = &mut self.canvas;
+        canvas.clear(BG);
+        if let Some(dialog) = &app.password_dialog {
+            draw_password(canvas, dialog, pressed);
+        } else {
+            match app.view {
+                View::System => draw_system(canvas, system, volume, app, pressed),
+                View::Wifi => draw_wifi(canvas, app, pressed),
+            }
+        }
+        self.presenter.present(conn, &self.canvas, 0)?;
+        conn.flush()?;
+        Ok(())
+    }
+
+    /// Repairs exposed window areas from the last frame.
+    pub fn expose<C: Connection>(&self, conn: &C) -> Result<(), Box<dyn Error>> {
+        self.presenter.expose(conn, 0)?;
+        conn.flush()?;
+        Ok(())
+    }
+
+    pub fn destroy<C: Connection>(&self, conn: &C) {
+        self.presenter.destroy(conn);
+    }
+
+    pub fn action_at(&self, app: &AppModel, x: i16, y: i16) -> Option<Action> {
+        action_at(app, self.canvas.height as f32, x, y)
+    }
+}
+
+/// Maps a tap in window coordinates to an app action.
+pub fn action_at(app: &AppModel, height: f32, x: i16, y: i16) -> Option<Action> {
+    let (x, y) = (f32::from(x), f32::from(y));
+    if y >= height - BOTTOM_GESTURE_RESERVE {
+        return None;
+    }
+    if let Some(dialog) = &app.password_dialog {
+        if CANCEL_BUTTON.contains(x, y) {
+            return Some(Action::CancelPassword);
+        }
+        if JOIN_BUTTON.contains(x, y) {
+            return Some(Action::SubmitPassword);
+        }
+        if password_field().contains(x, y) {
+            return Some(Action::FocusPassword);
+        }
+        if dialog.system_keyboard {
+            return None;
+        }
+        return fallback_keys(dialog.keyboard_mode)
+            .into_iter()
+            .find(|key| key.bounds.contains(x, y))
+            .map(|key| Action::Key(key.action));
+    }
+    match app.view {
+        View::System => wifi_row().contains(x, y).then_some(Action::ShowWifi),
+        View::Wifi => {
+            if BACK_BUTTON.contains(x, y) {
+                return Some(Action::ShowSystem);
+            }
+            let layout = WifiLayout::new(app);
+            if layout.scan_button.contains(x, y) && !app.scanning && !app.busy {
+                return Some(Action::RefreshWifi);
+            }
+            if let Some(disconnect) = layout.disconnect_row
+                && disconnect.contains(x, y)
+                && !app.busy
+            {
+                return Some(Action::Disconnect);
+            }
+            for (row, index) in app.page_range().enumerate() {
+                if layout.network_row(row).contains(x, y) {
+                    return Some(Action::SelectNetwork(index));
+                }
+            }
+            if layout.previous.contains(x, y) && app.page > 0 {
+                return Some(Action::PreviousNetworks);
+            }
+            if layout.next.contains(x, y) && app.page + 1 < app.page_count() {
+                return Some(Action::NextNetworks);
+            }
+            None
+        }
+    }
+}
+
+fn card(y: f32, height: f32) -> RectF {
+    RectF::new(MARGIN, y, CARD_WIDTH, height)
+}
+
+fn wifi_row() -> RectF {
+    card(SYSTEM_CARD_Y, ROW)
+}
+
+fn password_field() -> RectF {
+    card(PASSWORD_CARD_Y, ROW)
+}
+
+fn baseline(center_y: f32, weight: Weight, size: f32) -> f32 {
+    text::centered_baseline(center_y, weight, size)
+}
+
+fn large_title(canvas: &mut Canvas, title: &str, baseline_y: f32) {
+    text::draw(
+        canvas,
+        title,
+        MARGIN,
+        baseline_y,
+        Weight::Bold,
+        LARGE_TITLE_SIZE,
+        WHITE,
+        1.0,
+    );
+}
+
+fn section_header(canvas: &mut Canvas, title: &str, card_y: f32) {
+    text::draw_tracked(
+        canvas,
+        title,
+        TEXT_X,
+        card_y - 26.0,
+        Weight::Regular,
+        HEADER_SIZE,
+        1.0,
+        SECONDARY,
+        SECONDARY_ALPHA,
+    );
+}
+
+fn footer(canvas: &mut Canvas, message: &str, card_bottom: f32, color: Rgb, alpha: f32) {
+    let fitted = text::fit(message, Weight::Regular, 38.0, CARD_WIDTH - 88.0);
+    text::draw(
+        canvas,
+        &fitted,
+        TEXT_X,
+        card_bottom + 60.0,
+        Weight::Regular,
+        38.0,
+        color,
+        alpha,
+    );
+}
+
+/// Draws an inset grouped card with optional pressed row highlighting.
+fn grouped_card(canvas: &mut Canvas, rect: RectF, rows: usize, pressed_row: Option<usize>) {
+    canvas.fill_rrect(rect, CARD_RADIUS, CELL, 1.0);
+    if rows == 0 {
+        return;
+    }
+    let row_height = rect.h / rows as f32;
+    if let Some(row) = pressed_row.filter(|row| *row < rows) {
+        let top = rect.y + row as f32 * row_height;
+        canvas.set_clip(
+            0,
+            top.round() as i32,
+            canvas.width,
+            (top + row_height).round() as i32,
+        );
+        canvas.fill_rrect(rect, CARD_RADIUS, CELL_PRESSED, 1.0);
+        canvas.reset_clip();
+    }
+}
+
+fn separator(canvas: &mut Canvas, y: f32, inset: f32) {
+    canvas.fill_rect(
+        inset as i32,
+        y.round() as i32,
+        (MARGIN + CARD_WIDTH - inset) as i32,
+        2,
+        SEPARATOR,
+        1.0,
+    );
+}
+
+fn chevron(canvas: &mut Canvas, x: f32, cy: f32, color: Rgb, alpha: f32) {
+    let mut path = Path::new();
+    path.stroke_polyline(
+        &[(x - 9.0, cy - 17.0), (x + 7.0, cy), (x - 9.0, cy + 17.0)],
+        6.0,
+    );
+    canvas.fill_path(&path, color, alpha);
+}
+
+fn back_chevron(canvas: &mut Canvas, x: f32, cy: f32) {
+    let mut path = Path::new();
+    path.stroke_polyline(
+        &[(x + 12.0, cy - 25.0), (x - 12.0, cy), (x + 12.0, cy + 25.0)],
+        8.0,
+    );
+    canvas.fill_path(&path, BLUE, 1.0);
+}
+
+fn icon_tile(canvas: &mut Canvas, x: f32, cy: f32, color: Rgb) -> RectF {
+    let tile = RectF::new(x, cy - 40.0, 80.0, 80.0);
+    canvas.fill_rrect(tile, 19.0, color, 1.0);
+    tile
+}
+
+/// Wi-Fi fan with its apex at (`cx`, `apex_y`); `bars` of three are lit.
+fn wifi_glyph(canvas: &mut Canvas, cx: f32, apex_y: f32, scale: f32, bars: u8, color: Rgb) {
+    let quarter = std::f32::consts::FRAC_PI_4;
+    let mut wedge = Path::new();
+    wedge.move_to(cx, apex_y);
+    wedge.arc(cx, apex_y, 11.5 * scale, -3.0 * quarter, -quarter);
+    wedge.close();
+    canvas.fill_path(&wedge, color, if bars >= 1 { 1.0 } else { 0.3 });
+    for (index, radius) in [23.0, 35.0].into_iter().enumerate() {
+        let lit = bars as usize >= index + 2;
+        canvas.ring_arc(
+            cx,
+            apex_y,
+            radius * scale,
+            7.0 * scale,
+            -quarter + 0.08,
+            quarter - 0.08,
+            color,
+            if lit { 1.0 } else { 0.3 },
+        );
+    }
+}
+
+fn signal_bars(signal: u8) -> u8 {
+    match signal {
+        0..=33 => 1,
+        34..=66 => 2,
+        _ => 3,
+    }
+}
+
+fn speaker_glyph(canvas: &mut Canvas, cx: f32, cy: f32) {
+    let mut body = Path::new();
+    body.polygon(&[
+        (cx - 18.0, cy - 8.0),
+        (cx - 8.0, cy - 8.0),
+        (cx + 6.0, cy - 20.0),
+        (cx + 6.0, cy + 20.0),
+        (cx - 8.0, cy + 8.0),
+        (cx - 18.0, cy + 8.0),
+    ]);
+    canvas.fill_path(&body, WHITE, 1.0);
+    canvas.ring_arc(cx + 4.0, cy, 16.0, 4.5, 0.75, 2.39, WHITE, 1.0);
+}
+
+fn lock_glyph(canvas: &mut Canvas, cx: f32, cy: f32, alpha: f32) {
+    let points: Vec<(f32, f32)> = (0..=16)
+        .map(|step| {
+            let angle = std::f32::consts::PI + std::f32::consts::PI * step as f32 / 16.0;
+            (cx + 9.0 * angle.cos(), cy - 5.0 + 9.0 * angle.sin())
+        })
+        .collect();
+    let mut shackle = Path::new();
+    let mut outline = vec![(cx - 9.0, cy + 1.0)];
+    outline.extend(points);
+    outline.push((cx + 9.0, cy + 1.0));
+    shackle.stroke_polyline(&outline, 4.0);
+    canvas.fill_path(&shackle, WHITE, alpha);
+    canvas.fill_rrect(
+        RectF::new(cx - 14.0, cy - 2.0, 28.0, 22.0),
+        5.0,
+        WHITE,
+        alpha,
+    );
+}
+
+fn checkmark(canvas: &mut Canvas, cx: f32, cy: f32) {
+    let mut path = Path::new();
+    path.stroke_polyline(
+        &[
+            (cx - 14.0, cy),
+            (cx - 4.0, cy + 11.0),
+            (cx + 16.0, cy - 13.0),
+        ],
+        6.0,
+    );
+    canvas.fill_path(&path, BLUE, 1.0);
+}
+
+fn spinner(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32) {
+    // A static activity indicator; it redraws once a second with metrics,
+    // which is enough to show progress without animating continuously.
+    let step = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() / 125)
+        .unwrap_or(0)
+        % 8) as u32;
+    for spoke in 0..8_u32 {
+        let angle = spoke as f32 * std::f32::consts::TAU / 8.0;
+        let age = (step + 8 - spoke) % 8;
+        let (sin, cos) = angle.sin_cos();
+        let mut path = Path::new();
+        path.stroke_segment(
+            (cx + sin * radius * 0.5, cy - cos * radius * 0.5),
+            (cx + sin * radius, cy - cos * radius),
+            radius * 0.25,
+        );
+        canvas.fill_path(&path, SECONDARY, 0.9 - age as f32 * 0.1);
+    }
+}
+
+fn wifi_summary(app: &AppModel) -> String {
+    match &app.wifi_status {
+        None => "Not Connected".into(),
+        Some(status) if !status.radio_enabled => "Off".into(),
+        Some(status) => match &status.state {
+            LinkState::Connected { ssid, .. } => ssid.clone(),
+            LinkState::Connecting { .. } => "Connecting…".into(),
+            LinkState::Disconnecting => "Disconnecting…".into(),
+            LinkState::Disconnected => "Not Connected".into(),
+        },
+    }
+}
+
+fn draw_system(
+    canvas: &mut Canvas,
+    system: &SystemInfo,
+    volume: Option<u8>,
+    app: &AppModel,
+    pressed: Option<Action>,
+) {
+    large_title(canvas, "System", 132.0);
+
+    // Wi-Fi and Sound.
+    let top = card(SYSTEM_CARD_Y, ROW * 2.0);
+    grouped_card(
+        canvas,
+        top,
+        2,
+        (pressed == Some(Action::ShowWifi)).then_some(0),
+    );
+    let right = MARGIN + CARD_WIDTH - 44.0;
+    let wifi_cy = SYSTEM_CARD_Y + ROW / 2.0;
+    icon_tile(canvas, TEXT_X - 4.0, wifi_cy, BLUE);
+    wifi_glyph(canvas, TEXT_X + 36.0, wifi_cy + 17.0, 0.95, 3, WHITE);
+    let label_x = TEXT_X + 112.0;
+    text::draw(
+        canvas,
+        "Wi-Fi",
+        label_x,
+        baseline(wifi_cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        WHITE,
+        1.0,
+    );
+    chevron(canvas, right, wifi_cy, SECONDARY, TERTIARY_ALPHA);
+    let summary = text::fit(&wifi_summary(app), Weight::Regular, LABEL_SIZE, 440.0);
+    text::draw_right(
+        canvas,
+        &summary,
+        right - 40.0,
+        baseline(wifi_cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        SECONDARY,
+        SECONDARY_ALPHA,
+    );
+    separator(canvas, SYSTEM_CARD_Y + ROW - 1.0, label_x);
+    let sound_cy = SYSTEM_CARD_Y + ROW * 1.5;
+    icon_tile(canvas, TEXT_X - 4.0, sound_cy, PINK);
+    speaker_glyph(canvas, TEXT_X + 34.0, sound_cy);
+    text::draw(
+        canvas,
+        "Volume",
+        label_x,
+        baseline(sound_cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        WHITE,
+        1.0,
+    );
+    let volume_text = volume.map_or_else(|| "--".into(), |value| format!("{value}%"));
+    text::draw_right(
+        canvas,
+        &volume_text,
+        right,
+        baseline(sound_cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        SECONDARY,
+        SECONDARY_ALPHA,
+    );
+
+    // Activity: CPU and GPU meters side by side.
+    section_header(canvas, "ACTIVITY", ACTIVITY_Y);
+    grouped_card(canvas, card(ACTIVITY_Y, ACTIVITY_HEIGHT), 0, None);
+    let half = CARD_WIDTH / 2.0;
+    canvas.fill_rect(
+        (MARGIN + half) as i32,
+        (ACTIVITY_Y + 36.0) as i32,
+        2,
+        (ACTIVITY_HEIGHT - 72.0) as i32,
+        SEPARATOR,
+        1.0,
+    );
+    for (column, (name, usage, color)) in [
+        ("CPU", system.cpu_usage, GREEN),
+        ("GPU", system.gpu_usage, BLUE),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = TEXT_X + column as f32 * half;
+        text::draw(
+            canvas,
+            name,
             x,
-            y,
-            width,
-            height,
+            ACTIVITY_Y + 68.0,
+            Weight::SemiBold,
+            36.0,
+            SECONDARY,
+            SECONDARY_ALPHA,
+        );
+        text::draw(
+            canvas,
+            &usage.map_or_else(|| "—".to_owned(), |_| usage_text(usage)),
+            x - 3.0,
+            ACTIVITY_Y + 158.0,
+            Weight::DisplaySemiBold,
+            84.0,
+            WHITE,
+            1.0,
+        );
+        let bar = RectF::new(x, ACTIVITY_Y + 186.0, half - 88.0, 14.0);
+        canvas.fill_rrect(bar, 7.0, TRACK, 1.0);
+        if let Some(value) = usage {
+            let width = bar.w * f32::from(value.min(100)) / 100.0;
+            if width >= 1.0 {
+                canvas.fill_rrect(
+                    RectF::new(bar.x, bar.y, width.max(14.0), bar.h),
+                    7.0,
+                    color,
+                    1.0,
+                );
+            }
         }
     }
 
-    fn contains(self, x: i16, y: i16) -> bool {
-        let right = i32::from(self.x) + i32::from(self.width);
-        let bottom = i32::from(self.y) + i32::from(self.height);
-        i32::from(x) >= i32::from(self.x)
-            && i32::from(x) < right
-            && i32::from(y) >= i32::from(self.y)
-            && i32::from(y) < bottom
+    // Storage bar.
+    section_header(canvas, "STORAGE", STORAGE_Y);
+    grouped_card(canvas, card(STORAGE_Y, STORAGE_HEIGHT), 0, None);
+    text::draw(
+        canvas,
+        &format!("{} used", system.storage_used),
+        TEXT_X,
+        STORAGE_Y + 82.0,
+        Weight::SemiBold,
+        LABEL_SIZE,
+        WHITE,
+        1.0,
+    );
+    text::draw_right(
+        canvas,
+        &format!("{} free", system.storage_free),
+        right,
+        STORAGE_Y + 82.0,
+        Weight::Regular,
+        LABEL_SIZE,
+        SECONDARY,
+        SECONDARY_ALPHA,
+    );
+    let bar = RectF::new(TEXT_X, STORAGE_Y + 124.0, CARD_WIDTH - 88.0, 30.0);
+    canvas.fill_rrect(bar, 8.0, TRACK, 1.0);
+    if let Some(fraction) = system.storage_fraction {
+        let used_right = (bar.x + bar.w * fraction.clamp(0.0, 1.0)).round() as i32;
+        canvas.set_clip(0, 0, used_right, canvas.height);
+        canvas.fill_rrect(bar, 8.0, BLUE, 1.0);
+        canvas.reset_clip();
+    }
+    let legend_y = STORAGE_Y + 204.0;
+    canvas.fill_circle(TEXT_X + 10.0, legend_y - 12.0, 10.0, BLUE, 1.0);
+    text::draw(
+        canvas,
+        "Used",
+        TEXT_X + 32.0,
+        legend_y,
+        Weight::Regular,
+        36.0,
+        SECONDARY,
+        SECONDARY_ALPHA,
+    );
+    canvas.fill_circle(TEXT_X + 160.0, legend_y - 12.0, 10.0, TRACK, 1.0);
+    text::draw(
+        canvas,
+        "Free",
+        TEXT_X + 182.0,
+        legend_y,
+        Weight::Regular,
+        36.0,
+        SECONDARY,
+        SECONDARY_ALPHA,
+    );
+
+    // About.
+    section_header(canvas, "ABOUT", ABOUT_Y);
+    let rows = [
+        ("Device", "Samsung Galaxy A26".to_owned()),
+        (
+            "Software",
+            format!("Alpine Linux {}", title_case(&system.alpine)),
+        ),
+        ("Kernel", system.kernel.clone()),
+        ("Memory", system.memory.clone()),
+        (
+            "Display",
+            format!("{} × {} · 120 Hz", canvas.width, canvas.height + 124),
+        ),
+    ];
+    info_rows(canvas, ABOUT_Y, &rows);
+}
+
+fn title_case(value: &str) -> String {
+    if value.eq_ignore_ascii_case("unknown") {
+        "".into()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn info_rows(canvas: &mut Canvas, y: f32, rows: &[(&str, String)]) {
+    grouped_card(canvas, card(y, INFO_ROW * rows.len() as f32), 0, None);
+    let right = MARGIN + CARD_WIDTH - 44.0;
+    for (index, (label, value)) in rows.iter().enumerate() {
+        let cy = y + INFO_ROW * (index as f32 + 0.5);
+        let line = baseline(cy, Weight::Regular, LABEL_SIZE);
+        let label_width = text::draw(
+            canvas,
+            label,
+            TEXT_X,
+            line,
+            Weight::Regular,
+            LABEL_SIZE,
+            WHITE,
+            1.0,
+        );
+        let available = right - TEXT_X - label_width - 40.0;
+        let value = text::fit(value.trim(), Weight::Regular, LABEL_SIZE, available);
+        text::draw_right(
+            canvas,
+            &value,
+            right,
+            line,
+            Weight::Regular,
+            LABEL_SIZE,
+            SECONDARY,
+            SECONDARY_ALPHA,
+        );
+        if index + 1 < rows.len() {
+            separator(canvas, y + INFO_ROW * (index as f32 + 1.0) - 1.0, TEXT_X);
+        }
+    }
+}
+
+/// Wi-Fi page geometry, shared by drawing and hit testing.
+struct WifiLayout {
+    status_rows: usize,
+    disconnect_row: Option<RectF>,
+    networks_y: f32,
+    scan_button: RectF,
+    previous: RectF,
+    next: RectF,
+}
+
+impl WifiLayout {
+    fn new(app: &AppModel) -> Self {
+        let connected = matches!(
+            app.wifi_status.as_ref().map(|status| &status.state),
+            Some(LinkState::Connected { .. })
+        );
+        let status_rows = if connected { 2 } else { 1 };
+        let disconnect_row = connected.then(|| card(STATUS_CARD_Y + ROW, ROW));
+        let status_bottom = STATUS_CARD_Y + ROW * status_rows as f32;
+        // Leave room for an inline notice under the status card.
+        let networks_y = status_bottom + 190.0;
+        let rows = app.page_range().len().max(1) as f32;
+        let pager_y = networks_y + NETWORK_ROW * rows + 30.0;
+        Self {
+            status_rows,
+            disconnect_row,
+            networks_y,
+            scan_button: RectF::new(700.0, networks_y - 110.0, 380.0, 110.0),
+            previous: RectF::new(MARGIN, pager_y, 330.0, 120.0),
+            next: RectF::new(1080.0 - MARGIN - 330.0, pager_y, 330.0, 120.0),
+        }
     }
 
-    fn x11(self) -> Rectangle {
-        Rectangle {
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
+    fn network_row(&self, row: usize) -> RectF {
+        card(self.networks_y + row as f32 * NETWORK_ROW, NETWORK_ROW)
+    }
+}
+
+fn draw_wifi(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) {
+    let back_pressed = pressed == Some(Action::ShowSystem);
+    back_chevron(canvas, MARGIN + 6.0, 72.0);
+    text::draw(
+        canvas,
+        "System",
+        MARGIN + 36.0,
+        baseline(72.0, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        BLUE,
+        if back_pressed { 0.4 } else { 1.0 },
+    );
+    large_title(canvas, "Wi-Fi", 236.0);
+
+    let layout = WifiLayout::new(app);
+    let right = MARGIN + CARD_WIDTH - 44.0;
+    let status_card = card(STATUS_CARD_Y, ROW * layout.status_rows as f32);
+    let pressed_status = (pressed == Some(Action::Disconnect)).then_some(1);
+    grouped_card(canvas, status_card, layout.status_rows, pressed_status);
+    let cy = STATUS_CARD_Y + ROW / 2.0;
+    let line = baseline(cy, Weight::Regular, LABEL_SIZE);
+    match app.wifi_status.as_ref() {
+        None => {
+            text::draw(
+                canvas,
+                "Wi-Fi Service Unavailable",
+                TEXT_X,
+                line,
+                Weight::Regular,
+                LABEL_SIZE,
+                SECONDARY,
+                SECONDARY_ALPHA,
+            );
+        }
+        Some(status) if !status.radio_enabled => {
+            text::draw(
+                canvas,
+                "Wi-Fi Is Off",
+                TEXT_X,
+                line,
+                Weight::Regular,
+                LABEL_SIZE,
+                SECONDARY,
+                SECONDARY_ALPHA,
+            );
+        }
+        Some(status) => match &status.state {
+            LinkState::Connected {
+                ssid,
+                signal,
+                ip_address,
+            } => {
+                checkmark(canvas, TEXT_X + 14.0, cy);
+                let name = text::fit(ssid, Weight::Regular, LABEL_SIZE, 560.0);
+                text::draw(
+                    canvas,
+                    &name,
+                    TEXT_X + 64.0,
+                    cy - 4.0,
+                    Weight::Regular,
+                    LABEL_SIZE,
+                    WHITE,
+                    1.0,
+                );
+                let detail = ip_address
+                    .as_deref()
+                    .map_or_else(|| "Connected".to_owned(), |ip| format!("Connected · {ip}"));
+                text::draw(
+                    canvas,
+                    &detail,
+                    TEXT_X + 64.0,
+                    cy + 42.0,
+                    Weight::Regular,
+                    34.0,
+                    SECONDARY,
+                    SECONDARY_ALPHA,
+                );
+                wifi_glyph(
+                    canvas,
+                    right - 26.0,
+                    cy + 16.0,
+                    0.95,
+                    signal.map_or(3, signal_bars),
+                    WHITE,
+                );
+                separator(canvas, STATUS_CARD_Y + ROW - 1.0, TEXT_X);
+                text::draw(
+                    canvas,
+                    "Disconnect",
+                    TEXT_X,
+                    baseline(STATUS_CARD_Y + ROW * 1.5, Weight::Regular, LABEL_SIZE),
+                    Weight::Regular,
+                    LABEL_SIZE,
+                    RED,
+                    if app.busy { 0.4 } else { 1.0 },
+                );
+            }
+            LinkState::Connecting { ssid } => {
+                spinner(canvas, TEXT_X + 18.0, cy, 22.0);
+                let name = text::fit(
+                    &format!("Joining “{ssid}”…"),
+                    Weight::Regular,
+                    LABEL_SIZE,
+                    760.0,
+                );
+                text::draw(
+                    canvas,
+                    &name,
+                    TEXT_X + 64.0,
+                    line,
+                    Weight::Regular,
+                    LABEL_SIZE,
+                    WHITE,
+                    1.0,
+                );
+            }
+            LinkState::Disconnecting => {
+                spinner(canvas, TEXT_X + 18.0, cy, 22.0);
+                text::draw(
+                    canvas,
+                    "Disconnecting…",
+                    TEXT_X + 64.0,
+                    line,
+                    Weight::Regular,
+                    LABEL_SIZE,
+                    WHITE,
+                    1.0,
+                );
+            }
+            LinkState::Disconnected => {
+                text::draw(
+                    canvas,
+                    "Not Connected",
+                    TEXT_X,
+                    line,
+                    Weight::Regular,
+                    LABEL_SIZE,
+                    SECONDARY,
+                    SECONDARY_ALPHA,
+                );
+            }
+        },
+    }
+    let redundant = app.wifi_status.is_none() && app.notice == Some("Wi-Fi service unavailable");
+    if let Some(notice) = app.notice.filter(|_| !redundant) {
+        let error = !matches!(notice, "Connected" | "Disconnected" | "Connecting…");
+        footer(
+            canvas,
+            notice,
+            status_card.y + status_card.h,
+            if error { RED } else { SECONDARY },
+            if error { 1.0 } else { SECONDARY_ALPHA },
+        );
+    }
+
+    section_header(canvas, "NETWORKS", layout.networks_y);
+    let scan_baseline = layout.networks_y - 26.0;
+    if app.scanning {
+        spinner(canvas, right - 20.0, scan_baseline - 13.0, 20.0);
+    } else {
+        let scan_pressed = pressed == Some(Action::RefreshWifi);
+        text::draw_right(
+            canvas,
+            "Scan",
+            right,
+            scan_baseline,
+            Weight::Regular,
+            42.0,
+            BLUE,
+            if app.busy || scan_pressed { 0.4 } else { 1.0 },
+        );
+    }
+
+    let range = app.page_range();
+    if range.is_empty() {
+        let empty = card(layout.networks_y, NETWORK_ROW);
+        grouped_card(canvas, empty, 1, None);
+        let message = if app.scanning {
+            "Looking for networks…"
+        } else {
+            "No Networks Found"
+        };
+        text::draw(
+            canvas,
+            message,
+            TEXT_X,
+            baseline(empty.y + empty.h / 2.0, Weight::Regular, LABEL_SIZE),
+            Weight::Regular,
+            LABEL_SIZE,
+            SECONDARY,
+            SECONDARY_ALPHA,
+        );
+    } else {
+        let rows = range.len();
+        let pressed_row = match pressed {
+            Some(Action::SelectNetwork(index)) if range.contains(&index) => {
+                Some(index - range.start)
+            }
+            _ => None,
+        };
+        grouped_card(
+            canvas,
+            card(layout.networks_y, NETWORK_ROW * rows as f32),
+            rows,
+            pressed_row,
+        );
+        for (row, index) in range.enumerate() {
+            let rect = layout.network_row(row);
+            network_row(canvas, rect, &app.networks[index], app.busy);
+            if row + 1 < rows {
+                separator(canvas, rect.y + rect.h - 1.0, TEXT_X);
+            }
+        }
+    }
+
+    if app.page_count() > 1 {
+        let cy = layout.previous.y + layout.previous.h / 2.0;
+        let line = baseline(cy, Weight::Regular, 42.0);
+        let previous_enabled = app.page > 0;
+        let next_enabled = app.page + 1 < app.page_count();
+        text::draw(
+            canvas,
+            "Previous",
+            TEXT_X,
+            line,
+            Weight::Regular,
+            42.0,
+            BLUE,
+            if previous_enabled { 1.0 } else { 0.3 },
+        );
+        text::draw_right(
+            canvas,
+            "Next",
+            right,
+            line,
+            Weight::Regular,
+            42.0,
+            BLUE,
+            if next_enabled { 1.0 } else { 0.3 },
+        );
+        text::draw_centered(
+            canvas,
+            &format!("{} of {}", app.page + 1, app.page_count()),
+            540.0,
+            line,
+            Weight::Regular,
+            38.0,
+            SECONDARY,
+            SECONDARY_ALPHA,
+        );
+    }
+}
+
+fn network_row(canvas: &mut Canvas, rect: RectF, network: &WifiNetwork, busy: bool) {
+    let cy = rect.y + rect.h / 2.0;
+    let right = rect.x + rect.w - 44.0;
+    let unsupported = matches!(network.security, Security::Enterprise | Security::Wpa3);
+    let mut name_x = TEXT_X;
+    if network.connected {
+        checkmark(canvas, TEXT_X + 14.0, cy);
+        name_x += 64.0;
+    }
+    let alpha = if busy || unsupported { 0.45 } else { 1.0 };
+    let name = text::fit(&network.ssid, Weight::Regular, LABEL_SIZE, 560.0);
+    text::draw(
+        canvas,
+        &name,
+        name_x,
+        baseline(cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        WHITE,
+        alpha,
+    );
+    wifi_glyph(
+        canvas,
+        right - 26.0,
+        cy + 16.0,
+        0.95,
+        signal_bars(network.signal),
+        WHITE,
+    );
+    if network.requires_password {
+        lock_glyph(canvas, right - 92.0, cy - 2.0, 0.9);
+    }
+    if unsupported {
+        text::draw_right(
+            canvas,
+            "Unsupported",
+            right - 130.0,
+            baseline(cy, Weight::Regular, 36.0),
+            Weight::Regular,
+            36.0,
+            SECONDARY,
+            SECONDARY_ALPHA,
+        );
+    }
+}
+
+fn draw_password(canvas: &mut Canvas, dialog: &PasswordDialog, pressed: Option<Action>) {
+    let nav_cy = NAV_HEIGHT / 2.0;
+    let nav_line = baseline(nav_cy, Weight::Regular, LABEL_SIZE);
+    text::draw(
+        canvas,
+        "Cancel",
+        MARGIN,
+        nav_line,
+        Weight::Regular,
+        LABEL_SIZE,
+        BLUE,
+        if pressed == Some(Action::CancelPassword) {
+            0.4
+        } else {
+            1.0
+        },
+    );
+    text::draw_centered(
+        canvas,
+        "Enter Password",
+        540.0,
+        nav_line,
+        Weight::SemiBold,
+        LABEL_SIZE,
+        WHITE,
+        1.0,
+    );
+    let join_alpha = if !dialog.password_is_valid() {
+        0.3
+    } else if pressed == Some(Action::SubmitPassword) {
+        0.4
+    } else {
+        1.0
+    };
+    text::draw_right(
+        canvas,
+        "Join",
+        1080.0 - MARGIN,
+        nav_line,
+        Weight::SemiBold,
+        LABEL_SIZE,
+        BLUE,
+        join_alpha,
+    );
+
+    let prompt = text::fit(
+        &format!("Enter the password for “{}”", dialog.ssid),
+        Weight::SemiBold,
+        40.0,
+        CARD_WIDTH,
+    );
+    text::draw_centered(
+        canvas,
+        &prompt,
+        540.0,
+        PASSWORD_CARD_Y - 60.0,
+        Weight::SemiBold,
+        40.0,
+        WHITE,
+        1.0,
+    );
+
+    let field = password_field();
+    grouped_card(canvas, field, 1, None);
+    let cy = field.y + field.h / 2.0;
+    let label_width = text::draw(
+        canvas,
+        "Password",
+        TEXT_X,
+        baseline(cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        WHITE,
+        1.0,
+    );
+    let dots_x = TEXT_X + label_width.max(220.0) + 40.0;
+    let visible = dialog.password_len().min(24);
+    for index in 0..visible {
+        canvas.fill_circle(dots_x + 12.0 + index as f32 * 30.0, cy, 9.0, WHITE, 1.0);
+    }
+    let caret_x = dots_x + visible as f32 * 30.0 + 2.0;
+    canvas.fill_rrect(RectF::new(caret_x, cy - 30.0, 5.0, 60.0), 2.5, BLUE, 1.0);
+
+    let (hint, color, alpha) = if dialog.submit_attempted {
+        ("Use 8–63 characters or a 64-digit hex key.", RED, 1.0)
+    } else {
+        (
+            "Sent only to the phone’s own Wi-Fi service.",
+            SECONDARY,
+            SECONDARY_ALPHA,
+        )
+    };
+    footer(canvas, hint, field.y + field.h, color, alpha);
+    let _ = dialog.security;
+
+    if !dialog.system_keyboard {
+        for key in fallback_keys(dialog.keyboard_mode) {
+            let key_pressed = pressed == Some(Action::Key(key.action));
+            let special = !matches!(key.action, KeyAction::Character(_) | KeyAction::Space);
+            let fill = match (key_pressed, special) {
+                (true, _) => 0x8a8a8f,
+                (false, true) => 0x38383b,
+                (false, false) => 0x5a5a5e,
+            };
+            canvas.fill_rrect(
+                RectF::new(key.bounds.x, key.bounds.y + 3.0, key.bounds.w, key.bounds.h),
+                15.0,
+                0x000000,
+                0.55,
+            );
+            canvas.fill_rrect(key.bounds, 15.0, fill, 1.0);
+            let size = if key.label.chars().count() == 1 {
+                60.0
+            } else {
+                40.0
+            };
+            let (kx, ky) = key.bounds.center();
+            text::draw_centered(
+                canvas,
+                &key.label,
+                kx,
+                baseline(ky, Weight::Regular, size),
+                Weight::Regular,
+                size,
+                WHITE,
+                1.0,
+            );
         }
     }
 }
 
 #[derive(Clone)]
 struct KeySpec {
-    bounds: UiRect,
+    bounds: RectF,
     label: String,
     action: KeyAction,
 }
 
-pub struct Renderer {
-    window: Window,
-    back_buffer: u32,
-    gc: Gcontext,
-    width: u16,
-    height: u16,
-}
-
-impl Renderer {
-    pub fn new(window: Window, back_buffer: u32, gc: Gcontext, width: u16, height: u16) -> Self {
-        Self {
-            window,
-            back_buffer,
-            gc,
-            width,
-            height,
-        }
-    }
-
-    pub fn resize(&mut self, back_buffer: u32, width: u16, height: u16) {
-        self.back_buffer = back_buffer;
-        self.width = width;
-        self.height = height;
-    }
-
-    pub fn size(&self) -> (u16, u16) {
-        (self.width, self.height)
-    }
-
-    pub fn height(&self) -> u16 {
-        self.height
-    }
-
-    pub fn render<C: Connection>(
-        &self,
-        conn: &C,
-        system: &SystemInfo,
-        volume: Option<u8>,
-        app: &AppModel,
-    ) -> Result<(), Box<dyn Error>> {
-        self.fill(conn, BG, UiRect::new(0, 0, self.width, self.height).x11())?;
-
-        if let Some(dialog) = &app.password_dialog {
-            self.render_password(conn, dialog)?;
-        } else {
-            match app.view {
-                View::System => self.render_system(conn, system, volume)?,
-                View::Wifi => self.render_wifi(conn, app)?,
-            }
-        }
-        self.present(conn)?;
-        Ok(())
-    }
-
-    pub fn action_at(&self, app: &AppModel, x: i16, y: i16) -> Option<Action> {
-        if app.password_dialog.is_some() {
-            if CANCEL_BUTTON.contains(x, y) {
-                return Some(Action::CancelPassword);
-            }
-            if CONNECT_BUTTON.contains(x, y) {
-                return Some(Action::SubmitPassword);
-            }
-            let dialog = app.password_dialog.as_ref()?;
-            return keyboard_keys(dialog.keyboard_mode)
-                .into_iter()
-                .find(|key| key.bounds.contains(x, y))
-                .map(|key| Action::Key(key.action));
-        }
-
-        match app.view {
-            View::System => WIFI_TAB.contains(x, y).then_some(Action::ShowWifi),
-            View::Wifi => {
-                if SYSTEM_TAB.contains(x, y) {
-                    return Some(Action::ShowSystem);
-                }
-                if REFRESH_BUTTON.contains(x, y) {
-                    return Some(Action::RefreshWifi);
-                }
-                if STATUS_ACTION.contains(x, y)
-                    && !app.busy
-                    && matches!(
-                        app.wifi_status.as_ref().map(|status| &status.state),
-                        Some(LinkState::Connected { .. })
-                    )
-                {
-                    return Some(Action::Disconnect);
-                }
-                for (row, index) in app.page_range().enumerate() {
-                    let bounds = network_bounds(row);
-                    if bounds.contains(x, y) {
-                        return Some(Action::SelectNetwork(index));
-                    }
-                }
-                if PREVIOUS_BUTTON.contains(x, y) && app.page > 0 {
-                    return Some(Action::PreviousNetworks);
-                }
-                if NEXT_BUTTON.contains(x, y) && app.page + 1 < app.page_count() {
-                    return Some(Action::NextNetworks);
-                }
-                None
-            }
-        }
-    }
-
-    fn render_system<C: Connection>(
-        &self,
-        conn: &C,
-        system: &SystemInfo,
-        volume: Option<u8>,
-    ) -> Result<(), Box<dyn Error>> {
-        self.navigation(conn, View::System)?;
-        let volume = volume.map_or_else(|| "--".into(), |value| value.to_string());
-        self.text(conn, &format!("VOLUME {volume}"), 70, 260, 5, MUTED)?;
-
-        self.metric_card(
-            conn,
-            (55, 390),
-            "CPU",
-            &usage_text(system.cpu_usage),
-            ACCENT,
-        )?;
-        self.metric_card(
-            conn,
-            (555, 390),
-            "GPU",
-            &usage_text(system.gpu_usage),
-            ACCENT_2,
-        )?;
-        self.metric_card(conn, (55, 575), "SPACE USED", &system.storage_used, FG)?;
-        self.metric_card(conn, (555, 575), "SPACE FREE", &system.storage_free, FG)?;
-
-        self.card_line(conn, 780, "DEVICE", "SAMSUNG GALAXY A26")?;
-        self.card_line(conn, 945, "KERNEL", &system.kernel)?;
-        self.card_line(conn, 1110, "ROOTFS", &format!("ALPINE {}", system.alpine))?;
-        self.card_line(conn, 1275, "MEMORY", &system.memory)?;
-        self.card_line(
-            conn,
-            1440,
-            "DISPLAY",
-            &format!("{}X{} 120 HZ", self.width, self.height),
-        )?;
-        self.card_line(conn, 1605, "WINDOW MANAGER", "A26 SHELL RUST")?;
-        self.card_line(conn, 1770, "CONTROL", "ADB UNIX SOCKET")?;
-        Ok(())
-    }
-
-    fn render_wifi<C: Connection>(&self, conn: &C, app: &AppModel) -> Result<(), Box<dyn Error>> {
-        self.navigation(conn, View::Wifi)?;
-
-        self.panel(conn, UiRect::new(55, 235, 970, 225), ACCENT)?;
-        self.text(conn, "CONNECTION", 85, 270, 3, MUTED)?;
-        let (headline, detail, can_disconnect) = wifi_status_text(app);
-        self.text(conn, &headline, 85, 325, 6, FG)?;
-        self.text(conn, &detail, 85, 395, 3, MUTED)?;
-        if can_disconnect {
-            self.button(conn, STATUS_ACTION, "DISCONNECT", false, !app.busy)?;
-        }
-
-        self.text(conn, "AVAILABLE NETWORKS", 55, 525, 5, FG)?;
-        self.button(
-            conn,
-            REFRESH_BUTTON,
-            if app.scanning { "SCANNING" } else { "REFRESH" },
-            false,
-            !app.scanning && !app.busy,
-        )?;
-        if let Some(notice) = app.notice {
-            self.text(conn, notice, 55, 610, 3, notice_color(notice))?;
-        } else if app.scanning {
-            self.text(conn, "LOOKING FOR NEARBY WI-FI", 55, 610, 3, MUTED)?;
-        } else {
-            self.text(conn, "TAP A NETWORK TO CONNECT", 55, 610, 3, MUTED)?;
-        }
-
-        if app.networks.is_empty() {
-            self.panel(conn, UiRect::new(55, NETWORK_Y, 970, 210), ACCENT_2)?;
-            self.center_text(conn, "NO SCAN RESULTS", NETWORK_Y + 62, 5, MUTED)?;
-        } else {
-            for (row, index) in app.page_range().enumerate() {
-                self.network_row(conn, row, &app.networks[index], app.busy)?;
-            }
-        }
-
-        if app.page_count() > 1 {
-            self.button(conn, PREVIOUS_BUTTON, "PREV", false, app.page > 0)?;
-            self.button(
-                conn,
-                NEXT_BUTTON,
-                "NEXT",
-                false,
-                app.page + 1 < app.page_count(),
-            )?;
-            self.center_text(
-                conn,
-                &format!("PAGE {} OF {}", app.page + 1, app.page_count()),
-                1905,
-                4,
-                MUTED,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn navigation<C: Connection>(&self, conn: &C, active: View) -> Result<(), Box<dyn Error>> {
-        let system_color = if active == View::System {
-            ACCENT
-        } else {
-            MUTED
-        };
-        let wifi_color = if active == View::Wifi { ACCENT } else { MUTED };
-        self.text(conn, "SYSTEM", 70, 100, 6, system_color)?;
-        self.text(conn, "WI-FI", 345, 100, 6, wifi_color)?;
-
-        let active_tab = if active == View::System {
-            SYSTEM_TAB
-        } else {
-            WIFI_TAB
-        };
-        self.fill(
-            conn,
-            ACCENT,
-            UiRect::new(active_tab.x + 15, 171, active_tab.width - 30, 4).x11(),
-        )?;
-        self.fill(
-            conn,
-            BG_CARD,
-            UiRect::new(55, 200, self.width.saturating_sub(110), 1).x11(),
-        )
-    }
-
-    fn render_password<C: Connection>(
-        &self,
-        conn: &C,
-        dialog: &PasswordDialog,
-    ) -> Result<(), Box<dyn Error>> {
-        self.text(conn, "JOIN WI-FI", 55, 95, 8, ACCENT)?;
-        self.button(conn, CANCEL_BUTTON, "CANCEL", false, true)?;
-
-        self.panel(conn, UiRect::new(55, 235, 970, 185), ACCENT_2)?;
-        self.text(conn, "NETWORK", 85, 270, 3, MUTED)?;
-        self.text(conn, &safe_text(&dialog.ssid, 26), 85, 325, 6, FG)?;
-        self.text(conn, dialog.security.label(), 85, 380, 3, MUTED)?;
-
-        self.panel(conn, UiRect::new(55, 460, 970, 185), ACCENT)?;
-        self.text(conn, "PASSWORD", 85, 495, 3, MUTED)?;
-        let password_line = if dialog.password_len() == 0 {
-            "TAP KEYS TO ENTER".to_owned()
-        } else {
-            let visible = dialog.password_len().min(20);
-            let prefix = if dialog.password_len() > visible {
-                "..."
-            } else {
-                ""
-            };
-            format!(
-                "{prefix}{}  {}/64",
-                "*".repeat(visible),
-                dialog.password_len()
-            )
-        };
-        self.text(
-            conn,
-            &password_line,
-            85,
-            550,
-            5,
-            if dialog.password_len() == 0 {
-                MUTED
-            } else {
-                FG
-            },
-        )?;
-        let (hint, hint_color) = if dialog.submit_attempted {
-            ("USE 8-63 CHARACTERS OR A 64-DIGIT HEX KEY", DANGER)
-        } else if dialog.password_is_valid() {
-            ("PASSWORD LENGTH IS VALID", ACCENT)
-        } else {
-            ("PASSWORD IS NEVER SAVED BY THIS APP", MUTED)
-        };
-        self.text(conn, hint, 55, 690, 3, hint_color)?;
-
-        for key in keyboard_keys(dialog.keyboard_mode) {
-            self.button(conn, key.bounds, &key.label, false, true)?;
-        }
-        self.button(
-            conn,
-            CONNECT_BUTTON,
-            "CONNECT",
-            true,
-            dialog.password_is_valid(),
-        )?;
-        self.center_text(
-            conn,
-            "CREDENTIAL IS SENT ONLY TO THE LOCAL WI-FI SERVICE",
-            1715,
-            3,
-            MUTED,
-        )?;
-        Ok(())
-    }
-
-    fn network_row<C: Connection>(
-        &self,
-        conn: &C,
-        row: usize,
-        network: &WifiNetwork,
-        busy: bool,
-    ) -> Result<(), Box<dyn Error>> {
-        let bounds = network_bounds(row);
-        self.panel(
-            conn,
-            bounds,
-            if network.connected { ACCENT } else { ACCENT_2 },
-        )?;
-        self.text(
-            conn,
-            &safe_text(&network.ssid, 24),
-            85,
-            bounds.y + 35,
-            5,
-            FG,
-        )?;
-        let access = if network.connected {
-            "CONNECTED"
-        } else if network.security == crate::wifi::Security::Enterprise {
-            "UNSUPPORTED"
-        } else if network.requires_password {
-            "PASSWORD"
-        } else {
-            "TAP TO JOIN"
-        };
-        self.text(
-            conn,
-            &format!(
-                "{}  /  {}%  /  {access}",
-                network.security.label(),
-                network.signal
-            ),
-            85,
-            bounds.y + 120,
-            3,
-            if busy { BG_DISABLED } else { MUTED },
-        )?;
-        self.signal_bars(conn, 880, bounds.y + 55, network.signal)?;
-        Ok(())
-    }
-
-    fn signal_bars<C: Connection>(
-        &self,
-        conn: &C,
-        x: i16,
-        y: i16,
-        signal: u8,
-    ) -> Result<(), Box<dyn Error>> {
-        for index in 0..4_u8 {
-            let height = u16::from(index + 1) * 14;
-            let active = signal > index * 25;
-            self.fill(
-                conn,
-                if active { ACCENT } else { BG_DISABLED },
-                Rectangle {
-                    x: x + i16::from(index) * 28,
-                    y: y + 56 - i16::try_from(height).unwrap_or(0),
-                    width: 18,
-                    height,
-                },
-            )?;
-        }
-        Ok(())
-    }
-
-    fn metric_card<C: Connection>(
-        &self,
-        conn: &C,
-        position: (i16, i16),
-        noun: &str,
-        value: &str,
-        color: u32,
-    ) -> Result<(), Box<dyn Error>> {
-        let (x, y) = position;
-        self.fill(conn, BG_CARD, UiRect::new(x, y, 470, 145).x11())?;
-        self.text(conn, noun, x + 28, y + 24, 3, MUTED)?;
-        let clipped: String = value.chars().take(12).collect();
-        self.text(conn, &clipped, x + 28, y + 73, 6, color)?;
-        Ok(())
-    }
-
-    fn card_line<C: Connection>(
-        &self,
-        conn: &C,
-        y: i16,
-        noun: &str,
-        value: &str,
-    ) -> Result<(), Box<dyn Error>> {
-        self.fill(
-            conn,
-            BG_CARD,
-            UiRect::new(55, y, self.width.saturating_sub(110), 145).x11(),
-        )?;
-        self.text(conn, noun, 85, y + 25, 4, MUTED)?;
-        self.text(conn, &safe_text(value, 28), 85, y + 78, 4, FG)?;
-        Ok(())
-    }
-
-    fn panel<C: Connection>(
-        &self,
-        conn: &C,
-        bounds: UiRect,
-        stripe: u32,
-    ) -> Result<(), Box<dyn Error>> {
-        self.fill(conn, BG_CARD, bounds.x11())?;
-        self.fill(
-            conn,
-            stripe,
-            UiRect::new(bounds.x, bounds.y, 9, bounds.height).x11(),
-        )
-    }
-
-    fn button<C: Connection>(
-        &self,
-        conn: &C,
-        bounds: UiRect,
-        label: &str,
-        primary: bool,
-        enabled: bool,
-    ) -> Result<(), Box<dyn Error>> {
-        let background = if !enabled {
-            BG_DISABLED
-        } else if primary {
-            ACCENT
-        } else {
-            BG_KEY
-        };
-        let foreground = if primary && enabled {
-            BG
-        } else if enabled {
-            FG
-        } else {
-            MUTED
-        };
-        self.fill(conn, background, bounds.x11())?;
-        if enabled && !primary {
-            self.fill(
-                conn,
-                ACCENT_2,
-                UiRect::new(bounds.x, bounds.y, bounds.width, 5).x11(),
-            )?;
-        }
-        let scale = button_scale(label, bounds.width);
-        let text_width = font::text_width(label, scale);
-        let x = bounds.x + (bounds.width.saturating_sub(text_width) / 2) as i16;
-        let glyph_height = 7_u16.saturating_mul(scale);
-        let y = bounds.y + (bounds.height.saturating_sub(glyph_height) / 2) as i16;
-        self.text(conn, label, x, y, scale, foreground)
-    }
-
-    fn center_text<C: Connection>(
-        &self,
-        conn: &C,
-        text: &str,
-        y: i16,
-        scale: u16,
-        color: u32,
-    ) -> Result<(), Box<dyn Error>> {
-        let width = font::text_width(text, scale);
-        let x = self.width.saturating_sub(width) / 2;
-        self.text(conn, text, x as i16, y, scale, color)
-    }
-
-    fn text<C: Connection>(
-        &self,
-        conn: &C,
-        text: &str,
-        x: i16,
-        y: i16,
-        scale: u16,
-        color: u32,
-    ) -> Result<(), Box<dyn Error>> {
-        let rectangles = font::rectangles(text, x, y, scale);
-        conn.change_gc(self.gc, &ChangeGCAux::new().foreground(color))?;
-        if !rectangles.is_empty() {
-            conn.poly_fill_rectangle(self.back_buffer, self.gc, &rectangles)?;
-        }
-        Ok(())
-    }
-
-    fn fill<C: Connection>(
-        &self,
-        conn: &C,
-        color: u32,
-        rectangle: Rectangle,
-    ) -> Result<(), Box<dyn Error>> {
-        conn.change_gc(self.gc, &ChangeGCAux::new().foreground(color))?;
-        conn.poly_fill_rectangle(self.back_buffer, self.gc, &[rectangle])?;
-        Ok(())
-    }
-
-    fn present<C: Connection>(&self, conn: &C) -> Result<(), Box<dyn Error>> {
-        // The panel scans out at 120 Hz. Assemble each complete one-second
-        // metrics frame off-screen so it becomes visible in one copy rather
-        // than exposing the background and each card as separate repaints.
-        conn.copy_area(
-            self.back_buffer,
-            self.window,
-            self.gc,
-            0,
-            0,
-            0,
-            0,
-            self.width,
-            self.height,
-        )?;
-        conn.flush()?;
-        Ok(())
-    }
-}
-
-fn network_bounds(row: usize) -> UiRect {
-    UiRect::new(
-        NETWORK_X,
-        NETWORK_Y + i16::try_from(row).unwrap_or(0) * NETWORK_STEP,
-        NETWORK_WIDTH,
-        NETWORK_HEIGHT,
-    )
-}
-
-fn wifi_status_text(app: &AppModel) -> (String, String, bool) {
-    let Some(status) = &app.wifi_status else {
-        return (
-            "SERVICE UNAVAILABLE".into(),
-            "CHECK THE LOCAL WI-FI BACKEND".into(),
-            false,
-        );
-    };
-    if !status.radio_enabled {
-        return ("WI-FI OFF".into(), "ENABLE IT IN THE BACKEND".into(), false);
-    }
-    match &status.state {
-        LinkState::Disconnected => (
-            "NOT CONNECTED".into(),
-            "CHOOSE A NETWORK BELOW".into(),
-            false,
-        ),
-        LinkState::Connecting { ssid } => (
-            format!("JOINING {}", safe_text(ssid, 15)),
-            "AUTHENTICATING".into(),
-            false,
-        ),
-        LinkState::Connected {
-            ssid,
-            signal,
-            ip_address,
-        } => {
-            let mut details =
-                signal.map_or_else(|| "CONNECTED".into(), |value| format!("{value}% SIGNAL"));
-            if let Some(ip) = ip_address {
-                details.push_str("  /  ");
-                details.push_str(&safe_text(ip, 20));
-            }
-            (safe_text(ssid, 18), details, true)
-        }
-        LinkState::Disconnecting => ("DISCONNECTING".into(), "PLEASE WAIT".into(), false),
-    }
-}
-
-fn notice_color(notice: &str) -> u32 {
-    if matches!(notice, "CONNECTED" | "DISCONNECTED") {
-        ACCENT
-    } else if notice.contains("PASSWORD") || notice.contains("FAILED") {
-        DANGER
-    } else {
-        WARNING
-    }
-}
-
-fn safe_text(text: &str, max_characters: usize) -> String {
-    text.chars()
-        .take(max_characters)
-        .map(|character| {
-            if character == ' ' || character.is_ascii_graphic() {
-                character
-            } else {
-                '?'
-            }
-        })
-        .collect()
-}
-
-fn button_scale(label: &str, width: u16) -> u16 {
-    for scale in (2..=5).rev() {
-        if font::text_width(label, scale) <= width.saturating_sub(24) {
-            return scale;
-        }
-    }
-    2
-}
-
-fn keyboard_keys(mode: KeyboardMode) -> Vec<KeySpec> {
+/// The in-app keyboard, used only when Moon's system keyboard is unavailable.
+fn fallback_keys(mode: KeyboardMode) -> Vec<KeySpec> {
     let mut keys = Vec::new();
+    let row = |index: usize| FALLBACK_KEYBOARD_Y + index as f32 * 150.0;
     match mode {
         KeyboardMode::Lower | KeyboardMode::Upper => {
-            character_row(&mut keys, "qwertyuiop", 55, 790, 970, mode);
-            character_row(&mut keys, "asdfghjkl", 105, 945, 870, mode);
+            character_row(&mut keys, "qwertyuiop", 16.0, row(0), 1048.0, mode);
+            character_row(&mut keys, "asdfghjkl", 68.0, row(1), 944.0, mode);
             keys.push(KeySpec {
-                bounds: UiRect::new(55, 1100, 140, 135),
-                label: "SHIFT".into(),
+                bounds: RectF::new(16.0, row(2), 140.0, 132.0),
+                label: if mode == KeyboardMode::Upper {
+                    "⇧".into()
+                } else {
+                    "shift".into()
+                },
                 action: KeyAction::Shift,
             });
-            character_row(&mut keys, "zxcvbnm", 205, 1100, 620, mode);
+            character_row(&mut keys, "zxcvbnm", 172.0, row(2), 736.0, mode);
             keys.push(KeySpec {
-                bounds: UiRect::new(835, 1100, 190, 135),
-                label: "BACK".into(),
+                bounds: RectF::new(924.0, row(2), 140.0, 132.0),
+                label: "delete".into(),
                 action: KeyAction::Backspace,
             });
             bottom_keys(
                 &mut keys,
+                row(3),
                 "123",
                 KeyAction::Symbols,
-                "CLEAR",
+                "clear",
                 KeyAction::Clear,
             );
         }
         KeyboardMode::Symbols => {
-            character_row(&mut keys, "1234567890", 55, 790, 970, mode);
-            character_row(&mut keys, "!@#$%^&*()", 55, 945, 970, mode);
-            character_row(&mut keys, "-_+=[]{}:;", 55, 1100, 970, mode);
-            symbol_bottom_keys(&mut keys, "MORE", KeyAction::MoreSymbols);
+            character_row(&mut keys, "1234567890", 16.0, row(0), 1048.0, mode);
+            character_row(&mut keys, "!@#$%^&*()", 16.0, row(1), 1048.0, mode);
+            character_row(&mut keys, "-_+=[]{}:;", 16.0, row(2), 1048.0, mode);
+            symbol_bottom_keys(&mut keys, row(3), "#+=", KeyAction::MoreSymbols);
         }
         KeyboardMode::MoreSymbols => {
-            character_row(&mut keys, "`~|\\/\"'<>?", 55, 790, 970, mode);
-            character_row(&mut keys, ".,:;!@#$%&", 55, 945, 970, mode);
-            character_row(&mut keys, "^*()_+-=[]", 55, 1100, 970, mode);
-            symbol_bottom_keys(&mut keys, "123", KeyAction::Symbols);
+            character_row(&mut keys, "`~|\\/\"'<>?", 16.0, row(0), 1048.0, mode);
+            character_row(&mut keys, ".,:;!@#$%&", 16.0, row(1), 1048.0, mode);
+            character_row(&mut keys, "^*()_+-=[]", 16.0, row(2), 1048.0, mode);
+            symbol_bottom_keys(&mut keys, row(3), "123", KeyAction::Symbols);
         }
     }
     keys
@@ -718,25 +1194,22 @@ fn keyboard_keys(mode: KeyboardMode) -> Vec<KeySpec> {
 fn character_row(
     keys: &mut Vec<KeySpec>,
     characters: &str,
-    x: i16,
-    y: i16,
-    width: u16,
+    x: f32,
+    y: f32,
+    width: f32,
     mode: KeyboardMode,
 ) {
-    let count = characters.chars().count() as u16;
-    let gap = 10_u16;
-    let key_width = width.saturating_sub(gap.saturating_mul(count.saturating_sub(1))) / count;
+    let count = characters.chars().count() as f32;
+    let gap = 12.0;
+    let key_width = (width - gap * (count - 1.0)) / count;
     for (index, character) in characters.chars().enumerate() {
-        let offset = u16::try_from(index)
-            .unwrap_or(0)
-            .saturating_mul(key_width.saturating_add(gap));
         let label = if mode == KeyboardMode::Upper {
             character.to_ascii_uppercase()
         } else {
             character
         };
         keys.push(KeySpec {
-            bounds: UiRect::new(x + offset as i16, y, key_width, 135),
+            bounds: RectF::new(x + index as f32 * (key_width + gap), y, key_width, 132.0),
             label: label.to_string(),
             action: KeyAction::Character(character),
         });
@@ -745,6 +1218,7 @@ fn character_row(
 
 fn bottom_keys(
     keys: &mut Vec<KeySpec>,
+    y: f32,
     left_label: &str,
     left_action: KeyAction,
     right_label: &str,
@@ -752,42 +1226,42 @@ fn bottom_keys(
 ) {
     keys.extend([
         KeySpec {
-            bounds: UiRect::new(55, 1255, 180, 135),
+            bounds: RectF::new(16.0, y, 220.0, 132.0),
             label: left_label.into(),
             action: left_action,
         },
         KeySpec {
-            bounds: UiRect::new(245, 1255, 570, 135),
-            label: "SPACE".into(),
+            bounds: RectF::new(248.0, y, 584.0, 132.0),
+            label: "space".into(),
             action: KeyAction::Space,
         },
         KeySpec {
-            bounds: UiRect::new(825, 1255, 200, 135),
+            bounds: RectF::new(844.0, y, 220.0, 132.0),
             label: right_label.into(),
             action: right_action,
         },
     ]);
 }
 
-fn symbol_bottom_keys(keys: &mut Vec<KeySpec>, right_label: &str, right_action: KeyAction) {
+fn symbol_bottom_keys(keys: &mut Vec<KeySpec>, y: f32, right_label: &str, right_action: KeyAction) {
     keys.extend([
         KeySpec {
-            bounds: UiRect::new(55, 1255, 170, 135),
+            bounds: RectF::new(16.0, y, 200.0, 132.0),
             label: "ABC".into(),
             action: KeyAction::Letters,
         },
         KeySpec {
-            bounds: UiRect::new(235, 1255, 420, 135),
-            label: "SPACE".into(),
+            bounds: RectF::new(228.0, y, 420.0, 132.0),
+            label: "space".into(),
             action: KeyAction::Space,
         },
         KeySpec {
-            bounds: UiRect::new(665, 1255, 170, 135),
-            label: "BACK".into(),
+            bounds: RectF::new(660.0, y, 200.0, 132.0),
+            label: "delete".into(),
             action: KeyAction::Backspace,
         },
         KeySpec {
-            bounds: UiRect::new(845, 1255, 180, 135),
+            bounds: RectF::new(872.0, y, 192.0, 132.0),
             label: right_label.into(),
             action: right_action,
         },
@@ -799,13 +1273,18 @@ mod tests {
     use super::*;
     use crate::wifi::{Security, WifiNetwork};
 
+    const HEIGHT: f32 = 2216.0;
+
     #[test]
     fn system_and_wifi_hit_targets_are_large_and_deterministic() {
-        let renderer = Renderer::new(1, 3, 2, 1080, 2340);
         let mut app = AppModel::default();
-        assert_eq!(renderer.action_at(&app, 430, 120), Some(Action::ShowWifi));
-        assert_eq!(renderer.action_at(&app, 170, 120), None);
-        assert_eq!(renderer.action_at(&app, 540, 2290), None);
+        let (wx, wy) = wifi_row().center();
+        assert_eq!(
+            action_at(&app, HEIGHT, wx as i16, wy as i16),
+            Some(Action::ShowWifi)
+        );
+        assert_eq!(action_at(&app, HEIGHT, 540, 1400), None);
+        assert_eq!(action_at(&app, HEIGHT, 540, 2150), None);
 
         app.view = View::Wifi;
         app.networks.push(WifiNetwork {
@@ -815,17 +1294,17 @@ mod tests {
             requires_password: false,
             connected: false,
         });
+        let row = WifiLayout::new(&app).network_row(0);
         assert_eq!(
-            renderer.action_at(&app, 500, NETWORK_Y + 100),
+            action_at(&app, HEIGHT, 500, (row.y + row.h / 2.0) as i16),
             Some(Action::SelectNetwork(0))
         );
-        assert_eq!(renderer.action_at(&app, 170, 120), Some(Action::ShowSystem));
-        assert_eq!(renderer.action_at(&app, 430, 120), None);
+        assert_eq!(action_at(&app, HEIGHT, 120, 70), Some(Action::ShowSystem));
+        assert_eq!(action_at(&app, HEIGHT, wx as i16, wy as i16), None);
     }
 
     #[test]
     fn password_keyboard_mapping_matches_rendered_keys() {
-        let renderer = Renderer::new(1, 3, 2, 1080, 2340);
         let mut app = AppModel::default();
         app.networks.push(WifiNetwork {
             ssid: "secure".into(),
@@ -836,21 +1315,48 @@ mod tests {
         });
         app.handle(Action::SelectNetwork(0));
         assert_eq!(
-            renderer.action_at(&app, 90, 850),
+            action_at(&app, HEIGHT, 60, (FALLBACK_KEYBOARD_Y + 60.0) as i16),
             Some(Action::Key(KeyAction::Character('q')))
         );
         assert_eq!(
-            renderer.action_at(&app, 500, 1570),
+            action_at(&app, HEIGHT, 960, 70),
             Some(Action::SubmitPassword)
         );
-        assert_eq!(renderer.action_at(&app, 500, 2250), None);
+        assert_eq!(
+            action_at(&app, HEIGHT, 100, 70),
+            Some(Action::CancelPassword)
+        );
+        assert_eq!(action_at(&app, HEIGHT, 500, 2150), None);
+
+        // With Moon's keyboard up, the in-app keys are neither drawn nor hit.
+        app.password_dialog.as_mut().unwrap().system_keyboard = true;
+        assert_eq!(
+            action_at(&app, 1396.0, 60, (FALLBACK_KEYBOARD_Y + 60.0) as i16),
+            None
+        );
+        let (fx, fy) = password_field().center();
+        assert_eq!(
+            action_at(&app, 1396.0, fx as i16, fy as i16),
+            Some(Action::FocusPassword)
+        );
     }
 
     #[test]
-    fn pages_never_render_more_than_five_network_rows() {
-        assert_eq!(crate::app::NETWORKS_PER_PAGE, 5);
-        assert!(
-            network_bounds(crate::app::NETWORKS_PER_PAGE - 1).y + NETWORK_HEIGHT as i16 <= 1830
-        );
+    fn a_full_network_page_stays_clear_of_the_gesture_zone() {
+        let mut app = AppModel::default();
+        app.view = View::Wifi;
+        app.networks = (0..20)
+            .map(|index| WifiNetwork {
+                ssid: format!("n{index}"),
+                signal: 50,
+                security: Security::Open,
+                requires_password: false,
+                connected: false,
+            })
+            .collect();
+        let layout = WifiLayout::new(&app);
+        let last = layout.network_row(crate::app::NETWORKS_PER_PAGE - 1);
+        assert!(last.y + last.h <= layout.previous.y);
+        assert!(layout.previous.y + layout.previous.h <= HEIGHT - BOTTOM_GESTURE_RESERVE);
     }
 }
