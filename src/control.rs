@@ -24,10 +24,23 @@ fn read_volume_from(path: &Path) -> Option<u8> {
     parse_volume_response(&request(path, b"state\n")?)
 }
 
-/// Asks Moon to show its system keyboard for password entry. Returns whether
-/// the keyboard is now visible; Moon refuses while locked or launching.
-pub fn show_password_keyboard() -> bool {
-    request(&socket(), b"keyboard show password\n")
+/// Moon keyboard layouts this app asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardPurpose {
+    Text,
+    Url,
+    Password,
+}
+
+/// Asks Moon to show its system keyboard. Returns whether the keyboard is
+/// now visible; Moon refuses while locked or launching.
+pub fn show_keyboard(purpose: KeyboardPurpose) -> bool {
+    let command: &[u8] = match purpose {
+        KeyboardPurpose::Text => b"keyboard show text\n",
+        KeyboardPurpose::Url => b"keyboard show url\n",
+        KeyboardPurpose::Password => b"keyboard show password\n",
+    };
+    request(&socket(), command)
         .as_deref()
         .and_then(parse_keyboard_visible)
         .unwrap_or(false)

@@ -10,6 +10,11 @@ is deliberately **not** an override-redirect window.
   <img src="docs/wifi-view.png" width="32%" alt="Wi-Fi page">
   <img src="docs/password-view.png" width="32%" alt="Password entry with Moon's keyboard">
 </p>
+<p>
+  <img src="docs/enterprise-empty.png" width="32%" alt="Enterprise sign-in page">
+  <img src="docs/enterprise-filled.png" width="32%" alt="Enterprise sign-in filled in">
+  <img src="docs/enterprise-connected.png" width="32%" alt="Joined an enterprise network">
+</p>
 
 Companion window manager: Moon, in <https://github.com/Yeyito777/OSS-Phone-V1>
 
@@ -28,7 +33,14 @@ System page shows:
 The Wi-Fi page, pushed with a "‹ System" back button, shows the current link
 with its IP address and a Disconnect row, a Scan control, inline status, and
 seven-row scan pages with lock and signal glyphs and whole-row SSID targets.
-Protected networks open a password page. The app asks Moon for its system
+Protected networks open a password page. A new WPA2-Enterprise network
+(PEAP/MSCHAPv2, such as eduroam) opens a sign-in page with Username, Password,
+and Server fields; Server is the RADIUS name its certificate must match, and
+Return moves to the next empty field before joining. Saved enterprise networks
+reconnect without asking. The identity and password live only in zeroizing,
+debug-redacted buffers and are sent once, straight into the root-only Wi-Fi
+socket (`connect_enterprise`); nothing typed is logged or kept in app state
+after the request. The app asks Moon for its system
 keyboard (`keyboard show password` on Moon's control socket) and decodes the
 resulting XTEST key presses on its own window; Return joins. If Moon refuses,
 an in-app keyboard is shown instead. The entry accepts WPA Personal
@@ -176,8 +188,10 @@ graphics and Java framework are resumed. `scripts/wifi-start.sh` and
   256-bit PSK into a tmpfs-backed supplicant configuration and, only after
   association to the exact requested SSID succeeds, atomically persists that derived key in
   `/var/lib/a26-wifi/networks.json`, owned by root with mode `0600`; it never
-  persists the original passphrase. WPA3-SAE and enterprise authentication are
-  intentionally rejected by the initial backend rather than handled unsafely.
+  persists the original passphrase. For WPA2-Enterprise (PEAP/MSCHAPv2) it
+  keeps only the identity, the MSCHAPv2 NT hash, and the server domain, and
+  validates the server certificate against the system CA bundle and that
+  domain. WPA3-SAE is intentionally rejected rather than handled unsafely.
 - Launcher integration can use the installed BGRX icon directly; the app does
   not load the icon while rendering the System scene.
 

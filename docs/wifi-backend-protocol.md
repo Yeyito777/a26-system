@@ -98,7 +98,8 @@ Result:
 ```
 
 `security` is `open`, `wpa2`, `wpa3`, or `enterprise`. The current UI labels
-WPA3 and enterprise networks as unsupported. `requires_password` is false for
+WPA3 networks as unsupported; enterprise networks open a sign-in page unless
+the backend already holds their credential. `requires_password` is false for
 open networks and may also be false when the backend has a credential in its own
 root-only credential store. A scan result never describes or returns that
 credential. The UI de-duplicates SSIDs and sorts connected first, then by
@@ -155,9 +156,10 @@ without control characters; both follow the same rules as `password` above
 certificate must chain to the system CA bundle
 (`/etc/ssl/certs/ca-certificates.crt`) and carry a DNS name ending in it, so a
 network without a validatable server is never sent the inner credentials. The
-result has the `status` shape. The UI does not send this command; root
-provisioning tools do, e.g. `a26-wifi-ctl connect-enterprise SSID DOMAIN`,
-which reads the identity and password lines from stdin.
+result has the `status` shape. The System app sends this command when a new
+enterprise network is joined from its Username/Password/Server page; root
+provisioning tools can too, e.g. `a26-wifi-ctl connect-enterprise SSID
+DOMAIN`, which reads the identity and password lines from stdin.
 
 ### `disconnect`
 

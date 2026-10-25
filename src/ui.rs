@@ -9,7 +9,7 @@ use std::error::Error;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::Window;
 
-use crate::app::{Action, AppModel, KeyAction, KeyboardMode, PasswordDialog, View};
+use crate::app::{Action, AppModel, Field, KeyAction, KeyboardMode, PasswordDialog, View};
 use crate::gfx::{Canvas, Path, RectF, Rgb};
 use crate::metrics::{SystemInfo, usage_text};
 use crate::present::Presenter;
@@ -60,7 +60,8 @@ const NAV_HEIGHT: f32 = 150.0;
 const CANCEL_BUTTON: RectF = RectF::new(0.0, 0.0, 330.0, NAV_HEIGHT);
 const JOIN_BUTTON: RectF = RectF::new(750.0, 0.0, 330.0, NAV_HEIGHT);
 const PASSWORD_CARD_Y: f32 = 300.0;
-const FALLBACK_KEYBOARD_Y: f32 = 640.0;
+/// Gap between the last field and the fallback in-app keyboard.
+const FALLBACK_KEYBOARD_GAP: f32 = 212.0;
 
 pub struct Renderer {
     window: Window,
@@ -158,13 +159,19 @@ pub fn action_at(app: &AppModel, height: f32, x: i16, y: i16) -> Option<Action> 
         if JOIN_BUTTON.contains(x, y) {
             return Some(Action::SubmitPassword);
         }
-        if password_field().contains(x, y) {
-            return Some(Action::FocusPassword);
+        if let Some(field) = dialog
+            .fields()
+            .iter()
+            .enumerate()
+            .find(|(index, _)| field_rect(*index).contains(x, y))
+            .map(|(_, field)| *field)
+        {
+            return Some(Action::Focus(field));
         }
         if dialog.system_keyboard {
             return None;
         }
-        return fallback_keys(dialog.keyboard_mode)
+        return fallback_keys(dialog.keyboard_mode, fallback_keyboard_y(dialog))
             .into_iter()
             .find(|key| key.bounds.contains(x, y))
             .map(|key| Action::Key(key.action));
@@ -209,8 +216,16 @@ fn wifi_row() -> RectF {
     card(SYSTEM_CARD_Y, ROW)
 }
 
-fn password_field() -> RectF {
-    card(PASSWORD_CARD_Y, ROW)
+fn field_rect(index: usize) -> RectF {
+    card(PASSWORD_CARD_Y + index as f32 * ROW, ROW)
+}
+
+fn fields_bottom(dialog: &PasswordDialog) -> f32 {
+    PASSWORD_CARD_Y + dialog.fields().len() as f32 * ROW
+}
+
+fn fallback_keyboard_y(dialog: &PasswordDialog) -> f32 {
+    fields_bottom(dialog) + FALLBACK_KEYBOARD_GAP
 }
 
 fn baseline(center_y: f32, weight: Weight, size: f32) -> f32 {
@@ -849,7 +864,13 @@ fn draw_wifi(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) {
             }
         },
     }
-    let redundant = app.wifi_status.is_none() && app.notice == Some("Wi-Fi service unavailable");
+    // The status row already says "Joining …" or "Service Unavailable".
+    let joining = matches!(
+        app.wifi_status.as_ref().map(|status| &status.state),
+        Some(LinkState::Connecting { .. })
+    );
+    let redundant = (app.wifi_status.is_none() && app.notice == Some("Wi-Fi service unavailable"))
+        || (joining && app.notice == Some("Connecting…"));
     if let Some(notice) = app.notice.filter(|_| !redundant) {
         let error = !matches!(notice, "Connected" | "Disconnected" | "Connecting…");
         footer(
@@ -1050,12 +1071,12 @@ fn draw_password(canvas: &mut Canvas, dialog: &PasswordDialog, pressed: Option<A
         join_alpha,
     );
 
-    let prompt = text::fit(
-        &format!("Enter the password for “{}”", dialog.ssid),
-        Weight::SemiBold,
-        40.0,
-        CARD_WIDTH,
-    );
+    let prompt = if dialog.enterprise.is_some() {
+        format!("Sign in to “{}”", dialog.ssid)
+    } else {
+        format!("Enter the password for “{}”", dialog.ssid)
+    };
+    let prompt = text::fit(&prompt, Weight::SemiBold, 40.0, CARD_WIDTH);
     text::draw_centered(
         canvas,
         &prompt,
@@ -1067,41 +1088,132 @@ fn draw_password(canvas: &mut Canvas, dialog: &PasswordDialog, pressed: Option<A
         1.0,
     );
 
-    let field = password_field();
-    grouped_card(canvas, field, 1, None);
-    let cy = field.y + field.h / 2.0;
-    let label_width = text::draw(
+    let fields = dialog.fields();
+    grouped_card(
         canvas,
-        "Password",
-        TEXT_X,
-        baseline(cy, Weight::Regular, LABEL_SIZE),
-        Weight::Regular,
-        LABEL_SIZE,
-        WHITE,
-        1.0,
+        card(PASSWORD_CARD_Y, ROW * fields.len() as f32),
+        fields.len(),
+        None,
     );
-    let dots_x = TEXT_X + label_width.max(220.0) + 40.0;
-    let visible = dialog.password_len().min(24);
-    for index in 0..visible {
-        canvas.fill_circle(dots_x + 12.0 + index as f32 * 30.0, cy, 9.0, WHITE, 1.0);
+    let value_x = TEXT_X
+        + if dialog.enterprise.is_some() {
+            250.0
+        } else {
+            260.0
+        };
+    let value_width = MARGIN + CARD_WIDTH - 44.0 - value_x - 12.0;
+    for (index, field) in fields.iter().copied().enumerate() {
+        let rect = field_rect(index);
+        let cy = rect.y + rect.h / 2.0;
+        let line = baseline(cy, Weight::Regular, LABEL_SIZE);
+        let label = match field {
+            Field::Identity => "Username",
+            Field::Password => "Password",
+            Field::Domain => "Server",
+        };
+        let flagged = dialog.submit_attempted && !dialog.field_is_valid(field);
+        text::draw(
+            canvas,
+            label,
+            TEXT_X,
+            line,
+            Weight::Regular,
+            LABEL_SIZE,
+            if flagged { RED } else { WHITE },
+            1.0,
+        );
+        let focused = dialog.focus == field;
+        let caret_x = match field {
+            Field::Password => {
+                let pitch = 30.0;
+                let fit = ((value_width - 20.0) / pitch) as usize;
+                let visible = dialog.password_len().min(fit);
+                for dot in 0..visible {
+                    canvas.fill_circle(value_x + 12.0 + dot as f32 * pitch, cy, 9.0, WHITE, 1.0);
+                }
+                (visible > 0 || focused).then_some(value_x + visible as f32 * pitch + 2.0)
+            }
+            Field::Identity | Field::Domain => {
+                let value = match field {
+                    Field::Identity => dialog.identity_text(),
+                    _ => dialog.enterprise.as_ref().map_or("", |e| e.domain.as_str()),
+                };
+                if value.is_empty() {
+                    None
+                } else {
+                    let shown = tail_fit(value, Weight::Regular, LABEL_SIZE, value_width - 12.0);
+                    let width = text::draw(
+                        canvas,
+                        &shown,
+                        value_x,
+                        line,
+                        Weight::Regular,
+                        LABEL_SIZE,
+                        WHITE,
+                        1.0,
+                    );
+                    Some(value_x + width + 4.0)
+                }
+            }
+        };
+        if caret_x.is_none() && !(focused && field == Field::Password) {
+            let placeholder = match field {
+                Field::Domain => "radius.example.edu",
+                _ => "Required",
+            };
+            text::draw(
+                canvas,
+                placeholder,
+                value_x + if focused { 12.0 } else { 0.0 },
+                line,
+                Weight::Regular,
+                LABEL_SIZE,
+                SECONDARY,
+                TERTIARY_ALPHA,
+            );
+        }
+        if focused {
+            canvas.fill_rrect(
+                RectF::new(caret_x.unwrap_or(value_x), cy - 30.0, 5.0, 60.0),
+                2.5,
+                BLUE,
+                1.0,
+            );
+        }
+        if index + 1 < fields.len() {
+            separator(canvas, rect.y + rect.h - 1.0, TEXT_X);
+        }
     }
-    let caret_x = dots_x + visible as f32 * 30.0 + 2.0;
-    canvas.fill_rrect(RectF::new(caret_x, cy - 30.0, 5.0, 60.0), 2.5, BLUE, 1.0);
 
-    let (hint, color, alpha) = if dialog.submit_attempted {
-        ("Use 8–63 characters or a 64-digit hex key.", RED, 1.0)
-    } else {
-        (
+    let invalid = fields
+        .iter()
+        .copied()
+        .find(|field| !dialog.field_is_valid(*field));
+    let (hint, color, alpha) = match (dialog.submit_attempted, invalid, &dialog.enterprise) {
+        (true, Some(Field::Password), None) => {
+            ("Use 8–63 characters or a 64-digit hex key.", RED, 1.0)
+        }
+        (true, Some(Field::Identity), _) => ("Enter your username.", RED, 1.0),
+        (true, Some(Field::Password), Some(_)) => ("Enter your password.", RED, 1.0),
+        (true, Some(Field::Domain), _) => {
+            ("Enter the server name, like radius.example.edu.", RED, 1.0)
+        }
+        (_, _, Some(_)) => (
+            "Server is the name its certificate must match.",
+            SECONDARY,
+            SECONDARY_ALPHA,
+        ),
+        _ => (
             "Sent only to the phone’s own Wi-Fi service.",
             SECONDARY,
             SECONDARY_ALPHA,
-        )
+        ),
     };
-    footer(canvas, hint, field.y + field.h, color, alpha);
+    footer(canvas, hint, fields_bottom(dialog), color, alpha);
     let _ = dialog.security;
 
     if !dialog.system_keyboard {
-        for key in fallback_keys(dialog.keyboard_mode) {
+        for key in fallback_keys(dialog.keyboard_mode, fallback_keyboard_y(dialog)) {
             let key_pressed = pressed == Some(Action::Key(key.action));
             let special = !matches!(key.action, KeyAction::Character(_) | KeyAction::Space);
             let fill = match (key_pressed, special) {
@@ -1136,6 +1248,24 @@ fn draw_password(canvas: &mut Canvas, dialog: &PasswordDialog, pressed: Option<A
     }
 }
 
+/// Shows the end of `text` (where typing happens) with a leading ellipsis
+/// when it is wider than `max_width`.
+fn tail_fit(text: &str, weight: Weight, size: f32, max_width: f32) -> String {
+    if text::measure(text, weight, size) <= max_width {
+        return text.to_owned();
+    }
+    let characters: Vec<char> = text.chars().collect();
+    for start in 1..characters.len() {
+        let candidate: String = std::iter::once('…')
+            .chain(characters[start..].iter().copied())
+            .collect();
+        if text::measure(&candidate, weight, size) <= max_width {
+            return candidate;
+        }
+    }
+    "…".into()
+}
+
 #[derive(Clone)]
 struct KeySpec {
     bounds: RectF,
@@ -1144,9 +1274,9 @@ struct KeySpec {
 }
 
 /// The in-app keyboard, used only when Moon's system keyboard is unavailable.
-fn fallback_keys(mode: KeyboardMode) -> Vec<KeySpec> {
+fn fallback_keys(mode: KeyboardMode, top: f32) -> Vec<KeySpec> {
     let mut keys = Vec::new();
-    let row = |index: usize| FALLBACK_KEYBOARD_Y + index as f32 * 150.0;
+    let row = |index: usize| top + index as f32 * 150.0;
     match mode {
         KeyboardMode::Lower | KeyboardMode::Upper => {
             character_row(&mut keys, "qwertyuiop", 16.0, row(0), 1048.0, mode);
@@ -1314,8 +1444,10 @@ mod tests {
             connected: false,
         });
         app.handle(Action::SelectNetwork(0));
+        let keyboard_y = fallback_keyboard_y(app.password_dialog.as_ref().unwrap());
+        assert_eq!(keyboard_y, 640.0);
         assert_eq!(
-            action_at(&app, HEIGHT, 60, (FALLBACK_KEYBOARD_Y + 60.0) as i16),
+            action_at(&app, HEIGHT, 60, (keyboard_y + 60.0) as i16),
             Some(Action::Key(KeyAction::Character('q')))
         );
         assert_eq!(
@@ -1331,13 +1463,61 @@ mod tests {
         // With Moon's keyboard up, the in-app keys are neither drawn nor hit.
         app.password_dialog.as_mut().unwrap().system_keyboard = true;
         assert_eq!(
-            action_at(&app, 1396.0, 60, (FALLBACK_KEYBOARD_Y + 60.0) as i16),
+            action_at(&app, 1396.0, 60, (keyboard_y + 60.0) as i16),
             None
         );
-        let (fx, fy) = password_field().center();
+        let (fx, fy) = field_rect(0).center();
         assert_eq!(
             action_at(&app, 1396.0, fx as i16, fy as i16),
-            Some(Action::FocusPassword)
+            Some(Action::Focus(Field::Password))
+        );
+    }
+
+    #[test]
+    fn enterprise_join_has_three_tappable_fields_and_a_lower_fallback_keyboard() {
+        let mut app = AppModel::default();
+        app.networks.push(WifiNetwork {
+            ssid: "eduroam".into(),
+            signal: 70,
+            security: Security::Enterprise,
+            requires_password: true,
+            connected: false,
+        });
+        app.handle(Action::SelectNetwork(0));
+        let dialog = app.password_dialog.as_ref().unwrap();
+        for (index, field) in [Field::Identity, Field::Password, Field::Domain]
+            .into_iter()
+            .enumerate()
+        {
+            let (x, y) = field_rect(index).center();
+            assert_eq!(
+                action_at(&app, 1396.0, x as i16, y as i16),
+                Some(Action::Focus(field))
+            );
+        }
+        let keyboard_y = fallback_keyboard_y(dialog);
+        assert!(keyboard_y >= field_rect(2).y + ROW + 150.0);
+        assert!(keyboard_y + 4.0 * 150.0 <= HEIGHT - BOTTOM_GESTURE_RESERVE);
+        assert_eq!(
+            action_at(&app, HEIGHT, 60, (keyboard_y + 60.0) as i16),
+            Some(Action::Key(KeyAction::Character('q')))
+        );
+    }
+
+    #[test]
+    fn long_values_show_their_end() {
+        let shown = tail_fit(
+            "a.very.long.identity.that.keeps.going@example.edu",
+            Weight::Regular,
+            LABEL_SIZE,
+            300.0,
+        );
+        assert!(shown.starts_with('…'));
+        assert!(shown.ends_with(".edu"));
+        assert!(text::measure(&shown, Weight::Regular, LABEL_SIZE) <= 300.0);
+        assert_eq!(
+            tail_fit("short", Weight::Regular, LABEL_SIZE, 300.0),
+            "short"
         );
     }
 

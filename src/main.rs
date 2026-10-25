@@ -13,7 +13,8 @@ use std::error::Error;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use app::{Action, AppModel, KeyAction};
+use app::{Action, AppModel, Field, KeyAction};
+use control::KeyboardPurpose;
 use keys::{KeyInput, KeyMap};
 use metrics::SystemInfo;
 use ui::Renderer;
@@ -129,7 +130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut pressed: Option<Action> = None;
     let mut redraw = false;
     let mut running = true;
-    let mut keyboard_requested = false;
+    let mut keyboard_requested: Option<KeyboardPurpose> = None;
     let mut next_refresh = Instant::now() + REFRESH_INTERVAL;
     let mut next_wifi_status = Instant::now() + WIFI_STATUS_INTERVAL;
     let mut next_busy_frame = Instant::now();
@@ -202,7 +203,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 Action::Key(KeyAction::Character(character))
                             }
                             KeyInput::Backspace => Action::Key(KeyAction::Backspace),
-                            KeyInput::Enter => Action::SubmitPassword,
+                            KeyInput::Enter => Action::Return,
                         };
                         perform(&wifi_worker, &mut app, action, &mut keyboard_requested);
                         redraw = true;
@@ -253,7 +254,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         wait_for_x(&conn, deadline.saturating_duration_since(Instant::now()))?;
     }
 
-    if keyboard_requested {
+    if keyboard_requested.is_some() {
         control::hide_keyboard();
     }
     renderer.destroy(&conn);
@@ -264,22 +265,37 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 /// Applies a UI action and keeps Moon's system keyboard in step with the
 /// password field.
-fn perform(worker: &WifiWorker, app: &mut AppModel, action: Action, keyboard_requested: &mut bool) {
+fn perform(
+    worker: &WifiWorker,
+    app: &mut AppModel,
+    action: Action,
+    keyboard_requested: &mut Option<KeyboardPurpose>,
+) {
     let requests = app.handle(action);
     dispatch_requests(worker, app, requests);
     match app.password_dialog.as_mut() {
         Some(dialog) => {
+            let purpose = match dialog.focus {
+                Field::Identity => KeyboardPurpose::Text,
+                Field::Domain => KeyboardPurpose::Url,
+                Field::Password => KeyboardPurpose::Password,
+            };
+            // Moon hides its keyboard on Return, so a Return that keeps the
+            // page open (next field, or an invalid entry) asks for it again.
             let wants_keyboard = !dialog.system_keyboard
-                || action == Action::FocusPassword
+                || *keyboard_requested != Some(purpose)
+                || matches!(action, Action::Focus(_) | Action::Return)
                 || (action == Action::SubmitPassword && dialog.submit_attempted);
             if wants_keyboard {
-                dialog.system_keyboard = control::show_password_keyboard();
-                *keyboard_requested |= dialog.system_keyboard;
+                dialog.system_keyboard = control::show_keyboard(purpose);
+                if dialog.system_keyboard {
+                    *keyboard_requested = Some(purpose);
+                }
             }
         }
-        None if *keyboard_requested => {
+        None if keyboard_requested.is_some() => {
             control::hide_keyboard();
-            *keyboard_requested = false;
+            *keyboard_requested = None;
         }
         None => {}
     }

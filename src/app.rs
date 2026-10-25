@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::wifi::{
     LinkState, Rejection, SecretString, Security, WifiError, WifiEvent, WifiNetwork, WifiRequest,
-    WifiStatus,
+    WifiStatus, valid_domain,
 };
 
 pub const NETWORKS_PER_PAGE: usize = 7;
@@ -21,10 +21,31 @@ pub enum KeyboardMode {
     MoreSymbols,
 }
 
+/// A text field on the join page. WPA Personal pages have only `Password`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Identity,
+    Password,
+    Domain,
+}
+
+const ENTERPRISE_FIELDS: [Field; 3] = [Field::Identity, Field::Password, Field::Domain];
+const MAX_DOMAIN_BYTES: usize = 253;
+
+/// The extra fields a WPA2-Enterprise (PEAP/MSCHAPv2) join needs. The
+/// identity is kept in a zeroizing, debug-redacted buffer like the password;
+/// the domain names the RADIUS server whose certificate must match.
+pub struct EnterpriseFields {
+    identity: SecretString,
+    pub domain: String,
+}
+
 pub struct PasswordDialog {
     pub ssid: String,
     pub security: Security,
     password: SecretString,
+    pub enterprise: Option<EnterpriseFields>,
+    pub focus: Field,
     pub keyboard_mode: KeyboardMode,
     pub submit_attempted: bool,
     /// Moon's system keyboard is up; the in-app keyboard is only a fallback.
@@ -33,10 +54,20 @@ pub struct PasswordDialog {
 
 impl PasswordDialog {
     fn new(ssid: String, security: Security) -> Self {
+        let enterprise = (security == Security::Enterprise).then(|| EnterpriseFields {
+            identity: SecretString::default(),
+            domain: String::new(),
+        });
         Self {
             ssid,
             security,
             password: SecretString::default(),
+            focus: if enterprise.is_some() {
+                Field::Identity
+            } else {
+                Field::Password
+            },
+            enterprise,
             keyboard_mode: KeyboardMode::Lower,
             submit_attempted: false,
             system_keyboard: false,
@@ -47,8 +78,83 @@ impl PasswordDialog {
         self.password.len()
     }
 
+    /// The identity being typed, for display only (never logged).
+    pub fn identity_text(&self) -> &str {
+        self.enterprise
+            .as_ref()
+            .map_or("", |fields| fields.identity.reveal_for_display())
+    }
+
+    pub fn field_is_valid(&self, field: Field) -> bool {
+        match (field, &self.enterprise) {
+            (Field::Password, None) => self.password.is_valid_wpa_psk(),
+            (Field::Password, Some(_)) => self.password.is_valid_enterprise_field(),
+            (Field::Identity, Some(fields)) => fields.identity.is_valid_enterprise_field(),
+            (Field::Domain, Some(fields)) => valid_domain(&fields.domain),
+            (_, None) => true,
+        }
+    }
+
     pub fn password_is_valid(&self) -> bool {
-        self.password.is_valid_wpa_psk()
+        self.fields()
+            .iter()
+            .all(|field| self.field_is_valid(*field))
+    }
+
+    pub fn fields(&self) -> &'static [Field] {
+        if self.enterprise.is_some() {
+            &ENTERPRISE_FIELDS
+        } else {
+            &[Field::Password]
+        }
+    }
+
+    /// The first invalid field after the focused one (wrapping), or `None`
+    /// when every field is complete.
+    fn next_incomplete_field(&self) -> Option<Field> {
+        let fields = self.fields();
+        let start = fields.iter().position(|f| *f == self.focus).unwrap_or(0);
+        (1..=fields.len())
+            .map(|offset| fields[(start + offset) % fields.len()])
+            .find(|field| !self.field_is_valid(*field))
+    }
+
+    fn push(&mut self, character: char) {
+        match (self.focus, self.enterprise.as_mut()) {
+            (Field::Identity, Some(fields)) => {
+                fields.identity.push(character);
+            }
+            (Field::Domain, Some(fields)) => {
+                // DNS names are case-insensitive; the backend wants lowercase.
+                let character = character.to_ascii_lowercase();
+                if (character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+                    && fields.domain.len() < MAX_DOMAIN_BYTES
+                {
+                    fields.domain.push(character);
+                }
+            }
+            _ => {
+                self.password.push(character);
+            }
+        }
+    }
+
+    fn pop(&mut self) {
+        match (self.focus, self.enterprise.as_mut()) {
+            (Field::Identity, Some(fields)) => fields.identity.pop(),
+            (Field::Domain, Some(fields)) => {
+                fields.domain.pop();
+            }
+            _ => self.password.pop(),
+        }
+    }
+
+    fn clear_focused(&mut self) {
+        match (self.focus, self.enterprise.as_mut()) {
+            (Field::Identity, Some(fields)) => fields.identity.clear(),
+            (Field::Domain, Some(fields)) => fields.domain.clear(),
+            _ => self.password.clear(),
+        }
     }
 }
 
@@ -75,8 +181,10 @@ pub enum Action {
     Disconnect,
     CancelPassword,
     SubmitPassword,
-    /// Tap on the password field: bring Moon's keyboard back if dismissed.
-    FocusPassword,
+    /// Return on the keyboard: move to the next incomplete field, or join.
+    Return,
+    /// Tap on a field: focus it and bring Moon's keyboard back if dismissed.
+    Focus(Field),
     Key(KeyAction),
 }
 
@@ -154,6 +262,27 @@ impl AppModel {
                 Vec::new()
             }
             Action::SubmitPassword => self.submit_password(),
+            Action::Return => match self.password_dialog.as_mut() {
+                Some(dialog) => match dialog.next_incomplete_field() {
+                    None => self.submit_password(),
+                    Some(field) => {
+                        if field == dialog.focus {
+                            dialog.submit_attempted = true;
+                        }
+                        dialog.focus = field;
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            },
+            Action::Focus(field) => {
+                if let Some(dialog) = self.password_dialog.as_mut()
+                    && dialog.fields().contains(&field)
+                {
+                    dialog.focus = field;
+                }
+                Vec::new()
+            }
             Action::Key(key) => {
                 self.handle_key(key);
                 Vec::new()
@@ -270,20 +399,54 @@ impl AppModel {
         };
         if !dialog.password_is_valid() {
             dialog.submit_attempted = true;
+            if let Some(field) = dialog
+                .fields()
+                .iter()
+                .copied()
+                .find(|field| !dialog.field_is_valid(*field))
+            {
+                dialog.focus = field;
+            }
             self.password_dialog = Some(dialog);
             return Vec::new();
         }
-        self.begin_connect(dialog.ssid, Some(dialog.password))
+        let PasswordDialog {
+            ssid,
+            password,
+            enterprise,
+            ..
+        } = dialog;
+        let request = match enterprise {
+            Some(EnterpriseFields { identity, domain }) => WifiRequest::ConnectEnterprise {
+                ssid: ssid.clone(),
+                identity,
+                password,
+                domain,
+            },
+            None => WifiRequest::Connect {
+                ssid: ssid.clone(),
+                password: Some(password),
+            },
+        };
+        self.begin_request(ssid, request)
     }
 
     fn begin_connect(&mut self, ssid: String, password: Option<SecretString>) -> Vec<WifiRequest> {
+        let request = WifiRequest::Connect {
+            ssid: ssid.clone(),
+            password,
+        };
+        self.begin_request(ssid, request)
+    }
+
+    fn begin_request(&mut self, ssid: String, request: WifiRequest) -> Vec<WifiRequest> {
         self.busy = true;
         self.notice = None;
         self.wifi_status = Some(WifiStatus {
             radio_enabled: true,
-            state: LinkState::Connecting { ssid: ssid.clone() },
+            state: LinkState::Connecting { ssid },
         });
-        vec![WifiRequest::Connect { ssid, password }]
+        vec![request]
     }
 
     fn handle_key(&mut self, key: KeyAction) {
@@ -296,16 +459,14 @@ impl AppModel {
                 if dialog.keyboard_mode == KeyboardMode::Upper {
                     character = character.to_ascii_uppercase();
                 }
-                dialog.password.push(character);
+                dialog.push(character);
                 if dialog.keyboard_mode == KeyboardMode::Upper {
                     dialog.keyboard_mode = KeyboardMode::Lower;
                 }
             }
-            KeyAction::Space => {
-                dialog.password.push(' ');
-            }
-            KeyAction::Backspace => dialog.password.pop(),
-            KeyAction::Clear => dialog.password.clear(),
+            KeyAction::Space => dialog.push(' '),
+            KeyAction::Backspace => dialog.pop(),
+            KeyAction::Clear => dialog.clear_focused(),
             KeyAction::Shift => {
                 dialog.keyboard_mode = match dialog.keyboard_mode {
                     KeyboardMode::Upper => KeyboardMode::Lower,
@@ -481,18 +642,128 @@ mod tests {
             requests.as_slice(),
             [WifiRequest::Connect { ssid, password: None }] if ssid == "UofT"
         ));
+    }
 
+    fn type_text(model: &mut AppModel, text: &str) {
+        for character in text.chars() {
+            model.handle(Action::Key(KeyAction::Character(character)));
+        }
+    }
+
+    #[test]
+    fn new_enterprise_network_asks_for_identity_password_and_server() {
         let mut model = AppModel {
             view: View::Wifi,
             networks: vec![network("eduroam", 80, Security::Enterprise)],
             ..AppModel::default()
         };
         assert!(model.handle(Action::SelectNetwork(0)).is_empty());
-        assert!(model.password_dialog.is_none());
+        let dialog = model.password_dialog.as_ref().unwrap();
+        assert!(dialog.enterprise.is_some());
+        assert_eq!(dialog.focus, Field::Identity);
+
+        // Return walks through the incomplete fields in order.
+        type_text(&mut model, "student@example.edu");
+        assert!(model.handle(Action::Return).is_empty());
         assert_eq!(
-            model.notice,
-            Some("This network’s security is not supported")
+            model.password_dialog.as_ref().unwrap().focus,
+            Field::Password
         );
+        type_text(&mut model, "p@ss word");
+        assert!(model.handle(Action::Return).is_empty());
+        assert_eq!(model.password_dialog.as_ref().unwrap().focus, Field::Domain);
+
+        // The domain is normalized to lowercase and filtered to DNS bytes.
+        type_text(&mut model, "Radius.Example.EDU/");
+        assert_eq!(
+            model
+                .password_dialog
+                .as_ref()
+                .unwrap()
+                .enterprise
+                .as_ref()
+                .unwrap()
+                .domain,
+            "radius.example.edu"
+        );
+        let requests = model.handle(Action::Return);
+        assert!(model.password_dialog.is_none());
+        assert!(model.busy);
+        match requests.as_slice() {
+            [
+                WifiRequest::ConnectEnterprise {
+                    ssid,
+                    identity,
+                    password,
+                    domain,
+                },
+            ] => {
+                assert_eq!(ssid, "eduroam");
+                assert_eq!(identity.len(), "student@example.edu".len());
+                assert_eq!(password.len(), "p@ss word".len());
+                assert_eq!(domain, "radius.example.edu");
+                assert!(!format!("{identity:?}{password:?}").contains("student"));
+            }
+            _ => panic!("expected an enterprise connect request"),
+        }
+    }
+
+    #[test]
+    fn incomplete_enterprise_join_focuses_the_missing_field() {
+        let mut model = AppModel {
+            view: View::Wifi,
+            networks: vec![network("eduroam", 80, Security::Enterprise)],
+            ..AppModel::default()
+        };
+        model.handle(Action::SelectNetwork(0));
+        type_text(&mut model, "student");
+        model.handle(Action::Focus(Field::Domain));
+        type_text(&mut model, "localhost");
+        assert!(model.handle(Action::SubmitPassword).is_empty());
+        let dialog = model.password_dialog.as_ref().unwrap();
+        assert!(dialog.submit_attempted);
+        assert_eq!(dialog.focus, Field::Password);
+        assert!(!dialog.field_is_valid(Field::Domain));
+
+        // Return on the last invalid field flags it instead of moving on.
+        model.handle(Action::Focus(Field::Password));
+        type_text(&mut model, "pw");
+        model.handle(Action::Return);
+        let dialog = model.password_dialog.as_mut().unwrap();
+        assert_eq!(dialog.focus, Field::Domain);
+        dialog.submit_attempted = false;
+        model.handle(Action::Return);
+        assert!(model.password_dialog.as_ref().unwrap().submit_attempted);
+
+        model.handle(Action::Key(KeyAction::Clear));
+        type_text(&mut model, "radius.example.edu");
+        assert_eq!(model.handle(Action::Return).len(), 1);
+    }
+
+    #[test]
+    fn personal_networks_keep_a_single_password_field() {
+        let mut model = AppModel {
+            view: View::Wifi,
+            networks: vec![network("Home", 80, Security::Wpa2)],
+            ..AppModel::default()
+        };
+        model.handle(Action::SelectNetwork(0));
+        let dialog = model.password_dialog.as_ref().unwrap();
+        assert!(dialog.enterprise.is_none());
+        assert_eq!(dialog.fields(), &[Field::Password]);
+        model.handle(Action::Focus(Field::Identity));
+        assert_eq!(
+            model.password_dialog.as_ref().unwrap().focus,
+            Field::Password
+        );
+        type_text(&mut model, "longenough");
+        assert!(matches!(
+            model.handle(Action::Return).as_slice(),
+            [WifiRequest::Connect {
+                password: Some(_),
+                ..
+            }]
+        ));
     }
 
     #[test]

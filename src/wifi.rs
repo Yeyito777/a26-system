@@ -26,14 +26,19 @@ const MAX_SSID_BYTES: usize = 32;
 /// when moved out of the UI model and eventually dropped by the worker.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretString {
-    bytes: [u8; 64],
+    bytes: [u8; SECRET_CAPACITY],
     len: usize,
 }
+
+/// Large enough for an enterprise identity or password (128 bytes each);
+/// WPA Personal keys are still validated to their 63/64-byte limits.
+const SECRET_CAPACITY: usize = 128;
+const MAX_DOMAIN_BYTES: usize = 253;
 
 impl Default for SecretString {
     fn default() -> Self {
         Self {
-            bytes: [0; 64],
+            bytes: [0; SECRET_CAPACITY],
             len: 0,
         }
     }
@@ -70,6 +75,17 @@ impl SecretString {
         valid_wpa_psk(self.expose_for_socket())
     }
 
+    /// Enterprise identities and passwords: 1-128 printable ASCII bytes
+    /// (`push` admits nothing else).
+    pub fn is_valid_enterprise_field(&self) -> bool {
+        self.len > 0
+    }
+
+    /// The text, for drawing an identity the user is typing. Never log it.
+    pub fn reveal_for_display(&self) -> &str {
+        self.expose_for_socket()
+    }
+
     fn expose_for_socket(&self) -> &str {
         // `push` accepts printable ASCII only, so this prefix is always UTF-8.
         std::str::from_utf8(&self.bytes[..self.len]).expect("ASCII secret buffer")
@@ -80,6 +96,21 @@ impl fmt::Debug for SecretString {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SecretString([REDACTED])")
     }
+}
+
+/// A server domain for certificate validation, matching the backend's rule:
+/// at least two lowercase labels of letters, digits, and inner hyphens.
+pub fn valid_domain(domain: &str) -> bool {
+    domain.len() <= MAX_DOMAIN_BYTES
+        && domain.split('.').count() >= 2
+        && domain.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 fn valid_wpa_psk(password: &str) -> bool {
@@ -118,16 +149,11 @@ pub struct WifiNetwork {
 }
 
 impl WifiNetwork {
-    /// Whether this UI can join the network. WPA3 cannot be joined, and an
-    /// enterprise network only once the backend holds its credential (it
-    /// then reports `requires_password: false`): enterprise provisioning
-    /// needs an identity, which this UI does not ask for.
+    /// Whether this UI can join the network. WPA3 cannot be joined. A saved
+    /// enterprise network (`requires_password: false`) reconnects directly;
+    /// a new one asks for an identity, password, and server domain.
     pub fn joinable(&self) -> bool {
-        match self.security {
-            Security::Wpa3 => false,
-            Security::Enterprise => !self.requires_password,
-            _ => true,
-        }
+        self.security != Security::Wpa3
     }
 }
 
@@ -157,6 +183,13 @@ pub enum WifiRequest {
     Connect {
         ssid: String,
         password: Option<SecretString>,
+    },
+    /// WPA2-Enterprise (PEAP/MSCHAPv2) with server validation by `domain`.
+    ConnectEnterprise {
+        ssid: String,
+        identity: SecretString,
+        password: SecretString,
+        domain: String,
     },
     Disconnect,
 }
@@ -250,6 +283,14 @@ fn execute(socket: &Path, request_id: u64, request: WifiRequest) -> WifiEvent {
         WifiRequest::Connect { ssid, password } => {
             WifiEvent::Connect(connect(socket, request_id, &ssid, password.as_ref()))
         }
+        WifiRequest::ConnectEnterprise {
+            ssid,
+            identity,
+            password,
+            domain,
+        } => WifiEvent::Connect(connect_enterprise(
+            socket, request_id, &ssid, &identity, &password, &domain,
+        )),
         WifiRequest::Disconnect => WifiEvent::Disconnect(disconnect(socket, request_id)),
     }
 }
@@ -267,6 +308,16 @@ struct ConnectRequest<'a> {
     ssid: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct EnterpriseRequest<'a> {
+    id: u64,
+    command: &'static str,
+    ssid: &'a str,
+    identity: &'a str,
+    password: &'a str,
+    domain: &'a str,
 }
 
 fn status(socket: &Path, request_id: u64) -> Result<WifiStatus, WifiError> {
@@ -301,6 +352,35 @@ fn connect(
         command: "connect",
         ssid,
         password: password.map(SecretString::expose_for_socket),
+    };
+    let result = transact(socket, request_id, &request)?;
+    parse_status(result)
+}
+
+fn connect_enterprise(
+    socket: &Path,
+    request_id: u64,
+    ssid: &str,
+    identity: &SecretString,
+    password: &SecretString,
+    domain: &str,
+) -> Result<WifiStatus, WifiError> {
+    if !valid_ssid(ssid)
+        || !identity.is_valid_enterprise_field()
+        || !password.is_valid_enterprise_field()
+        || !valid_domain(domain)
+    {
+        return Err(WifiError::Protocol);
+    }
+    // Serialized straight into the socket: no copy of the credentials is
+    // kept in an intermediate buffer.
+    let request = EnterpriseRequest {
+        id: request_id,
+        command: "connect_enterprise",
+        ssid,
+        identity: identity.expose_for_socket(),
+        password: password.expose_for_socket(),
+        domain,
     };
     let result = transact(socket, request_id, &request)?;
     parse_status(result)
@@ -652,6 +732,90 @@ mod tests {
         assert!(matches!(result.state, LinkState::Connected { .. }));
         server.join().unwrap();
         fs::remove_file(socket).unwrap();
+    }
+
+    #[test]
+    fn domain_validation_matches_the_backend() {
+        assert!(valid_domain("radius.wireless.utoronto.ca"));
+        assert!(!valid_domain("utoronto"));
+        assert!(!valid_domain("Radius.example.org"));
+        assert!(!valid_domain("bad\"quote.org"));
+        assert!(!valid_domain("-bad.org"));
+        assert!(!valid_domain("trailing.dot."));
+    }
+
+    #[test]
+    fn enterprise_connect_sends_identity_password_and_domain_once() {
+        let socket = test_socket();
+        let _ = fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            stream.read_to_string(&mut request).unwrap();
+            let document: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(
+                document.get("command").and_then(Value::as_str),
+                Some("connect_enterprise")
+            );
+            assert_eq!(
+                document.get("ssid").and_then(Value::as_str),
+                Some("eduroam")
+            );
+            assert_eq!(
+                document.get("identity").and_then(Value::as_str),
+                Some("student@example.edu")
+            );
+            assert_eq!(
+                document.get("password").and_then(Value::as_str),
+                Some("p@ss word")
+            );
+            assert_eq!(
+                document.get("domain").and_then(Value::as_str),
+                Some("radius.example.edu")
+            );
+            stream
+                .write_all(
+                    b"{\"id\":7,\"ok\":true,\"result\":{\"radio_enabled\":true,\"state\":\"connecting\",\"ssid\":\"eduroam\"}}\n",
+                )
+                .unwrap();
+        });
+        let result = connect_enterprise(
+            &socket,
+            7,
+            "eduroam",
+            &secret("student@example.edu"),
+            &secret("p@ss word"),
+            "radius.example.edu",
+        )
+        .unwrap();
+        assert!(matches!(result.state, LinkState::Connecting { .. }));
+        server.join().unwrap();
+        fs::remove_file(&socket).unwrap();
+
+        // Invalid fields never reach the socket.
+        assert_eq!(
+            connect_enterprise(
+                &socket,
+                8,
+                "eduroam",
+                &secret("student"),
+                &secret("pw"),
+                "not a domain",
+            ),
+            Err(WifiError::Protocol)
+        );
+        assert_eq!(
+            connect_enterprise(
+                &socket,
+                9,
+                "eduroam",
+                &SecretString::default(),
+                &secret("pw"),
+                "radius.example.edu",
+            ),
+            Err(WifiError::Protocol)
+        );
     }
 
     #[test]
