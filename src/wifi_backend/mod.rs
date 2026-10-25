@@ -8,10 +8,11 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use md4::{Digest, Md4};
 use pbkdf2::pbkdf2_hmac;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -36,6 +37,10 @@ const MAX_SSID_BYTES: usize = 32;
 const MAX_STORE_BYTES: u64 = 16 * 1024;
 const MAX_SAVED_NETWORKS: usize = 64;
 const SUPERVISOR_INTERVAL: Duration = Duration::from_secs(1);
+const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+const MAX_IDENTITY_BYTES: usize = 128;
+const MAX_ENTERPRISE_PASSWORD_CHARS: usize = 128;
+const MAX_DOMAIN_BYTES: usize = 253;
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
@@ -46,18 +51,34 @@ struct Request {
     ssid: Option<String>,
     #[serde(default)]
     password: Option<String>,
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SavedSecurity {
     Open,
     Wpa2,
+    Enterprise,
+}
+
+/// WPA2-Enterprise PEAP/MSCHAPv2 credential. Only the MSCHAPv2 NT password
+/// hash is kept, never the password, and the server certificate must chain to
+/// the system CA bundle and match `domain` (a suffix of its DNS name).
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+struct EnterpriseCredential {
+    identity: String,
+    nt_hash: [u8; 16],
+    domain: String,
 }
 
 struct SavedNetwork {
     ssid: String,
     security: SavedSecurity,
     psk: Option<[u8; 32]>,
+    enterprise: Option<EnterpriseCredential>,
 }
 
 impl Drop for SavedNetwork {
@@ -100,6 +121,12 @@ struct StoreNetwork {
     security: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     psk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    domain: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -329,6 +356,9 @@ fn handle_connection(stream: &mut UnixStream, shared: &Arc<Mutex<SharedState>>) 
     if let Some(password) = request.password.as_mut() {
         password.zeroize();
     }
+    if let Some(identity) = request.identity.as_mut() {
+        identity.zeroize();
+    }
     let response = match result {
         Ok(result) => json!({"id": id, "ok": true, "result": result}),
         Err(code) => json!({"id": id, "ok": false, "error": {"code": code}}),
@@ -345,13 +375,23 @@ fn dispatch(
     if request.id == 0 {
         return Err("internal");
     }
+    let bare = request.ssid.is_none()
+        && request.password.is_none()
+        && request.identity.is_none()
+        && request.domain.is_none();
+    let enterprise_fields = request.identity.is_some() || request.domain.is_some();
     match request.command.as_str() {
-        "status" if request.ssid.is_none() && request.password.is_none() => status_result(shared),
-        "scan" if request.ssid.is_none() && request.password.is_none() => scan_result(shared),
-        "disconnect" if request.ssid.is_none() && request.password.is_none() => {
-            disconnect_result(shared)
+        "status" if bare => status_result(shared),
+        "scan" if bare => scan_result(shared),
+        "disconnect" if bare => disconnect_result(shared),
+        "connect_enterprise" => {
+            let ssid = request.ssid.take().ok_or("network_not_found")?;
+            let mut password = Zeroizing::new(request.password.take().unwrap_or_default());
+            let identity = Zeroizing::new(request.identity.take().unwrap_or_default());
+            let domain = request.domain.take().unwrap_or_default();
+            connect_enterprise_result(shared, &ssid, &identity, &mut password, &domain)
         }
-        "connect" => {
+        "connect" if !enterprise_fields => {
             let ssid = request.ssid.take().ok_or("network_not_found")?;
             let mut password = request.password.take();
             let result = connect_result(shared, &ssid, password.as_mut());
@@ -439,29 +479,38 @@ fn scan_result(shared: &Arc<Mutex<SharedState>>) -> Result<Value, &'static str> 
     Ok(json!({"networks": networks}))
 }
 
-fn connect_result(
-    shared: &Arc<Mutex<SharedState>>,
-    ssid: &str,
-    password: Option<&mut String>,
-) -> Result<Value, &'static str> {
+fn scanned_security(ssid: &str) -> Result<ScanSecurity, &'static str> {
     if !radio_enabled() {
         return Err("radio_disabled");
     }
     if !valid_ssid(ssid) {
         return Err("network_not_found");
     }
-
     let raw_scan = wpa_cli(&["scan_results"]).map_err(|_| "internal")?;
-    let security = aggregate_scan_results(&raw_scan)
+    aggregate_scan_results(&raw_scan)
         .into_iter()
         .find(|network| network.ssid == ssid)
         .map(|network| network.security)
-        .ok_or("network_not_found")?;
+        .ok_or("network_not_found")
+}
 
-    let mut state = shared.lock().map_err(|_| "busy")?;
+fn lock_idle(
+    shared: &Arc<Mutex<SharedState>>,
+) -> Result<MutexGuard<'_, SharedState>, &'static str> {
+    let state = shared.lock().map_err(|_| "busy")?;
     if state.pending.is_some() || state.connecting_since.is_some() {
         return Err("busy");
     }
+    Ok(state)
+}
+
+fn connect_result(
+    shared: &Arc<Mutex<SharedState>>,
+    ssid: &str,
+    password: Option<&mut String>,
+) -> Result<Value, &'static str> {
+    let security = scanned_security(ssid)?;
+    let state = lock_idle(shared)?;
 
     let candidate = if let Some(password) = password {
         if !valid_password(password) {
@@ -481,6 +530,7 @@ fn connect_result(
                     ssid: ssid.to_owned(),
                     security: SavedSecurity::Wpa2,
                     psk: Some(psk),
+                    enterprise: None,
                 }
             }
         }
@@ -492,12 +542,52 @@ fn connect_result(
                 ssid: ssid.to_owned(),
                 security: SavedSecurity::Open,
                 psk: None,
+                enterprise: None,
             },
             ScanSecurity::Enterprise | ScanSecurity::Wpa3 => return Err("unsupported"),
             ScanSecurity::Wpa2 => return Err("authentication_failed"),
         }
     };
+    begin_connect(shared, state, ssid, candidate)
+}
 
+/// PEAP/MSCHAPv2 with server validation against the system CA bundle and the
+/// given domain. The password is reduced to its NT hash at once and wiped.
+fn connect_enterprise_result(
+    shared: &Arc<Mutex<SharedState>>,
+    ssid: &str,
+    identity: &str,
+    password: &mut String,
+    domain: &str,
+) -> Result<Value, &'static str> {
+    let valid =
+        valid_identity(identity) && valid_enterprise_password(password) && valid_domain(domain);
+    let nt_hash = valid.then(|| nt_password_hash(password));
+    password.zeroize();
+    let nt_hash = nt_hash.ok_or("authentication_failed")?;
+    if scanned_security(ssid)? != ScanSecurity::Enterprise {
+        return Err("unsupported");
+    }
+    let state = lock_idle(shared)?;
+    let candidate = SavedNetwork {
+        ssid: ssid.to_owned(),
+        security: SavedSecurity::Enterprise,
+        psk: None,
+        enterprise: Some(EnterpriseCredential {
+            identity: identity.to_owned(),
+            nt_hash,
+            domain: domain.to_owned(),
+        }),
+    };
+    begin_connect(shared, state, ssid, candidate)
+}
+
+fn begin_connect(
+    shared: &Arc<Mutex<SharedState>>,
+    mut state: MutexGuard<'_, SharedState>,
+    ssid: &str,
+    candidate: SavedNetwork,
+) -> Result<Value, &'static str> {
     write_wpa_config(&state.store, Some(&candidate), Some(ssid)).map_err(|_| "internal")?;
     let generation = state.next_generation;
     state.next_generation = state.next_generation.wrapping_add(1).max(1);
@@ -574,6 +664,7 @@ impl CredentialStore {
             let security = match entry.security.as_str() {
                 "open" if entry.psk.is_none() => SavedSecurity::Open,
                 "wpa2" => SavedSecurity::Wpa2,
+                "enterprise" if entry.psk.is_none() => SavedSecurity::Enterprise,
                 _ => {
                     entry.zeroize();
                     return Err(io::Error::new(
@@ -587,16 +678,48 @@ impl CredentialStore {
                     parse_psk(value)
                         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid PSK"))?,
                 ),
-                None if security == SavedSecurity::Open => None,
+                None if security != SavedSecurity::Wpa2 => None,
                 None => {
                     entry.zeroize();
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "missing PSK"));
+                }
+            };
+            let enterprise = match (
+                security,
+                entry.identity.as_deref(),
+                entry.password_hash.as_deref(),
+                entry.domain.as_deref(),
+            ) {
+                (SavedSecurity::Enterprise, Some(identity), Some(hash), Some(domain))
+                    if valid_identity(identity) && valid_domain(domain) =>
+                {
+                    let Some(nt_hash) = parse_hex_array::<16>(hash) else {
+                        entry.zeroize();
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid password hash",
+                        ));
+                    };
+                    Some(EnterpriseCredential {
+                        identity: identity.to_owned(),
+                        nt_hash,
+                        domain: domain.to_owned(),
+                    })
+                }
+                (SavedSecurity::Open | SavedSecurity::Wpa2, None, None, None) => None,
+                _ => {
+                    entry.zeroize();
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid enterprise credential",
+                    ));
                 }
             };
             networks.push(SavedNetwork {
                 ssid: entry.ssid.clone(),
                 security,
                 psk,
+                enterprise,
             });
             entry.zeroize();
         }
@@ -614,8 +737,12 @@ impl CredentialStore {
                     security: match network.security {
                         SavedSecurity::Open => "open".into(),
                         SavedSecurity::Wpa2 => "wpa2".into(),
+                        SavedSecurity::Enterprise => "enterprise".into(),
                     },
                     psk: network.psk.as_ref().map(psk_hex),
+                    identity: network.enterprise.as_ref().map(|e| e.identity.clone()),
+                    password_hash: network.enterprise.as_ref().map(|e| bytes_hex(&e.nt_hash)),
+                    domain: network.enterprise.as_ref().map(|e| e.domain.clone()),
                 })
                 .collect(),
         };
@@ -632,7 +759,8 @@ impl CredentialStore {
         let expected = match security {
             ScanSecurity::Open => SavedSecurity::Open,
             ScanSecurity::Wpa2 => SavedSecurity::Wpa2,
-            ScanSecurity::Wpa3 | ScanSecurity::Enterprise => return None,
+            ScanSecurity::Enterprise => SavedSecurity::Enterprise,
+            ScanSecurity::Wpa3 => return None,
         };
         self.networks
             .iter()
@@ -655,6 +783,7 @@ fn copy_saved_network(network: &SavedNetwork) -> SavedNetwork {
         ssid: network.ssid.clone(),
         security: network.security,
         psk: network.psk,
+        enterprise: network.enterprise.clone(),
     }
 }
 
@@ -685,9 +814,26 @@ fn append_wpa_network(config: &mut String, network: &SavedNetwork, priority: u8)
     config.push_str("network={\n    ssid=");
     config.push_str(&bytes_hex(network.ssid.as_bytes()));
     config.push('\n');
-    match (network.security, network.psk.as_ref()) {
-        (SavedSecurity::Open, None) => config.push_str("    key_mgmt=NONE\n"),
-        (SavedSecurity::Wpa2, Some(psk)) => {
+    match (
+        network.security,
+        network.psk.as_ref(),
+        network.enterprise.as_ref(),
+    ) {
+        (SavedSecurity::Open, None, None) => config.push_str("    key_mgmt=NONE\n"),
+        (SavedSecurity::Enterprise, None, Some(credential)) => {
+            // The identity is written hex-encoded, so no byte needs quoting;
+            // the domain was validated to DNS characters.
+            config.push_str("    key_mgmt=WPA-EAP\n    eap=PEAP\n    identity=");
+            config.push_str(&Zeroizing::new(bytes_hex(credential.identity.as_bytes())));
+            config.push_str("\n    password=hash:");
+            config.push_str(&Zeroizing::new(bytes_hex(&credential.nt_hash)));
+            config.push_str("\n    phase2=\"auth=MSCHAPV2\"\n    ca_cert=\"");
+            config.push_str(CA_BUNDLE);
+            config.push_str("\"\n    domain_suffix_match=\"");
+            config.push_str(&credential.domain);
+            config.push_str("\"\n    proto=RSN\n    pairwise=CCMP\n    group=CCMP\n");
+        }
+        (SavedSecurity::Wpa2, Some(psk), None) => {
             config.push_str("    psk=");
             let hex = Zeroizing::new(psk_hex(psk));
             config.push_str(&hex);
@@ -736,11 +882,26 @@ fn derive_psk(ssid: &[u8], password: &str) -> Result<[u8; 32], &'static str> {
 }
 
 fn parse_psk(value: &str) -> Option<[u8; 32]> {
+    parse_hex_array::<32>(value)
+}
+
+/// MSCHAPv2 NtPasswordHash (RFC 2759): MD4 of the UTF-16LE password.
+fn nt_password_hash(password: &str) -> [u8; 16] {
+    let mut encoded = Zeroizing::new(Vec::with_capacity(password.len() * 2));
+    for unit in password.encode_utf16() {
+        encoded.extend_from_slice(&unit.to_le_bytes());
+    }
+    let mut hash = [0_u8; 16];
+    hash.copy_from_slice(&Md4::digest(&encoded[..]));
+    hash
+}
+
+fn parse_hex_array<const N: usize>(value: &str) -> Option<[u8; N]> {
     let input = value.as_bytes();
-    if input.len() != 64 || !input.is_ascii() {
+    if input.len() != N * 2 || !input.is_ascii() {
         return None;
     }
-    let mut output = [0_u8; 32];
+    let mut output = [0_u8; N];
     for (index, byte) in output.iter_mut().enumerate() {
         *byte = (hex_value(input[index * 2])? << 4) | hex_value(input[index * 2 + 1])?;
     }
@@ -778,6 +939,32 @@ fn valid_password(password: &str) -> bool {
     let bytes = password.as_bytes();
     (bytes.len() == 64 && bytes.iter().all(u8::is_ascii_hexdigit))
         || ((8..=63).contains(&bytes.len()) && bytes.iter().all(|byte| matches!(byte, b' '..=b'~')))
+}
+
+fn valid_identity(identity: &str) -> bool {
+    (1..=MAX_IDENTITY_BYTES).contains(&identity.len())
+        && identity.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+}
+
+fn valid_enterprise_password(password: &str) -> bool {
+    !password.is_empty()
+        && password.chars().count() <= MAX_ENTERPRISE_PASSWORD_CHARS
+        && !password.chars().any(char::is_control)
+}
+
+/// A DNS name (suffix) for domain_suffix_match: at least two lowercase labels
+/// of letters, digits and inner hyphens.
+fn valid_domain(domain: &str) -> bool {
+    domain.len() <= MAX_DOMAIN_BYTES
+        && domain.split('.').count() >= 2
+        && domain.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 fn radio_enabled() -> bool {
@@ -1261,6 +1448,80 @@ mod tests {
     }
 
     #[test]
+    fn nt_password_hash_matches_rfc2759_vector() {
+        assert_eq!(
+            bytes_hex(&nt_password_hash("clientPass")),
+            "44ebba8d5312b8d611474411f56989ae"
+        );
+    }
+
+    #[test]
+    fn enterprise_inputs_are_validated() {
+        assert!(valid_identity("utorid@utoronto.ca"));
+        assert!(!valid_identity(""));
+        assert!(!valid_identity("bad\nidentity"));
+        assert!(valid_enterprise_password("p\u{e4}ss word!"));
+        assert!(!valid_enterprise_password(""));
+        assert!(!valid_enterprise_password("line\nbreak"));
+        assert!(valid_domain("radius.wireless.utoronto.ca"));
+        assert!(!valid_domain("utoronto"));
+        assert!(!valid_domain("Radius.example.org"));
+        assert!(!valid_domain("bad\"quote.org"));
+        assert!(!valid_domain("-bad.org"));
+    }
+
+    fn enterprise_network(domain: &str) -> SavedNetwork {
+        SavedNetwork {
+            ssid: "UofT".into(),
+            security: SavedSecurity::Enterprise,
+            psk: None,
+            enterprise: Some(EnterpriseCredential {
+                identity: "student".into(),
+                nt_hash: nt_password_hash("secret password"),
+                domain: domain.into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn enterprise_config_uses_hash_and_server_validation() {
+        let mut config = String::new();
+        append_wpa_network(
+            &mut config,
+            &enterprise_network("radius.wireless.utoronto.ca"),
+            10,
+        )
+        .unwrap();
+        assert!(!config.contains("secret password"));
+        assert!(!config.contains("student"));
+        assert!(config.contains("identity=73747564656e74\n"));
+        assert!(config.contains("password=hash:"));
+        assert!(config.contains("key_mgmt=WPA-EAP\n"));
+        assert!(config.contains(&format!("ca_cert=\"{CA_BUNDLE}\"")));
+        assert!(config.contains("domain_suffix_match=\"radius.wireless.utoronto.ca\""));
+    }
+
+    #[test]
+    fn enterprise_store_serializes_without_plaintext() {
+        let directory = std::env::temp_dir().join(format!("a26-wifi-test-{}", std::process::id()));
+        let path = directory.join("networks.json");
+        let store = CredentialStore {
+            networks: vec![enterprise_network("utoronto.ca")],
+        };
+        store.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_dir_all(&directory);
+        assert!(!text.contains("secret password"));
+        let document: StoreDocument = serde_json::from_str(&text).unwrap();
+        assert_eq!(document.networks[0].security, "enterprise");
+        assert_eq!(document.networks[0].domain.as_deref(), Some("utoronto.ca"));
+        assert_eq!(
+            document.networks[0].password_hash.as_deref(),
+            Some(bytes_hex(&nt_password_hash("secret password")).as_str())
+        );
+    }
+
+    #[test]
     fn config_contains_only_derived_key() {
         let psk = derive_psk(b"Test", "correct horse").unwrap();
         let store = CredentialStore {
@@ -1268,6 +1529,7 @@ mod tests {
                 ssid: "Test".into(),
                 security: SavedSecurity::Wpa2,
                 psk: Some(psk),
+                enterprise: None,
             }],
         };
         let mut rendered = String::new();

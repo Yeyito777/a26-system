@@ -24,9 +24,11 @@ stop_pidfile() {
 stop_exact_native() {
     expected=$1
     pattern=$2
+    # The shell's own read avoids forking once per process on the phone.
     for process in /proc/[0-9]*; do
         pid=${process##*/}
-        comm=$($BB cat "/proc/$pid/comm" 2>/dev/null || true)
+        comm=''
+        read -r comm 2>/dev/null <"$process/comm" || continue
         [ "$comm" = "$expected" ] || continue
         command=$($BB tr '\000' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
         case "$command" in *"$pattern"*) ;; *) continue ;; esac

@@ -140,6 +140,25 @@ blob. Its entry and worker buffers are non-cloneable, debug-redacted, and
 zeroized on clear, cancel, submit completion, normal model teardown, or view
 exit.
 
+### `connect_enterprise`
+
+WPA2-Enterprise with PEAP and MSCHAPv2 (for example eduroam-style campus
+networks):
+
+```json
+{"id":5,"command":"connect_enterprise","ssid":"UofT","identity":"user","password":"example only","domain":"radius.wireless.utoronto.ca"}
+```
+
+`identity` is 1–128 printable ASCII bytes and `password` 1–128 characters
+without control characters; both follow the same rules as `password` above
+(never logged, echoed, or placed in argv). `domain` is required: the server
+certificate must chain to the system CA bundle
+(`/etc/ssl/certs/ca-certificates.crt`) and carry a DNS name ending in it, so a
+network without a validatable server is never sent the inner credentials. The
+result has the `status` shape. The UI does not send this command; root
+provisioning tools do, e.g. `a26-wifi-ctl connect-enterprise SSID DOMAIN`,
+which reads the identity and password lines from stdin.
+
 ### `disconnect`
 
 Request:
@@ -164,9 +183,18 @@ The initial backend supports open and WPA2-Personal networks. It converts an
 the submitted passphrase. The candidate key remains only in memory and a
 temporary root-only supplicant configuration until the supplicant reports
 `COMPLETED` for the exact requested SSID; only then is the derived key
-atomically committed to the root-owned mode-`0600` store. WPA3-SAE and
-enterprise authentication are reported as `unsupported` until they can be
-implemented without retaining a plaintext credential.
+atomically committed to the root-owned mode-`0600` store. WPA3-SAE is
+reported as `unsupported` until it can be implemented without retaining a
+plaintext credential.
+
+Enterprise (PEAP/MSCHAPv2) networks keep only the MSCHAPv2 NT password hash
+(MD4 of the UTF-16LE password), which wpa_supplicant accepts as
+`password=hash:…`; the identity is written hex-encoded and the server is
+validated against the system CA bundle and the stored domain. Like a WPA2 key,
+the credential is committed to the store only after the supplicant reports
+`COMPLETED`, and a saved enterprise network is reconnected (and autoconnected
+when the service starts) without the UI. The NT hash is password-equivalent for
+MSCHAPv2, so the store stays root-only, mode `0600`.
 
 Duplicate BSSIDs are aggregated conservatively. Conflicting protected/open
 observations, OWE, DPP, and unknown security flags are omitted rather than
