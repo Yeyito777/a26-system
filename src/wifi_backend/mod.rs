@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -27,6 +27,10 @@ const WPA_DIRECTORY: &str = "/run/a26-wifi/wpa";
 const WPA_SOCKET: &str = "/run/a26-wifi/wpa/wlan0";
 const WPA_PID: &str = "/run/a26-wifi/wpa.pid";
 const WPA_CONFIG: &str = "/run/a26-wifi/wpa_supplicant.conf";
+const WPA_MONITOR: &str = "/run/a26-wifi/monitor.sock";
+/// How long `status` keeps reporting why the last join failed.
+const FAILURE_REPORT: Duration = Duration::from_secs(60);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(40);
 const STORE_DIRECTORY: &str = "/var/lib/a26-wifi";
 const STORE_PATH: &str = "/var/lib/a26-wifi/networks.json";
 const DHCP_SCRIPT: &str = "/opt/a26-system/libexec/a26-udhcpc.script";
@@ -155,6 +159,15 @@ struct SharedState {
     failed_ssids: BTreeSet<String>,
     pending: Option<PendingNetwork>,
     next_generation: u64,
+    last_failure: Option<JoinFailure>,
+}
+
+/// Why the last join attempt failed, reported by `status` for a minute so the
+/// UI can explain a join that was accepted but never completed.
+struct JoinFailure {
+    ssid: String,
+    error: &'static str,
+    at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,6 +422,17 @@ fn dispatch(
 }
 
 fn status_result(shared: &Arc<Mutex<SharedState>>) -> Result<Value, &'static str> {
+    let mut result = link_status(shared)?;
+    let state = shared.lock().map_err(|_| "internal")?;
+    if let Some(failure) = &state.last_failure
+        && failure.at.elapsed() < FAILURE_REPORT
+    {
+        result["failure"] = json!({"ssid": failure.ssid, "error": failure.error});
+    }
+    Ok(result)
+}
+
+fn link_status(shared: &Arc<Mutex<SharedState>>) -> Result<Value, &'static str> {
     if !radio_enabled() {
         return Ok(json!({"radio_enabled": false, "state": "disconnected"}));
     }
@@ -440,7 +464,7 @@ fn status_result(shared: &Arc<Mutex<SharedState>>) -> Result<Value, &'static str
 
     let state = shared.lock().map_err(|_| "internal")?;
     if let (Some(ssid), Some(started)) = (&state.desired_ssid, state.connecting_since)
-        && started.elapsed() < Duration::from_secs(40)
+        && started.elapsed() < CONNECT_TIMEOUT
     {
         return Ok(json!({
             "radio_enabled": true,
@@ -598,6 +622,7 @@ fn begin_connect(
     state.desired_ssid = Some(ssid.to_owned());
     state.connecting_since = Some(Instant::now());
     state.failed_ssids.remove(ssid);
+    state.last_failure = None;
     state.pending = Some(PendingNetwork {
         _generation: generation,
         network: candidate,
@@ -1178,11 +1203,30 @@ fn spawn_supervisor(shared: Arc<Mutex<SharedState>>) {
     thread::spawn(move || {
         let mut dhcp: Option<Child> = None;
         let mut scan_ticks = 15_u8;
+        let mut monitor: Option<(WpaMonitor, Option<i32>)> = None;
         loop {
             if ensure_wpa_supplicant().is_err() {
                 thread::sleep(SUPERVISOR_INTERVAL);
                 continue;
             }
+            // Re-attach whenever wpa_supplicant was (re)started.
+            let wpa_pid = owned_pid(Path::new(WPA_PID), "wpa_supplicant");
+            if monitor.as_ref().is_none_or(|(_, pid)| *pid != wpa_pid) {
+                monitor = WpaMonitor::attach()
+                    .ok()
+                    .map(|attached| (attached, wpa_pid));
+            }
+            let event_failure = match monitor
+                .as_ref()
+                .map(|(attached, _)| attached.take_failure())
+            {
+                Some(Ok(failure)) => failure,
+                Some(Err(_)) => {
+                    monitor = None;
+                    None
+                }
+                None => None,
+            };
             let status = wpa_status().unwrap_or_default();
             let completed_ssid = (status.state == "COMPLETED")
                 .then_some(status.ssid)
@@ -1224,13 +1268,18 @@ fn spawn_supervisor(shared: Arc<Mutex<SharedState>>) {
                     interval = SETTLED_INTERVAL;
                 }
             } else {
-                let timed_out = shared.lock().is_ok_and(|state| {
-                    state
-                        .connecting_since
-                        .is_some_and(|started| started.elapsed() >= Duration::from_secs(40))
+                let (joining, timed_out) = shared.lock().map_or((false, false), |state| {
+                    (
+                        state.pending.is_some(),
+                        state
+                            .connecting_since
+                            .is_some_and(|started| started.elapsed() >= CONNECT_TIMEOUT),
+                    )
                 });
-                if timed_out {
-                    cancel_pending(&shared, true);
+                if let Some(error) = event_failure.filter(|_| joining) {
+                    fail_pending(&shared, error);
+                } else if timed_out {
+                    fail_pending(&shared, "timed_out");
                 }
                 if let Some(mut child) = dhcp.take() {
                     let _ = child.kill();
@@ -1291,6 +1340,74 @@ fn commit_completed_network(shared: &Arc<Mutex<SharedState>>, completed_ssid: Op
     state.connecting_since = None;
 }
 
+/// Ends a join that wpa_supplicant rejected or that never completed, records
+/// why for `status`, and goes back to the saved networks.
+fn fail_pending(shared: &Arc<Mutex<SharedState>>, error: &'static str) {
+    if let Ok(mut state) = shared.lock()
+        && let Some(ssid) = state.desired_ssid.clone()
+    {
+        state.last_failure = Some(JoinFailure {
+            ssid,
+            error,
+            at: Instant::now(),
+        });
+    }
+    cancel_pending(shared, true);
+}
+
+/// A control-interface monitor on wpa_supplicant: the only way to learn why
+/// an association failed (a rejected server certificate or credentials)
+/// instead of waiting out the connect timeout.
+struct WpaMonitor {
+    socket: UnixDatagram,
+}
+
+impl WpaMonitor {
+    fn attach() -> io::Result<Self> {
+        let _ = fs::remove_file(WPA_MONITOR);
+        let socket = UnixDatagram::bind(WPA_MONITOR)?;
+        fs::set_permissions(WPA_MONITOR, fs::Permissions::from_mode(0o600))?;
+        socket.connect(WPA_SOCKET)?;
+        socket.set_read_timeout(Some(Duration::from_millis(500)))?;
+        socket.send(b"ATTACH")?;
+        let mut reply = [0_u8; 16];
+        let length = socket.recv(&mut reply)?;
+        if &reply[..length] != b"OK\n" {
+            return Err(io::Error::other("wpa_supplicant refused ATTACH"));
+        }
+        socket.set_nonblocking(true)?;
+        Ok(Self { socket })
+    }
+
+    /// Drains every queued event and returns the first join failure seen.
+    fn take_failure(&self) -> io::Result<Option<&'static str>> {
+        let mut buffer = [0_u8; 4096];
+        let mut failure = None;
+        loop {
+            match self.socket.recv(&mut buffer) {
+                Ok(length) => {
+                    let event = String::from_utf8_lossy(&buffer[..length]);
+                    failure = failure.or_else(|| classify_wpa_event(&event));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(failure),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+fn classify_wpa_event(event: &str) -> Option<&'static str> {
+    if event.contains("CTRL-EVENT-EAP-TLS-CERT-ERROR") {
+        Some("server_untrusted")
+    } else if event.contains("CTRL-EVENT-EAP-FAILURE")
+        || (event.contains("CTRL-EVENT-SSID-TEMP-DISABLED") && event.contains("reason=WRONG_KEY"))
+    {
+        Some("authentication_failed")
+    } else {
+        None
+    }
+}
+
 fn cancel_pending(shared: &Arc<Mutex<SharedState>>, mark_failed: bool) {
     let Ok(mut state) = shared.lock() else {
         return;
@@ -1321,6 +1438,23 @@ fn owned_pid(path: &Path, expected_name: &str) -> Option<i32> {
     (comm.trim() == expected_name).then_some(pid)
 }
 
+/// Whether `pid` still runs. A terminated child of this service (udhcpc)
+/// stays a zombie until the supervisor reaps it, which used to make every
+/// stop wait its full two seconds and every connect overrun the UI timeout.
+fn process_running(pid: i32) -> bool {
+    // SAFETY: kill with signal 0 only checks that the PID exists.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')
+                .map(|(_, rest)| !rest.trim_start().starts_with('Z'))
+        })
+        .unwrap_or(true)
+}
+
 fn stop_owned_pid(path: &Path, expected_name: &str) {
     if let Some(pid) = owned_pid(path, expected_name) {
         // SAFETY: kill sends a signal to a positive PID validated through the
@@ -1329,12 +1463,12 @@ fn stop_owned_pid(path: &Path, expected_name: &str) {
             libc::kill(pid, libc::SIGTERM);
         }
         for _ in 0..40 {
-            if unsafe { libc::kill(pid, 0) } != 0 {
+            if !process_running(pid) {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
         }
-        if unsafe { libc::kill(pid, 0) } == 0 {
+        if process_running(pid) {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }
@@ -1414,6 +1548,27 @@ fn android_wifi_table() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wpa_events_classify_join_failures() {
+        assert_eq!(
+            classify_wpa_event(
+                "<3>CTRL-EVENT-EAP-TLS-CERT-ERROR reason=1 depth=0 subject='/CN=x' err='Domain suffix mismatch'"
+            ),
+            Some("server_untrusted")
+        );
+        assert_eq!(
+            classify_wpa_event("<3>CTRL-EVENT-EAP-FAILURE EAP authentication failed"),
+            Some("authentication_failed")
+        );
+        assert_eq!(
+            classify_wpa_event(
+                "<3>CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid=\"Home\" auth_failures=1 duration=10 reason=WRONG_KEY"
+            ),
+            Some("authentication_failed")
+        );
+        assert_eq!(classify_wpa_event("<3>CTRL-EVENT-SCAN-RESULTS "), None);
+    }
 
     #[test]
     fn password_validation_matches_protocol() {

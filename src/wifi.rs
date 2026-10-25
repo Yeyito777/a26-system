@@ -175,6 +175,15 @@ pub enum LinkState {
 pub struct WifiStatus {
     pub radio_enabled: bool,
     pub state: LinkState,
+    /// Why the backend's last join failed after it was accepted (it reports
+    /// this for about a minute).
+    pub failure: Option<JoinFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinFailure {
+    pub ssid: String,
+    pub rejection: Rejection,
 }
 
 pub enum WifiRequest {
@@ -474,15 +483,33 @@ fn parse_rejection(document: &Value) -> WifiError {
         .get("error")
         .and_then(|error| error.get("code"))
         .and_then(Value::as_str);
-    let rejection = match code {
+    WifiError::Rejected(rejection_from_code(code))
+}
+
+/// Unknown codes (server_untrusted, timed_out, ...) read as "Could not connect".
+pub(crate) fn rejection_from_code(code: Option<&str>) -> Rejection {
+    match code {
         Some("authentication_failed") => Rejection::AuthenticationFailed,
         Some("network_not_found") => Rejection::NetworkNotFound,
         Some("radio_disabled") => Rejection::RadioDisabled,
         Some("busy") => Rejection::Busy,
         Some("unsupported") => Rejection::Unsupported,
         _ => Rejection::Other,
-    };
-    WifiError::Rejected(rejection)
+    }
+}
+
+/// A malformed failure report is ignored rather than failing the status.
+fn optional_failure(result: &Value) -> Option<JoinFailure> {
+    let failure = result.get("failure")?;
+    let ssid = failure.get("ssid")?.as_str()?;
+    if ssid.is_empty() || ssid.len() > 32 {
+        return None;
+    }
+    let code = failure.get("error")?.as_str()?;
+    Some(JoinFailure {
+        ssid: ssid.to_owned(),
+        rejection: rejection_from_code(Some(code)),
+    })
 }
 
 fn parse_status(result: Value) -> Result<WifiStatus, WifiError> {
@@ -509,6 +536,7 @@ fn parse_status(result: Value) -> Result<WifiStatus, WifiError> {
     Ok(WifiStatus {
         radio_enabled,
         state,
+        failure: optional_failure(&result),
     })
 }
 

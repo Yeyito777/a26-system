@@ -295,8 +295,14 @@ impl AppModel {
         match event {
             WifiEvent::Status(result) => match result {
                 Ok(status) => {
+                    // A join that was accepted but then failed (credentials
+                    // or server certificate rejected, or no association)
+                    // only shows up here.
+                    self.notice = status
+                        .failure
+                        .as_ref()
+                        .map(|failure| error_notice(WifiError::Rejected(failure.rejection)));
                     self.set_status(status);
-                    self.notice = None;
                 }
                 Err(error) => self.service_error(error),
             },
@@ -445,6 +451,7 @@ impl AppModel {
         self.wifi_status = Some(WifiStatus {
             radio_enabled: true,
             state: LinkState::Connecting { ssid },
+            failure: None,
         });
         vec![request]
     }
@@ -625,6 +632,32 @@ mod tests {
             model.notice,
             Some("This network’s security is not supported")
         );
+    }
+
+    #[test]
+    fn accepted_join_that_fails_later_explains_why() {
+        let mut model = AppModel {
+            view: View::Wifi,
+            ..AppModel::default()
+        };
+        let status = |code: &str| WifiStatus {
+            radio_enabled: true,
+            state: LinkState::Disconnected,
+            failure: Some(crate::wifi::JoinFailure {
+                ssid: "eduroam".into(),
+                rejection: crate::wifi::rejection_from_code(Some(code)),
+            }),
+        };
+        model.apply_wifi_event(WifiEvent::Status(Ok(status("authentication_failed"))));
+        assert_eq!(model.notice, Some("Incorrect password"));
+        model.apply_wifi_event(WifiEvent::Status(Ok(status("server_untrusted"))));
+        assert_eq!(model.notice, Some("Could not connect"));
+        model.apply_wifi_event(WifiEvent::Status(Ok(WifiStatus {
+            radio_enabled: true,
+            state: LinkState::Disconnected,
+            failure: None,
+        })));
+        assert_eq!(model.notice, None);
     }
 
     #[test]

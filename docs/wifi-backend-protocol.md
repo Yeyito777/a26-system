@@ -80,6 +80,21 @@ include `signal` (integer 0 through 100) and `ip_address` (string or null):
 `state` is `disconnected`, `connecting`, `connected`, or `disconnecting`. When
 `radio_enabled` is false, the backend should report `disconnected`.
 
+A join the backend accepted can still fail afterwards. For about a minute
+after that, `status` also carries the reason, with the SSID it applies to:
+
+```json
+{"id":1,"ok":true,"result":{"radio_enabled":true,"state":"connected","ssid":"UofT","signal":54,"ip_address":"192.0.2.7","failure":{"ssid":"eduroam","error":"authentication_failed"}}}
+```
+
+`error` is `authentication_failed` (wpa_supplicant reported an EAP failure
+or a wrong key), `server_untrusted` (the server certificate did not chain to
+the system CA bundle or match the domain), or `timed_out` (no association
+within 40 s). The backend watches wpa_supplicant's control-interface events,
+so the first two arrive within seconds; after any failure it returns to the
+saved networks. A new join clears the report. Clients map unknown codes to a
+generic failure.
+
 **A status result must never contain a password, PSK, SAE password, saved
 credential, key-material identifier, or backend command line.**
 
