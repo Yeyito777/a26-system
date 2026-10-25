@@ -37,6 +37,10 @@ const MAX_SSID_BYTES: usize = 32;
 const MAX_STORE_BYTES: u64 = 16 * 1024;
 const MAX_SAVED_NETWORKS: usize = 64;
 const SUPERVISOR_INTERVAL: Duration = Duration::from_secs(1);
+// Once connected with a DHCP client running, poll less and never scan in the
+// background: each scan costs radio power, and the UI's scan request still
+// starts a fresh one.
+const SETTLED_INTERVAL: Duration = Duration::from_secs(5);
 const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 const MAX_IDENTITY_BYTES: usize = 128;
 const MAX_ENTERPRISE_PASSWORD_CHARS: usize = 128;
@@ -1179,16 +1183,18 @@ fn spawn_supervisor(shared: Arc<Mutex<SharedState>>) {
                 thread::sleep(SUPERVISOR_INTERVAL);
                 continue;
             }
-            if scan_ticks >= 15 {
+            let status = wpa_status().unwrap_or_default();
+            let completed_ssid = (status.state == "COMPLETED")
+                .then_some(status.ssid)
+                .flatten();
+            if completed_ssid.is_some() {
+                scan_ticks = 15;
+            } else if scan_ticks >= 15 {
                 let _ = wpa_cli(&["scan"]);
                 scan_ticks = 0;
             } else {
                 scan_ticks += 1;
             }
-            let status = wpa_status().unwrap_or_default();
-            let completed_ssid = (status.state == "COMPLETED")
-                .then_some(status.ssid)
-                .flatten();
             let desired = shared
                 .lock()
                 .ok()
@@ -1198,6 +1204,7 @@ fn spawn_supervisor(shared: Arc<Mutex<SharedState>>) {
                 (None, Some(_)) => true,
                 _ => false,
             };
+            let mut interval = SUPERVISOR_INTERVAL;
             if target_completed {
                 commit_completed_network(&shared, completed_ssid.as_deref());
                 let exited = dhcp
@@ -1209,6 +1216,12 @@ fn spawn_supervisor(shared: Arc<Mutex<SharedState>>) {
                 }
                 if dhcp.is_none() {
                     dhcp = start_dhcp().ok();
+                }
+                let settled = desired.is_none()
+                    && dhcp.is_some()
+                    && shared.lock().is_ok_and(|state| state.pending.is_none());
+                if settled {
+                    interval = SETTLED_INTERVAL;
                 }
             } else {
                 let timed_out = shared.lock().is_ok_and(|state| {
@@ -1224,7 +1237,7 @@ fn spawn_supervisor(shared: Arc<Mutex<SharedState>>) {
                     let _ = child.wait();
                 }
             }
-            thread::sleep(SUPERVISOR_INTERVAL);
+            thread::sleep(interval);
         }
     });
 }
