@@ -426,10 +426,7 @@ fn draw_threads(
     if threads.is_empty() {
         if model.threads.is_some() || !model.connected {
             let (title, detail) = match service {
-                Service::NoSim => (
-                    "No SIM",
-                    "Messages can be sent and received once a SIM is in.",
-                ),
+                Service::NoSim => ("No SIM", "Insert a SIM to send and receive messages."),
                 Service::Unavailable => ("No Messages", "Cellular service unavailable"),
                 _ => ("No Messages", ""),
             };
