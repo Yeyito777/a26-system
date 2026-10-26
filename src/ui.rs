@@ -64,10 +64,10 @@ const PASSWORD_CARD_Y: f32 = 300.0;
 const FALLBACK_KEYBOARD_GAP: f32 = 212.0;
 
 pub struct Renderer {
-    window: Window,
-    depth: u8,
+    /// The X11 window and its presenter; None for a Wayland client, which
+    /// presents the canvas itself.
+    x11: Option<(Window, u8, Presenter)>,
     canvas: Canvas,
-    presenter: Presenter,
 }
 
 impl Renderer {
@@ -79,22 +79,34 @@ impl Renderer {
         height: u16,
     ) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
-            window,
-            depth,
+            x11: Some((
+                window,
+                depth,
+                Presenter::create(conn, window, depth, width, height)?,
+            )),
             canvas: Canvas::new(i32::from(width), i32::from(height)),
-            presenter: Presenter::create(conn, window, depth, width, height)?,
         })
+    }
+
+    /// A renderer that only draws into its canvas.
+    pub fn offscreen(width: u16, height: u16) -> Self {
+        Self {
+            x11: None,
+            canvas: Canvas::new(i32::from(width), i32::from(height)),
+        }
     }
 
     pub fn resize<C: Connection>(
         &mut self,
-        conn: &C,
+        conn: Option<&C>,
         width: u16,
         height: u16,
     ) -> Result<(), Box<dyn Error>> {
-        let presenter = Presenter::create(conn, self.window, self.depth, width, height)?;
-        self.presenter.destroy(conn);
-        self.presenter = presenter;
+        if let (Some(conn), Some((window, depth, presenter))) = (conn, self.x11.as_mut()) {
+            let replacement = Presenter::create(conn, *window, *depth, width, height)?;
+            presenter.destroy(conn);
+            *presenter = replacement;
+        }
         self.canvas = Canvas::new(i32::from(width), i32::from(height));
         Ok(())
     }
@@ -107,14 +119,14 @@ impl Renderer {
         self.canvas.height as u16
     }
 
-    pub fn render<C: Connection>(
+    /// Draws the current state into the canvas.
+    pub fn draw(
         &mut self,
-        conn: &C,
         system: &SystemInfo,
         volume: Option<u8>,
         app: &AppModel,
         pressed: Option<Action>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> &Canvas {
         let canvas = &mut self.canvas;
         canvas.clear(BG);
         if let Some(dialog) = &app.password_dialog {
@@ -126,20 +138,38 @@ impl Renderer {
                 View::Clock => crate::clock_ui::draw_clock(canvas, &app.clock, pressed),
             }
         }
-        self.presenter.present(conn, &self.canvas, 0)?;
+        &self.canvas
+    }
+
+    pub fn render<C: Connection>(
+        &mut self,
+        conn: &C,
+        system: &SystemInfo,
+        volume: Option<u8>,
+        app: &AppModel,
+        pressed: Option<Action>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.draw(system, volume, app, pressed);
+        if let Some((_, _, presenter)) = self.x11.as_mut() {
+            presenter.present(conn, &self.canvas, 0)?;
+        }
         conn.flush()?;
         Ok(())
     }
 
     /// Repairs exposed window areas from the last frame.
     pub fn expose<C: Connection>(&self, conn: &C) -> Result<(), Box<dyn Error>> {
-        self.presenter.expose(conn, 0)?;
+        if let Some((_, _, presenter)) = &self.x11 {
+            presenter.expose(conn, 0)?;
+        }
         conn.flush()?;
         Ok(())
     }
 
     pub fn destroy<C: Connection>(&self, conn: &C) {
-        self.presenter.destroy(conn);
+        if let Some((_, _, presenter)) = &self.x11 {
+            presenter.destroy(conn);
+        }
     }
 
     pub fn action_at(&self, app: &AppModel, x: i16, y: i16) -> Option<Action> {

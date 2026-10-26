@@ -9,6 +9,7 @@ mod present;
 mod text;
 mod ui;
 mod wifi;
+mod wl;
 
 use std::env;
 use std::error::Error;
@@ -87,43 +88,218 @@ impl TapTracker {
 fn main() -> Result<(), Box<dyn Error>> {
     parse_arguments()?;
     disable_process_dumps()?;
+    // Under Moon's Wayland server (WAYLAND_DISPLAY set) the app is a native
+    // Wayland client; otherwise, or if that fails, it is the X11 app it
+    // always was.
+    let backend = if env::var_os("WAYLAND_DISPLAY").is_some() {
+        match wl::WlBackend::connect(APP_NAME) {
+            Ok(backend) => Backend::Wayland(backend),
+            Err(error) => {
+                eprintln!("{APP_NAME}: Wayland unavailable ({error}); using X11");
+                Backend::X11(XBackend::open()?)
+            }
+        }
+    } else {
+        Backend::X11(XBackend::open()?)
+    };
+    run(backend)
+}
 
-    let (conn, screen_number) = RustConnection::connect(None)?;
-    let screen = &conn.setup().roots[screen_number];
-    let window = conn.generate_id()?;
-    conn.create_window(
-        COPY_DEPTH_FROM_PARENT,
-        window,
-        screen.root,
-        0,
-        0,
-        REQUESTED_WIDTH,
-        REQUESTED_HEIGHT,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        0,
-        &CreateWindowAux::new()
-            .background_pixel(ui::BG)
-            .override_redirect(0)
-            .event_mask(
-                EventMask::EXPOSURE
-                    | EventMask::STRUCTURE_NOTIFY
-                    | EventMask::BUTTON_PRESS
-                    | EventMask::BUTTON_RELEASE
-                    | EventMask::POINTER_MOTION
-                    | EventMask::KEY_PRESS,
+/// What the display delivered, in window pixels.
+#[derive(Debug, Clone, Copy)]
+enum Input {
+    Press(i16, i16),
+    Motion(i16, i16),
+    Release(i16, i16),
+    Key(KeyInput),
+    /// The window was configured; `resized` when its size changed.
+    Configured {
+        resized: bool,
+    },
+    Close,
+}
+
+struct XBackend {
+    conn: RustConnection,
+    window: Window,
+    depth: u8,
+    protocols: WindowProtocols,
+    key_map: KeyMap,
+    mapped: bool,
+}
+
+impl XBackend {
+    fn open() -> Result<Self, Box<dyn Error>> {
+        let (conn, screen_number) = RustConnection::connect(None)?;
+        let screen = &conn.setup().roots[screen_number];
+        let depth = screen.root_depth;
+        let root = screen.root;
+        let window = conn.generate_id()?;
+        conn.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            0,
+            0,
+            REQUESTED_WIDTH,
+            REQUESTED_HEIGHT,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new()
+                .background_pixel(ui::BG)
+                .override_redirect(0)
+                .event_mask(
+                    EventMask::EXPOSURE
+                        | EventMask::STRUCTURE_NOTIFY
+                        | EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | EventMask::POINTER_MOTION
+                        | EventMask::KEY_PRESS,
+                ),
+        )?;
+        let protocols = configure_window_metadata(&conn, window)?;
+        let key_map = KeyMap::query(&conn)?;
+        Ok(Self {
+            conn,
+            window,
+            depth,
+            protocols,
+            key_map,
+            mapped: false,
+        })
+    }
+
+    fn inputs(&mut self, renderer: &mut Renderer) -> Result<Vec<Input>, Box<dyn Error>> {
+        let mut inputs = Vec::new();
+        let window = self.window;
+        while let Some(event) = self.conn.poll_for_event()? {
+            match event {
+                Event::Expose(event) if event.window == window && event.count == 0 => {
+                    renderer.expose(&self.conn)?;
+                }
+                Event::ConfigureNotify(event) if event.window == window => {
+                    let resized = renderer.size() != (event.width, event.height);
+                    if resized {
+                        renderer.resize(Some(&self.conn), event.width, event.height)?;
+                    }
+                    inputs.push(Input::Configured { resized });
+                }
+                Event::ButtonPress(event) if event.event == window && event.detail == 1 => {
+                    inputs.push(Input::Press(event.event_x, event.event_y));
+                }
+                Event::MotionNotify(event) if event.event == window => {
+                    inputs.push(Input::Motion(event.event_x, event.event_y));
+                }
+                Event::ButtonRelease(event) if event.event == window && event.detail == 1 => {
+                    inputs.push(Input::Release(event.event_x, event.event_y));
+                }
+                Event::KeyPress(event) if event.event == window => {
+                    // Keys come from Moon's system keyboard (XTEST).
+                    if let Some(input) = self.key_map.decode(event.detail, event.state) {
+                        inputs.push(Input::Key(input));
+                    }
+                }
+                Event::ClientMessage(event)
+                    if event.window == window
+                        && event.type_ == self.protocols.wm_protocols
+                        && event.data.as_data32()[0] == self.protocols.wm_delete_window =>
+                {
+                    inputs.push(Input::Close);
+                }
+                Event::DestroyNotify(event) if event.window == window => {
+                    inputs.push(Input::Close);
+                }
+                _ => {}
+            }
+        }
+        Ok(inputs)
+    }
+}
+
+enum Backend {
+    X11(XBackend),
+    Wayland(wl::WlBackend),
+}
+
+impl Backend {
+    fn renderer(&mut self) -> Result<Renderer, Box<dyn Error>> {
+        match self {
+            Self::X11(x) => Renderer::new(
+                &x.conn,
+                x.window,
+                x.depth,
+                REQUESTED_WIDTH,
+                REQUESTED_HEIGHT,
             ),
-    )?;
+            Self::Wayland(wl) => {
+                let (width, height) = wl.size();
+                Ok(Renderer::offscreen(width, height))
+            }
+        }
+    }
 
-    let protocols = configure_window_metadata(&conn, window)?;
-    let key_map = KeyMap::query(&conn)?;
-    let mut renderer = Renderer::new(
-        &conn,
-        window,
-        screen.root_depth,
-        REQUESTED_WIDTH,
-        REQUESTED_HEIGHT,
-    )?;
+    fn inputs(&mut self, renderer: &mut Renderer) -> Result<Vec<Input>, Box<dyn Error>> {
+        match self {
+            Self::X11(x) => x.inputs(renderer),
+            Self::Wayland(wl) => {
+                let mut inputs = wl.inputs();
+                let size = wl.size();
+                if renderer.size() != size {
+                    renderer.resize::<RustConnection>(None, size.0, size.1)?;
+                    inputs.insert(0, Input::Configured { resized: true });
+                }
+                Ok(inputs)
+            }
+        }
+    }
+
+    fn render(
+        &mut self,
+        renderer: &mut Renderer,
+        system: &SystemInfo,
+        volume: Option<u8>,
+        app: &AppModel,
+        pressed: Option<Action>,
+    ) -> Result<(), Box<dyn Error>> {
+        match self {
+            Self::X11(x) => {
+                renderer.render(&x.conn, system, volume, app, pressed)?;
+                if !x.mapped {
+                    // The first complete frame is drawn while the window is
+                    // still unmapped, so Moon can reveal this fast-starting
+                    // app directly instead of an empty X11 background.
+                    x.conn.map_window(x.window)?;
+                    x.conn.flush()?;
+                    x.mapped = true;
+                }
+                Ok(())
+            }
+            Self::Wayland(wl) => {
+                let canvas = renderer.draw(system, volume, app, pressed);
+                wl.present(canvas)
+            }
+        }
+    }
+
+    fn wait(&mut self, timeout: Duration) -> std::io::Result<()> {
+        match self {
+            Self::X11(x) => wait_for_x(&x.conn, timeout),
+            Self::Wayland(wl) => wl.wait(timeout),
+        }
+    }
+
+    fn finish(&mut self, renderer: &Renderer) {
+        if let Self::X11(x) = self {
+            renderer.destroy(&x.conn);
+            let _ = x.conn.destroy_window(x.window);
+            let _ = x.conn.flush();
+        }
+    }
+}
+
+fn run(mut backend: Backend) -> Result<(), Box<dyn Error>> {
+    let mut renderer = backend.renderer()?;
     let mut system = SystemInfo::collect();
     let mut volume = control::read_volume();
     let mut app = AppModel::default();
@@ -140,12 +316,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut next_wifi_status = Instant::now() + WIFI_STATUS_INTERVAL;
     let mut next_busy_frame = Instant::now();
 
-    // Draw the first complete frame while the window is still unmapped. Moon
-    // can then reveal this fast-starting app directly instead of exposing an
-    // empty X11 background for one scanout.
-    renderer.render(&conn, &system, volume, &app, None)?;
-    conn.map_window(window)?;
-    conn.flush()?;
+    backend.render(&mut renderer, &system, volume, &app, None)?;
 
     while running {
         while let Some(event) = wifi_worker.try_recv() {
@@ -157,43 +328,36 @@ fn main() -> Result<(), Box<dyn Error>> {
             redraw = true;
         }
 
-        while let Some(event) = conn.poll_for_event()? {
-            match event {
-                Event::Expose(event) if event.window == window && event.count == 0 => {
-                    renderer.expose(&conn)?;
-                }
-                Event::ConfigureNotify(event) if event.window == window => {
-                    if renderer.size() != (event.width, event.height) {
-                        renderer.resize(&conn, event.width, event.height)?;
-                        redraw = true;
-                    }
+        for input in backend.inputs(&mut renderer)? {
+            match input {
+                Input::Configured { resized } => {
+                    redraw |= resized;
                     tap = None;
                     pressed = None;
                 }
-                Event::ButtonPress(event)
-                    if event.event == window && event.detail == 1 && tap.is_none() =>
-                {
-                    tap = TapTracker::new(event.event_x, event.event_y, renderer.height());
+                Input::Press(x, y) if tap.is_none() => {
+                    tap = TapTracker::new(x, y, renderer.height());
                     if tap.is_some() {
-                        pressed = renderer.action_at(&app, event.event_x, event.event_y);
+                        pressed = renderer.action_at(&app, x, y);
                         redraw |= pressed.is_some();
                     }
                 }
-                Event::MotionNotify(event) if event.event == window => {
+                Input::Press(..) => {}
+                Input::Motion(x, y) => {
                     if let Some(tap) = &mut tap {
-                        tap.observe(event.event_x, event.event_y);
+                        tap.observe(x, y);
                         if tap.moved && pressed.take().is_some() {
                             redraw = true;
                         }
                     }
                 }
-                Event::ButtonRelease(event) if event.event == window && event.detail == 1 => {
+                Input::Release(x, y) => {
                     if pressed.take().is_some() {
                         redraw = true;
                     }
                     if let Some(position) = tap
                         .take()
-                        .and_then(|tap| tap.finish(event.event_x, event.event_y, renderer.height()))
+                        .and_then(|tap| tap.finish(x, y, renderer.height()))
                     {
                         if let Some(action) = renderer.action_at(&app, position.0, position.1) {
                             perform(
@@ -207,19 +371,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                 }
-                Event::KeyPress(event) if event.event == window => {
+                Input::Key(input) => {
                     // Keys come from Moon's system keyboard; only the password
                     // field and the Clock page's label accept them.
-                    if app.password_dialog.is_none()
-                        && app.clock.label_focused()
-                        && let Some(input) = key_map.decode(event.detail, event.state)
-                    {
+                    if app.password_dialog.is_none() && app.clock.label_focused() {
                         app.clock.type_text(input);
                         sync_keyboard(&mut app, None, &mut keyboard_requested);
                         redraw = true;
-                    } else if app.password_dialog.is_some()
-                        && let Some(input) = key_map.decode(event.detail, event.state)
-                    {
+                    } else if app.password_dialog.is_some() {
                         let action = match input {
                             KeyInput::Character(character) => {
                                 Action::Key(KeyAction::Character(character))
@@ -237,17 +396,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         redraw = true;
                     }
                 }
-                Event::ClientMessage(event)
-                    if event.window == window
-                        && event.type_ == protocols.wm_protocols
-                        && event.data.as_data32()[0] == protocols.wm_delete_window =>
-                {
-                    running = false;
-                }
-                Event::DestroyNotify(event) if event.window == window => {
-                    running = false;
-                }
-                _ => {}
+                Input::Close => running = false,
             }
         }
 
@@ -276,7 +425,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         if redraw && running {
-            renderer.render(&conn, &system, volume, &app, pressed)?;
+            backend.render(&mut renderer, &system, volume, &app, pressed)?;
             redraw = false;
         }
 
@@ -291,15 +440,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Daemon events arrive on the worker thread; pick them up soon.
             deadline = deadline.min(Instant::now() + CLOCK_POLL_INTERVAL);
         }
-        wait_for_x(&conn, deadline.saturating_duration_since(Instant::now()))?;
+        backend.wait(deadline.saturating_duration_since(Instant::now()))?;
     }
 
     if keyboard_requested.is_some() {
         control::hide_keyboard();
     }
-    renderer.destroy(&conn);
-    let _ = conn.destroy_window(window);
-    let _ = conn.flush();
+    backend.finish(&renderer);
     Ok(())
 }
 

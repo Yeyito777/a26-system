@@ -35,6 +35,11 @@ pub enum KeyboardPurpose {
 /// Asks Moon to show its system keyboard. Returns whether the keyboard is
 /// now visible; Moon refuses while locked or launching.
 pub fn show_keyboard(purpose: KeyboardPurpose) -> bool {
+    // A Wayland client asks through text-input-v3: Moon shows its keyboard
+    // when the text field is enabled, with the field's purpose.
+    if let Some(shown) = crate::wl::show_keyboard(purpose) {
+        return shown;
+    }
     let command: &[u8] = match purpose {
         KeyboardPurpose::Text => b"keyboard show text\n",
         KeyboardPurpose::Url => b"keyboard show url\n",
@@ -47,6 +52,9 @@ pub fn show_keyboard(purpose: KeyboardPurpose) -> bool {
 }
 
 pub fn hide_keyboard() {
+    if crate::wl::hide_keyboard() {
+        return;
+    }
     let _ = request(&socket(), b"keyboard hide\n");
 }
 

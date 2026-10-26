@@ -3,7 +3,7 @@ name = "a26-system"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Standalone X11 system-information view for the Samsung Galaxy A26 Linux environment"
+description = "Standalone system-information view for the Samsung Galaxy A26 Linux environment (Wayland or X11)"
 license = "MIT"
 
 [dependencies]
@@ -15,6 +15,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"
 x11rb = "0.14"
+# Native Wayland client of Moon (pure Rust, statically linked).
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 zeroize = { version = "1.8", features = ["derive"] }
 
 [profile.release]
