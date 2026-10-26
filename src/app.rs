@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::time::{Duration, Instant};
 
 use crate::wifi::{
     LinkState, Rejection, SecretString, Security, WifiError, WifiEvent, WifiNetwork, WifiRequest,
@@ -6,6 +7,12 @@ use crate::wifi::{
 };
 
 pub const NETWORKS_PER_PAGE: usize = 7;
+/// The backend answers a scan with its cached results and starts a fresh
+/// scan, which Samsung's firmware takes a few seconds to finish; a requested
+/// scan asks again after this long so one press shows the new networks.
+const SCAN_FOLLOW_UP: Duration = Duration::from_secs(4);
+/// How long a notice stays up when nothing else replaces it.
+const NOTICE_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -198,6 +205,14 @@ pub struct AppModel {
     pub notice: Option<&'static str>,
     pub password_dialog: Option<PasswordDialog>,
     wifi_initialized: bool,
+    /// When the shown notice goes away (`None`: it stays).
+    notice_until: Option<Instant>,
+    /// The backend keeps reporting a failed join for a while; it is shown
+    /// once per attempt.
+    failure_acknowledged: bool,
+    /// The scan in flight answers from the cache; ask again once it lands.
+    scan_follow_up: bool,
+    scan_follow_up_at: Option<Instant>,
 }
 
 impl Default for AppModel {
@@ -212,12 +227,18 @@ impl Default for AppModel {
             notice: None,
             password_dialog: None,
             wifi_initialized: false,
+            notice_until: None,
+            failure_acknowledged: false,
+            scan_follow_up: false,
+            scan_follow_up_at: None,
         }
     }
 }
 
 impl AppModel {
     pub fn handle(&mut self, action: Action) -> Vec<WifiRequest> {
+        // Any tap or key dismisses the last notice.
+        self.notice = None;
         match action {
             Action::ShowSystem => {
                 self.password_dialog = None;
@@ -230,14 +251,13 @@ impl AppModel {
                     vec![WifiRequest::Status]
                 } else {
                     self.wifi_initialized = true;
-                    self.scanning = true;
-                    vec![WifiRequest::Status, WifiRequest::Scan]
+                    self.start_scan()
                 }
             }
-            Action::RefreshWifi if !self.busy && self.password_dialog.is_none() => {
-                self.scanning = true;
-                self.notice = None;
-                vec![WifiRequest::Status, WifiRequest::Scan]
+            Action::RefreshWifi
+                if !self.busy && !self.scanning && self.password_dialog.is_none() =>
+            {
+                self.start_scan()
             }
             Action::SelectNetwork(index) if !self.busy && self.password_dialog.is_none() => {
                 self.select_network(index)
@@ -254,7 +274,6 @@ impl AppModel {
             }
             Action::Disconnect if !self.busy && self.password_dialog.is_none() => {
                 self.busy = true;
-                self.notice = None;
                 vec![WifiRequest::Disconnect]
             }
             Action::CancelPassword => {
@@ -298,26 +317,34 @@ impl AppModel {
                     // A join that was accepted but then failed (credentials
                     // or server certificate rejected, or no association)
                     // only shows up here.
-                    self.notice = status
-                        .failure
-                        .as_ref()
-                        .map(|failure| error_notice(WifiError::Rejected(failure.rejection)));
+                    match &status.failure {
+                        Some(failure) if !self.failure_acknowledged => {
+                            self.failure_acknowledged = true;
+                            self.show_notice(error_notice(WifiError::Rejected(failure.rejection)));
+                        }
+                        Some(_) => {}
+                        None => self.failure_acknowledged = false,
+                    }
                     self.set_status(status);
                 }
                 Err(error) => self.service_error(error),
             },
-            WifiEvent::Scan(result) => {
-                self.scanning = false;
-                match result {
-                    Ok(networks) => {
-                        self.networks = normalized_networks(networks);
-                        self.clamp_page();
-                        self.reconcile_connected_network();
-                        self.notice = None;
+            WifiEvent::Scan(result) => match result {
+                Ok(networks) => {
+                    self.networks = normalized_networks(networks);
+                    self.clamp_page();
+                    self.reconcile_connected_network();
+                    if std::mem::take(&mut self.scan_follow_up) {
+                        self.scan_follow_up_at = Some(Instant::now() + SCAN_FOLLOW_UP);
+                    } else {
+                        self.scanning = false;
                     }
-                    Err(error) => self.notice = Some(error_notice(error)),
                 }
-            }
+                Err(error) => {
+                    self.stop_scan();
+                    self.show_notice(error_notice(error));
+                }
+            },
             WifiEvent::Connect(result) => {
                 self.busy = false;
                 match result {
@@ -325,7 +352,7 @@ impl AppModel {
                         let connected = matches!(status.state, LinkState::Connected { .. });
                         self.set_status(status);
                         self.reconcile_connected_network();
-                        self.notice = Some(if connected {
+                        self.show_notice(if connected {
                             "Connected"
                         } else {
                             "Connecting…"
@@ -336,7 +363,7 @@ impl AppModel {
                             status.state = LinkState::Disconnected;
                         }
                         self.reconcile_connected_network();
-                        self.notice = Some(error_notice(error));
+                        self.show_notice(error_notice(error));
                     }
                 }
             }
@@ -346,9 +373,9 @@ impl AppModel {
                     Ok(status) => {
                         self.set_status(status);
                         self.reconcile_connected_network();
-                        self.notice = Some("Disconnected");
+                        self.show_notice("Disconnected");
                     }
-                    Err(error) => self.notice = Some(error_notice(error)),
+                    Err(error) => self.show_notice(error_notice(error)),
                 }
             }
         }
@@ -356,10 +383,34 @@ impl AppModel {
 
     pub fn worker_unavailable(&mut self) {
         self.busy = false;
-        self.scanning = false;
+        self.stop_scan();
         self.wifi_status = None;
         self.password_dialog = None;
+        // The worker does not come back; this one stays.
         self.notice = Some("Wi-Fi service unavailable");
+        self.notice_until = None;
+    }
+
+    /// The next time `tick` has something to do.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        let notice = self.notice.and(self.notice_until);
+        match (notice, self.scan_follow_up_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Expires the notice and sends a due follow-up scan.
+    pub fn tick(&mut self, now: Instant) -> Vec<WifiRequest> {
+        if self.notice_until.is_some_and(|until| now >= until) {
+            self.notice = None;
+            self.notice_until = None;
+        }
+        if self.scan_follow_up_at.is_some_and(|at| now >= at) {
+            self.scan_follow_up_at = None;
+            return vec![WifiRequest::Scan];
+        }
+        Vec::new()
     }
 
     pub fn page_count(&self) -> usize {
@@ -384,14 +435,13 @@ impl AppModel {
             return Vec::new();
         }
         if !network.joinable() {
-            self.notice = Some("This network’s security is not supported");
+            self.show_notice("This network’s security is not supported");
             return Vec::new();
         }
 
         let ssid = network.ssid.clone();
         let security = network.security;
         if network.requires_password {
-            self.notice = None;
             self.password_dialog = Some(PasswordDialog::new(ssid, security));
             Vec::new()
         } else {
@@ -447,7 +497,9 @@ impl AppModel {
 
     fn begin_request(&mut self, ssid: String, request: WifiRequest) -> Vec<WifiRequest> {
         self.busy = true;
-        self.notice = None;
+        self.failure_acknowledged = false;
+        // No scan while associating; the list is refreshed afterwards.
+        self.stop_scan();
         self.wifi_status = Some(WifiStatus {
             radio_enabled: true,
             state: LinkState::Connecting { ssid },
@@ -486,6 +538,23 @@ impl AppModel {
         }
     }
 
+    fn start_scan(&mut self) -> Vec<WifiRequest> {
+        self.scanning = true;
+        self.scan_follow_up = true;
+        vec![WifiRequest::Status, WifiRequest::Scan]
+    }
+
+    fn stop_scan(&mut self) {
+        self.scanning = false;
+        self.scan_follow_up = false;
+        self.scan_follow_up_at = None;
+    }
+
+    fn show_notice(&mut self, notice: &'static str) {
+        self.notice = Some(notice);
+        self.notice_until = Some(Instant::now() + NOTICE_DURATION);
+    }
+
     fn set_status(&mut self, status: WifiStatus) {
         self.wifi_status = Some(status);
         self.reconcile_connected_network();
@@ -493,7 +562,7 @@ impl AppModel {
 
     fn service_error(&mut self, error: WifiError) {
         self.wifi_status = None;
-        self.notice = Some(error_notice(error));
+        self.show_notice(error_notice(error));
     }
 
     fn reconcile_connected_network(&mut self) {
@@ -650,14 +719,108 @@ mod tests {
         };
         model.apply_wifi_event(WifiEvent::Status(Ok(status("authentication_failed"))));
         assert_eq!(model.notice, Some("Incorrect password"));
-        model.apply_wifi_event(WifiEvent::Status(Ok(status("server_untrusted"))));
-        assert_eq!(model.notice, Some("Could not connect"));
         model.apply_wifi_event(WifiEvent::Status(Ok(WifiStatus {
             radio_enabled: true,
             state: LinkState::Disconnected,
             failure: None,
         })));
+        model.apply_wifi_event(WifiEvent::Status(Ok(status("server_untrusted"))));
+        assert_eq!(model.notice, Some("Could not connect"));
+    }
+
+    #[test]
+    fn a_failed_join_is_reported_once_and_goes_away() {
+        let mut model = AppModel {
+            view: View::Wifi,
+            networks: vec![network("Home", 80, Security::Open)],
+            ..AppModel::default()
+        };
+        let failed = || {
+            WifiEvent::Status(Ok(WifiStatus {
+                radio_enabled: true,
+                state: LinkState::Disconnected,
+                failure: Some(crate::wifi::JoinFailure {
+                    ssid: "Home".into(),
+                    rejection: Rejection::AuthenticationFailed,
+                }),
+            }))
+        };
+        model.apply_wifi_event(failed());
+        assert_eq!(model.notice, Some("Incorrect password"));
+        // It expires on its own, and later polls of the same failure stay quiet.
+        let later = Instant::now() + NOTICE_DURATION + Duration::from_millis(1);
+        assert!(model.next_deadline().is_some_and(|at| at < later));
+        model.tick(later);
         assert_eq!(model.notice, None);
+        model.apply_wifi_event(failed());
+        assert_eq!(model.notice, None);
+
+        // A new attempt that fails again is reported again; a tap dismisses it.
+        model.handle(Action::SelectNetwork(0));
+        model.apply_wifi_event(WifiEvent::Connect(Ok(WifiStatus {
+            radio_enabled: true,
+            state: LinkState::Connecting {
+                ssid: "Home".into(),
+            },
+            failure: None,
+        })));
+        model.apply_wifi_event(failed());
+        assert_eq!(model.notice, Some("Incorrect password"));
+        model.handle(Action::NextNetworks);
+        assert_eq!(model.notice, None);
+    }
+
+    #[test]
+    fn one_scan_press_shows_the_fresh_results() {
+        let mut model = AppModel {
+            view: View::Wifi,
+            ..AppModel::default()
+        };
+        let requests = model.handle(Action::RefreshWifi);
+        assert!(matches!(
+            requests.as_slice(),
+            [WifiRequest::Status, WifiRequest::Scan]
+        ));
+        // A second press while scanning does nothing.
+        assert!(model.handle(Action::RefreshWifi).is_empty());
+
+        // The cached answer shows at once, and a follow-up is scheduled.
+        model.apply_wifi_event(WifiEvent::Scan(Ok(vec![network(
+            "Old",
+            50,
+            Security::Open,
+        )])));
+        assert_eq!(model.networks.len(), 1);
+        assert!(model.scanning);
+        let due = model.next_deadline().expect("follow-up scan");
+        assert!(model.tick(due - Duration::from_millis(1)).is_empty());
+        assert!(matches!(model.tick(due).as_slice(), [WifiRequest::Scan]));
+        assert!(model.next_deadline().is_none());
+
+        model.apply_wifi_event(WifiEvent::Scan(Ok(vec![
+            network("Old", 50, Security::Open),
+            network("New", 70, Security::Open),
+        ])));
+        assert_eq!(model.networks.len(), 2);
+        assert!(!model.scanning);
+        assert!(model.next_deadline().is_none());
+    }
+
+    #[test]
+    fn joining_cancels_a_pending_follow_up_scan() {
+        let mut model = AppModel {
+            view: View::Wifi,
+            ..AppModel::default()
+        };
+        model.handle(Action::RefreshWifi);
+        model.apply_wifi_event(WifiEvent::Scan(Ok(vec![network(
+            "Cafe",
+            60,
+            Security::Open,
+        )])));
+        assert!(!model.handle(Action::SelectNetwork(0)).is_empty());
+        assert!(!model.scanning);
+        assert!(model.next_deadline().is_none());
     }
 
     #[test]

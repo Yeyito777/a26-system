@@ -236,6 +236,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             next_wifi_status = now + WIFI_STATUS_INTERVAL;
         }
+        if app.next_deadline().is_some_and(|at| now >= at) {
+            let requests = app.tick(now);
+            dispatch_requests(&wifi_worker, &mut app, requests);
+            redraw = true;
+        }
         let busy = app.busy || app.scanning;
         if busy && now >= next_busy_frame {
             redraw = true;
@@ -250,6 +255,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut deadline = next_refresh.min(next_wifi_status);
         if busy {
             deadline = deadline.min(next_busy_frame);
+        }
+        if let Some(at) = app.next_deadline() {
+            deadline = deadline.min(at);
         }
         wait_for_x(&conn, deadline.saturating_duration_since(Instant::now()))?;
     }
