@@ -21,6 +21,13 @@ pub enum View {
     Wifi,
     /// Alarms and timers (clock.rs).
     Clock,
+    /// Display & Brightness, its Auto-Lock choices, and the wallpaper
+    /// picker (display_ui.rs).
+    Display,
+    AutoLock,
+    Wallpaper,
+    /// Activity, storage and the device.
+    About,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +192,15 @@ pub enum Action {
     ShowSystem,
     ShowWifi,
     ShowClock,
+    ShowDisplay,
+    ShowAutoLock,
+    ShowWallpaper,
+    ShowAbout,
+    /// Moon settings (sent over its control socket by the main loop).
+    SetAutoLock(u32),
+    SetWallpaper(usize),
+    ToggleAutoBrightness,
+    SetBrightness(u8),
     /// On the Clock page (handled by `ClockModel`).
     Clock(crate::clock::ClockAction),
     RefreshWifi,
@@ -211,6 +227,8 @@ pub struct AppModel {
     pub notice: Option<&'static str>,
     pub password_dialog: Option<PasswordDialog>,
     pub clock: crate::clock::ClockModel,
+    /// Moon's display state and settings, refreshed every second.
+    pub shell: crate::control::ShellInfo,
     wifi_initialized: bool,
     /// When the shown notice goes away (`None`: it stays).
     notice_until: Option<Instant>,
@@ -234,6 +252,7 @@ impl Default for AppModel {
             notice: None,
             password_dialog: None,
             clock: crate::clock::ClockModel::default(),
+            shell: crate::control::ShellInfo::default(),
             wifi_initialized: false,
             notice_until: None,
             failure_acknowledged: false,
@@ -259,6 +278,27 @@ impl AppModel {
                 self.view = View::Clock;
                 Vec::new()
             }
+            Action::ShowDisplay => {
+                self.view = View::Display;
+                Vec::new()
+            }
+            Action::ShowAutoLock => {
+                self.view = View::AutoLock;
+                Vec::new()
+            }
+            Action::ShowWallpaper => {
+                self.view = View::Wallpaper;
+                Vec::new()
+            }
+            Action::ShowAbout => {
+                self.view = View::About;
+                Vec::new()
+            }
+            // The main loop sends these to Moon.
+            Action::SetAutoLock(_)
+            | Action::SetWallpaper(_)
+            | Action::ToggleAutoBrightness
+            | Action::SetBrightness(_) => Vec::new(),
             // The main loop sends these to moon-notifyd.
             Action::Clock(_) => Vec::new(),
             Action::ShowWifi => {

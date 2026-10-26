@@ -2,12 +2,14 @@ mod app;
 mod clock;
 mod clock_ui;
 mod control;
+mod display_ui;
 mod gfx;
 mod keys;
 mod metrics;
 mod present;
 mod text;
 mod ui;
+mod wallpapers;
 mod wifi;
 
 use std::env;
@@ -125,8 +127,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         REQUESTED_HEIGHT,
     )?;
     let mut system = SystemInfo::collect();
-    let mut volume = control::read_volume();
     let mut app = AppModel::default();
+    app.shell = control::read_shell();
+    let mut volume = app.shell.volume;
     let wifi_worker = WifiWorker::spawn();
     let clock_worker = clock::NotifyWorker::spawn();
     // The System page summarizes the current network, so ask once up front.
@@ -254,7 +257,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let now = Instant::now();
         if now >= next_refresh {
             system.refresh();
-            volume = control::read_volume();
+            app.shell = control::read_shell();
+            volume = app.shell.volume;
             redraw = true;
             next_refresh = now + REFRESH_INTERVAL;
         }
@@ -317,9 +321,43 @@ fn perform(
             clock_worker.send(request);
         }
     }
+    shell_command(app, action);
     let requests = app.handle(action);
     dispatch_requests(worker, app, requests);
     sync_keyboard(app, Some(action), keyboard_requested);
+}
+
+/// Moon settings changed on the Display and Wallpaper pages: sent over
+/// Moon's control socket, and shown at once.
+fn shell_command(app: &mut AppModel, action: Action) {
+    match action {
+        Action::SetBrightness(level) => {
+            if let Some(display) = app.shell.display.as_mut() {
+                display.brightness = level;
+            }
+            control::send(&format!("brightness set {level}"));
+        }
+        Action::ToggleAutoBrightness => {
+            if let Some(display) = app.shell.display.as_mut() {
+                display.auto = !display.auto;
+                let on = if display.auto { "on" } else { "off" };
+                control::send(&format!("brightness auto {on}"));
+            }
+        }
+        Action::SetAutoLock(seconds) => {
+            if control::send(&format!("settings set auto_lock_s {seconds}")) {
+                app.shell.auto_lock_s = Some(seconds);
+            }
+        }
+        Action::SetWallpaper(index) => {
+            if let Some(spec) = wallpapers::WALLPAPERS.get(index)
+                && control::send(&format!("settings set wallpaper {}", spec.id))
+            {
+                app.shell.wallpaper = Some(spec.id.to_owned());
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Keeps Moon's system keyboard up exactly while a text field has focus.

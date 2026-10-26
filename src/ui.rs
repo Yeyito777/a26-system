@@ -44,11 +44,13 @@ pub(crate) const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
 
 // System page.
 const SYSTEM_CARD_Y: f32 = 190.0;
-const ACTIVITY_Y: f32 = 712.0;
+const CARD_B_Y: f32 = 516.0;
+const CARD_C_Y: f32 = 970.0;
+const ACTIVITY_Y: f32 = 340.0;
 const ACTIVITY_HEIGHT: f32 = 236.0;
-const STORAGE_Y: f32 = 1048.0;
+const STORAGE_Y: f32 = 676.0;
 const STORAGE_HEIGHT: f32 = 236.0;
-const ABOUT_Y: f32 = 1384.0;
+const ABOUT_Y: f32 = 1012.0;
 
 // Wi-Fi page.
 pub(crate) const BACK_BUTTON: RectF = RectF::new(0.0, 0.0, 420.0, 140.0);
@@ -124,6 +126,10 @@ impl Renderer {
                 View::System => draw_system(canvas, system, volume, app, pressed),
                 View::Wifi => draw_wifi(canvas, app, pressed),
                 View::Clock => crate::clock_ui::draw_clock(canvas, &app.clock, pressed),
+                View::About => draw_about(canvas, system, pressed),
+                View::Display | View::AutoLock | View::Wallpaper => {
+                    crate::display_ui::draw(canvas, app, pressed)
+                }
             }
         }
         self.presenter.present(conn, &self.canvas, 0)?;
@@ -178,15 +184,18 @@ pub fn action_at(app: &AppModel, height: f32, x: i16, y: i16) -> Option<Action> 
             .map(|key| Action::Key(key.action));
     }
     match app.view {
-        View::System => {
-            if wifi_row().contains(x, y) {
-                Some(Action::ShowWifi)
-            } else if clock_row().contains(x, y) {
-                Some(Action::ShowClock)
-            } else {
-                None
-            }
-        }
+        View::System => [
+            (wifi_row(), Action::ShowWifi),
+            (clock_row(), Action::ShowClock),
+            (display_row(), Action::ShowDisplay),
+            (wallpaper_row(), Action::ShowWallpaper),
+            (about_row(), Action::ShowAbout),
+        ]
+        .into_iter()
+        .find(|(row, _)| row.contains(x, y))
+        .map(|(_, action)| action),
+        View::About => BACK_BUTTON.contains(x, y).then_some(Action::ShowSystem),
+        View::Display | View::AutoLock | View::Wallpaper => crate::display_ui::action_at(app, x, y),
         View::Clock => crate::clock_ui::action_at(&app.clock, x, y),
         View::Wifi => {
             if BACK_BUTTON.contains(x, y) {
@@ -228,6 +237,18 @@ fn wifi_row() -> RectF {
 
 fn clock_row() -> RectF {
     card(SYSTEM_CARD_Y + ROW, ROW)
+}
+
+fn display_row() -> RectF {
+    card(CARD_B_Y, ROW)
+}
+
+fn wallpaper_row() -> RectF {
+    card(CARD_B_Y + ROW, ROW)
+}
+
+fn about_row() -> RectF {
+    card(CARD_C_Y, ROW)
 }
 
 fn field_rect(index: usize) -> RectF {
@@ -463,98 +484,172 @@ fn wifi_summary(app: &AppModel) -> String {
 
 fn draw_system(
     canvas: &mut Canvas,
-    system: &SystemInfo,
+    _system: &SystemInfo,
     volume: Option<u8>,
     app: &AppModel,
     pressed: Option<Action>,
 ) {
     large_title(canvas, "System", 132.0);
+    let row_pressed = |action: Action, row: usize| (pressed == Some(action)).then_some(row);
 
-    // Wi-Fi, Clock and Sound.
-    let top = card(SYSTEM_CARD_Y, ROW * 3.0);
-    let pressed_row = match pressed {
-        Some(Action::ShowWifi) => Some(0),
-        Some(Action::ShowClock) => Some(1),
-        _ => None,
-    };
-    grouped_card(canvas, top, 3, pressed_row);
-    let right = MARGIN + CARD_WIDTH - 44.0;
-    let wifi_cy = SYSTEM_CARD_Y + ROW / 2.0;
-    icon_tile(canvas, TEXT_X - 4.0, wifi_cy, BLUE);
-    wifi_glyph(canvas, TEXT_X + 36.0, wifi_cy + 17.0, 0.95, 3, WHITE);
-    let label_x = TEXT_X + 112.0;
-    text::draw(
+    // Wi-Fi and the Clock.
+    grouped_card(
         canvas,
+        card(SYSTEM_CARD_Y, ROW * 2.0),
+        2,
+        row_pressed(Action::ShowWifi, 0).or(row_pressed(Action::ShowClock, 1)),
+    );
+    system_row(
+        canvas,
+        wifi_row(),
+        BLUE,
+        |canvas, cx, cy| wifi_glyph(canvas, cx, cy + 17.0, 0.95, 3, WHITE),
         "Wi-Fi",
-        label_x,
-        baseline(wifi_cy, Weight::Regular, LABEL_SIZE),
-        Weight::Regular,
-        LABEL_SIZE,
-        WHITE,
-        1.0,
+        &wifi_summary(app),
+        true,
     );
-    chevron(canvas, right, wifi_cy, SECONDARY, TERTIARY_ALPHA);
-    let summary = text::fit(&wifi_summary(app), Weight::Regular, LABEL_SIZE, 440.0);
-    text::draw_right(
+    system_row(
         canvas,
-        &summary,
-        right - 40.0,
-        baseline(wifi_cy, Weight::Regular, LABEL_SIZE),
-        Weight::Regular,
-        LABEL_SIZE,
-        SECONDARY,
-        SECONDARY_ALPHA,
-    );
-    separator(canvas, SYSTEM_CARD_Y + ROW - 1.0, label_x);
-    let clock_cy = SYSTEM_CARD_Y + ROW * 1.5;
-    icon_tile(canvas, TEXT_X - 4.0, clock_cy, crate::clock_ui::ORANGE);
-    crate::clock_ui::draw_clock_tile_glyph(canvas, TEXT_X + 36.0, clock_cy);
-    text::draw(
-        canvas,
+        clock_row(),
+        crate::clock_ui::ORANGE,
+        crate::clock_ui::draw_clock_tile_glyph,
         "Alarms & Timers",
-        label_x,
-        baseline(clock_cy, Weight::Regular, LABEL_SIZE),
-        Weight::Regular,
-        LABEL_SIZE,
-        WHITE,
-        1.0,
-    );
-    chevron(canvas, right, clock_cy, SECONDARY, TERTIARY_ALPHA);
-    text::draw_right(
-        canvas,
         &crate::clock_ui::clock_summary(&app.clock),
-        right - 40.0,
-        baseline(clock_cy, Weight::Regular, LABEL_SIZE),
-        Weight::Regular,
-        LABEL_SIZE,
-        SECONDARY,
-        SECONDARY_ALPHA,
+        true,
     );
-    separator(canvas, SYSTEM_CARD_Y + ROW * 2.0 - 1.0, label_x);
-    let sound_cy = SYSTEM_CARD_Y + ROW * 2.5;
-    icon_tile(canvas, TEXT_X - 4.0, sound_cy, PINK);
-    speaker_glyph(canvas, TEXT_X + 34.0, sound_cy);
-    text::draw(
+
+    // Display, wallpaper and sound.
+    grouped_card(
         canvas,
-        "Volume",
-        label_x,
-        baseline(sound_cy, Weight::Regular, LABEL_SIZE),
-        Weight::Regular,
-        LABEL_SIZE,
-        WHITE,
-        1.0,
+        card(CARD_B_Y, ROW * 3.0),
+        3,
+        row_pressed(Action::ShowDisplay, 0).or(row_pressed(Action::ShowWallpaper, 1)),
+    );
+    let brightness = app
+        .shell
+        .display
+        .as_ref()
+        .map(|d| format!("{}%", d.brightness))
+        .unwrap_or_default();
+    system_row(
+        canvas,
+        display_row(),
+        BLUE,
+        |canvas, cx, cy| crate::display_ui::draw_sun(canvas, cx, cy, 15.0, WHITE),
+        "Display & Brightness",
+        &brightness,
+        true,
+    );
+    system_row(
+        canvas,
+        wallpaper_row(),
+        0x32ade6,
+        crate::display_ui::draw_wallpaper_glyph,
+        "Wallpaper",
+        crate::wallpapers::name(app.shell.wallpaper.as_deref().unwrap_or("moon")),
+        true,
     );
     let volume_text = volume.map_or_else(|| "--".into(), |value| format!("{value}%"));
+    system_row(
+        canvas,
+        card(CARD_B_Y + ROW * 2.0, ROW),
+        PINK,
+        |canvas, cx, cy| speaker_glyph(canvas, cx - 2.0, cy),
+        "Volume",
+        &volume_text,
+        false,
+    );
+
+    grouped_card(canvas, about_row(), 1, row_pressed(Action::ShowAbout, 0));
+    system_row(
+        canvas,
+        about_row(),
+        0x8e8e93,
+        |canvas, cx, cy| {
+            text::draw_centered(
+                canvas,
+                "i",
+                cx,
+                baseline(cy, Weight::Bold, 50.0),
+                Weight::Bold,
+                50.0,
+                WHITE,
+                1.0,
+            );
+        },
+        "About",
+        "",
+        true,
+    );
+}
+
+/// One row of the System page: an icon tile, a label, a value and (for a
+/// page) a chevron. Rows after the first in a card draw their separator.
+fn system_row(
+    canvas: &mut Canvas,
+    row: RectF,
+    color: Rgb,
+    glyph: impl FnOnce(&mut Canvas, f32, f32),
+    label: &str,
+    value: &str,
+    page: bool,
+) {
+    let right = MARGIN + CARD_WIDTH - 44.0;
+    let cy = row.y + ROW / 2.0;
+    let label_x = TEXT_X + 112.0;
+    icon_tile(canvas, TEXT_X - 4.0, cy, color);
+    glyph(canvas, TEXT_X + 36.0, cy);
+    if row.y > SYSTEM_CARD_Y + 1.0 && row.y != CARD_B_Y && row.y != CARD_C_Y {
+        separator(canvas, row.y - 1.0, label_x);
+    }
+    text::draw(
+        canvas,
+        label,
+        label_x,
+        baseline(cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        WHITE,
+        1.0,
+    );
+    let value_right = if page {
+        chevron(canvas, right, cy, SECONDARY, TERTIARY_ALPHA);
+        right - 40.0
+    } else {
+        right
+    };
+    let value = text::fit(value, Weight::Regular, LABEL_SIZE, 360.0);
     text::draw_right(
         canvas,
-        &volume_text,
-        right,
-        baseline(sound_cy, Weight::Regular, LABEL_SIZE),
+        &value,
+        value_right,
+        baseline(cy, Weight::Regular, LABEL_SIZE),
         Weight::Regular,
         LABEL_SIZE,
         SECONDARY,
         SECONDARY_ALPHA,
     );
+}
+
+/// The About page: activity, storage and the device.
+pub(crate) fn draw_about(canvas: &mut Canvas, system: &SystemInfo, pressed: Option<Action>) {
+    back_chevron(canvas, MARGIN + 6.0, 72.0);
+    text::draw(
+        canvas,
+        "System",
+        MARGIN + 36.0,
+        baseline(72.0, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        BLUE,
+        if pressed == Some(Action::ShowSystem) {
+            0.4
+        } else {
+            1.0
+        },
+    );
+    large_title(canvas, "About", 236.0);
+    let right = MARGIN + CARD_WIDTH - 44.0;
 
     // Activity: CPU and GPU meters side by side.
     section_header(canvas, "ACTIVITY", ACTIVITY_Y);

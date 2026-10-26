@@ -16,10 +16,67 @@ fn socket() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(CONTROL_SOCKET))
 }
 
-pub fn read_volume() -> Option<u8> {
-    read_volume_from(&socket())
+/// Moon's display state (docs/display-brightness.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayState {
+    pub brightness: u8,
+    pub auto: bool,
+    /// `ok`, `unavailable` or `off`.
+    pub sensor: String,
 }
 
+/// What the System app shows of Moon's settings (docs/settings.md).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellInfo {
+    pub volume: Option<u8>,
+    pub display: Option<DisplayState>,
+    pub wallpaper: Option<String>,
+    pub auto_lock_s: Option<u32>,
+}
+
+pub fn read_shell() -> ShellInfo {
+    request(&socket(), b"state\n")
+        .as_deref()
+        .map(parse_shell)
+        .unwrap_or_default()
+}
+
+fn parse_shell(response: &str) -> ShellInfo {
+    let mut info = ShellInfo {
+        volume: parse_volume_response(response),
+        ..ShellInfo::default()
+    };
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(response) else {
+        return info;
+    };
+    let result = &document["result"];
+    if let Some(display) = result.get("display").filter(|d| d.is_object()) {
+        info.display = Some(DisplayState {
+            brightness: display["brightness"].as_u64().unwrap_or(50).min(100) as u8,
+            auto: display["auto"].as_bool().unwrap_or(false),
+            sensor: display["sensor"]
+                .as_str()
+                .unwrap_or("unavailable")
+                .to_owned(),
+        });
+    }
+    info.wallpaper = result["settings"]["wallpaper"].as_str().map(str::to_owned);
+    info.auto_lock_s = result["settings"]["auto_lock_s"]
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok());
+    info
+}
+
+/// Sends one command to Moon (`brightness set 40`, `settings set ...`).
+/// Returns whether Moon accepted it.
+pub fn send(command: &str) -> bool {
+    request(&socket(), format!("{command}\n").as_bytes())
+        .and_then(|response| serde_json::from_str::<serde_json::Value>(&response).ok())
+        .and_then(|document| document.get("ok")?.as_bool())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
 fn read_volume_from(path: &Path) -> Option<u8> {
     parse_volume_response(&request(path, b"state\n")?)
 }
@@ -111,6 +168,27 @@ mod tests {
             None
         );
         assert_eq!(parse_volume_response("not json"), None);
+    }
+
+    #[test]
+    fn parses_display_and_settings() {
+        let response = r#"{"ok":true,"result":{"volume":40,"display":{"brightness":42,"auto":true,"auto_offset":-6,"lux":180,"sensor":"ok"},"settings":{"version":1,"wallpaper":"dusk","auto_lock_s":60}}}"#;
+        let info = parse_shell(response);
+        assert_eq!(info.volume, Some(40));
+        assert_eq!(
+            info.display,
+            Some(DisplayState {
+                brightness: 42,
+                auto: true,
+                sensor: "ok".into()
+            })
+        );
+        assert_eq!(info.wallpaper.as_deref(), Some("dusk"));
+        assert_eq!(info.auto_lock_s, Some(60));
+        // An older Moon: no display, no settings.
+        let old = parse_shell(r#"{"ok":true,"result":{"volume":10}}"#);
+        assert_eq!(old.display, None);
+        assert_eq!(old.wallpaper, None);
     }
 
     #[test]
