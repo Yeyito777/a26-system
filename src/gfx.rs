@@ -676,7 +676,7 @@ impl Path {
         self.close();
     }
 
-    fn rasterize(&self) -> Option<(i32, i32, i32, i32, Vec<u8>)> {
+    pub fn rasterize(&self) -> Option<(i32, i32, i32, i32, Vec<u8>)> {
         let mut segments = self.segments.clone();
         if let (Some(start), Some(current)) = (self.start, self.current)
             && start != current

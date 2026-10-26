@@ -9,6 +9,8 @@ license = "MIT"
 [dependencies]
 fontdue = { version = "0.9", default-features = false, features = ["std", "simd"] }
 libc = "0.2"
+png = "0.17"
+ttf-parser = { version = "0.25", default-features = false, features = ["std", "opentype-layout"] }
 md4 = "0.10"
 pbkdf2 = "0.12"
 serde = { version = "1.0", features = ["derive"] }
