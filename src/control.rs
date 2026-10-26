@@ -32,6 +32,17 @@ pub struct ShellInfo {
     pub display: Option<DisplayState>,
     pub wallpaper: Option<String>,
     pub auto_lock_s: Option<u32>,
+    /// What a tapped notification asked an app to show.
+    pub open_target: Option<OpenTarget>,
+}
+
+/// Moon's `open_target`: a notification's `open.target` for an app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenTarget {
+    pub app: String,
+    pub target: String,
+    pub serial: u64,
+    pub age_ms: u64,
 }
 
 pub fn read_shell() -> ShellInfo {
@@ -64,6 +75,19 @@ fn parse_shell(response: &str) -> ShellInfo {
     info.auto_lock_s = result["settings"]["auto_lock_s"]
         .as_u64()
         .and_then(|v| u32::try_from(v).ok());
+    let open = &result["open_target"];
+    if let (Some(app), Some(target), Some(serial)) = (
+        open["app"].as_str(),
+        open["target"].as_str(),
+        open["serial"].as_u64(),
+    ) {
+        info.open_target = Some(OpenTarget {
+            app: app.to_owned(),
+            target: target.to_owned(),
+            serial,
+            age_ms: open["age_ms"].as_u64().unwrap_or(u64::MAX),
+        });
+    }
     info
 }
 

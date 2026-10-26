@@ -1,12 +1,15 @@
 mod app;
 mod clock;
 mod clock_ui;
+mod comms;
+mod comms_ui;
 mod control;
 mod display_ui;
 mod gfx;
 mod keys;
 mod metrics;
 mod present;
+mod telephony;
 mod text;
 mod ui;
 mod wallpapers;
@@ -33,8 +36,8 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 const APP_NAME: &str = "a26-system";
-const REQUESTED_WIDTH: u16 = 1080;
-const REQUESTED_HEIGHT: u16 = 2340;
+pub(crate) const REQUESTED_WIDTH: u16 = 1080;
+pub(crate) const REQUESTED_HEIGHT: u16 = 2340;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const WIFI_STATUS_INTERVAL: Duration = Duration::from_secs(5);
 /// While Wi-Fi work is in flight, wake this often to collect worker results
@@ -87,37 +90,15 @@ impl TapTracker {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    parse_arguments()?;
+    let kind = parse_arguments()?;
     disable_process_dumps()?;
+    if let Some(kind) = kind {
+        return comms::run(kind);
+    }
 
     let (conn, screen_number) = RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_number];
-    let window = conn.generate_id()?;
-    conn.create_window(
-        COPY_DEPTH_FROM_PARENT,
-        window,
-        screen.root,
-        0,
-        0,
-        REQUESTED_WIDTH,
-        REQUESTED_HEIGHT,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        0,
-        &CreateWindowAux::new()
-            .background_pixel(ui::BG)
-            .override_redirect(0)
-            .event_mask(
-                EventMask::EXPOSURE
-                    | EventMask::STRUCTURE_NOTIFY
-                    | EventMask::BUTTON_PRESS
-                    | EventMask::BUTTON_RELEASE
-                    | EventMask::POINTER_MOTION
-                    | EventMask::KEY_PRESS,
-            ),
-    )?;
-
-    let protocols = configure_window_metadata(&conn, window)?;
+    let (window, protocols) = create_window(&conn, screen, APP_NAME)?;
     let key_map = KeyMap::query(&conn)?;
     let mut renderer = Renderer::new(
         &conn,
@@ -412,6 +393,41 @@ fn sync_keyboard(
     }
 }
 
+/// The app's full-screen top-level window, named `name` (Moon manages it).
+fn create_window(
+    conn: &RustConnection,
+    screen: &x11rb::protocol::xproto::Screen,
+    name: &str,
+) -> Result<(Window, WindowProtocols), Box<dyn Error>> {
+    let window = conn.generate_id()?;
+    conn.create_window(
+        COPY_DEPTH_FROM_PARENT,
+        window,
+        screen.root,
+        0,
+        0,
+        REQUESTED_WIDTH,
+        REQUESTED_HEIGHT,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &CreateWindowAux::new()
+            .background_pixel(ui::BG)
+            .override_redirect(0)
+            .event_mask(
+                EventMask::EXPOSURE
+                    | EventMask::STRUCTURE_NOTIFY
+                    | EventMask::BUTTON_PRESS
+                    | EventMask::BUTTON_RELEASE
+                    | EventMask::POINTER_MOTION
+                    | EventMask::KEY_PRESS,
+            ),
+    )?;
+
+    let protocols = configure_window_metadata(conn, window, name)?;
+    Ok((window, protocols))
+}
+
 fn wait_for_x(conn: &RustConnection, timeout: Duration) -> std::io::Result<()> {
     let mut descriptor = libc::pollfd {
         fd: conn.stream().as_raw_fd(),
@@ -461,19 +477,20 @@ fn in_bottom_gesture_area(y: i16, window_height: u16) -> bool {
 fn configure_window_metadata(
     conn: &RustConnection,
     window: Window,
+    name: &str,
 ) -> Result<WindowProtocols, Box<dyn Error>> {
     conn.change_property8(
         PropMode::REPLACE,
         window,
         AtomEnum::WM_NAME,
         AtomEnum::STRING,
-        APP_NAME.as_bytes(),
+        name.as_bytes(),
     )?;
 
-    let mut class = Vec::with_capacity(APP_NAME.len() * 2 + 2);
-    class.extend_from_slice(APP_NAME.as_bytes());
+    let mut class = Vec::with_capacity(name.len() * 2 + 2);
+    class.extend_from_slice(name.as_bytes());
     class.push(0);
-    class.extend_from_slice(APP_NAME.as_bytes());
+    class.extend_from_slice(name.as_bytes());
     class.push(0);
     conn.change_property8(
         PropMode::REPLACE,
@@ -490,7 +507,7 @@ fn configure_window_metadata(
         window,
         net_wm_name,
         utf8_string,
-        APP_NAME.as_bytes(),
+        name.as_bytes(),
     )?;
 
     let net_wm_state = intern_atom(conn, b"_NET_WM_STATE")?;
@@ -523,18 +540,23 @@ fn intern_atom(conn: &RustConnection, name: &[u8]) -> Result<u32, Box<dyn Error>
     Ok(conn.intern_atom(false, name)?.reply()?.atom)
 }
 
-fn parse_arguments() -> Result<(), Box<dyn Error>> {
-    let mut arguments = env::args().skip(1);
-    if let Some(argument) = arguments.next() {
-        if matches!(argument.as_str(), "--help" | "-h") && arguments.next().is_none() {
-            println!("usage: {APP_NAME}");
+/// No arguments: the System app; `--app phone|messages`: Phone or
+/// Messages (comms.rs).
+fn parse_arguments() -> Result<Option<comms::Kind>, Box<dyn Error>> {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    match arguments.as_slice() {
+        [] => Ok(None),
+        [flag] if matches!(flag.as_str(), "--help" | "-h") => {
+            println!("usage: {APP_NAME} [--app phone|messages]");
             std::process::exit(0);
+        }
+        [flag, app] if flag == "--app" && comms::Kind::parse(app).is_some() => {
+            Ok(comms::Kind::parse(app))
         }
         // Never echo arbitrary argv: credentials are not accepted here, and an
         // accidental secret-shaped argument must not be copied to diagnostics.
-        return Err(format!("unexpected argument; usage: {APP_NAME}").into());
+        _ => Err(format!("unexpected argument; usage: {APP_NAME} [--app phone|messages]").into()),
     }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -67,6 +67,16 @@ talks to `/run/a26-wifi/control.sock` from a worker thread; the separately built
 routing table, DNS, scanning, and the root-only saved-network store. The UI
 safely renders the service as unavailable when the backend is stopped.
 
+## Phone and Messages
+
+The same binary is Moon's Phone and Messages apps: `a26-system --app phone`
+(a keypad and Recents from the call history) and `a26-system --app messages`
+(conversations and their messages), each in its own window and process. They
+talk to `moon-telephonyd` (OSS-Phone-V1 `docs/telephony-protocol.md`;
+`MOON_TELEPHONY_SOCKET` overrides `/run/moon-telephony/telephony.sock`) and
+say plainly when there is no SIM or no service. Calls themselves are Moon's
+call screen; see OSS-Phone-V1 `docs/telephony-ui.md`.
+
 ## Repository layout
 
 ```text

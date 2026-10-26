@@ -441,6 +441,7 @@ mod tests {
             }),
             wallpaper: Some("moon".into()),
             auto_lock_s: Some(30),
+            open_target: None,
         };
         app
     }
