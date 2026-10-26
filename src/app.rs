@@ -8,9 +8,10 @@ use crate::wifi::{
 
 pub const NETWORKS_PER_PAGE: usize = 7;
 /// The backend answers a scan with its cached results and starts a fresh
-/// scan, which Samsung's firmware takes a few seconds to finish; a requested
-/// scan asks again after this long so one press shows the new networks.
-const SCAN_FOLLOW_UP: Duration = Duration::from_secs(4);
+/// scan, which takes the A26's firmware about 5.1 s to finish (measured);
+/// a requested scan asks again after this long so one press shows the new
+/// networks.
+const SCAN_FOLLOW_UP: Duration = Duration::from_millis(6000);
 /// How long a notice stays up when nothing else replaces it.
 const NOTICE_DURATION: Duration = Duration::from_secs(5);
 
