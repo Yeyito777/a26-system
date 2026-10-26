@@ -81,8 +81,10 @@ struct State {
     wm: Option<xdg_wm_base::XdgWmBase>,
     seat: Option<wl_seat::WlSeat>,
     text_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
-    width: i32,
-    height: i32,
+    /// The toplevel's size in surface units, and the buffer scale Moon
+    /// prefers (wl_surface v6): the canvas is `logical * scale` pixels.
+    logical: (i32, i32),
+    scale: i32,
     configured: bool,
     inputs: Vec<Input>,
     slots: Vec<Slot>,
@@ -131,9 +133,14 @@ impl WlBackend {
         while !state.configured {
             queue.blocking_dispatch(&mut state)?;
         }
-        if state.width <= 0 || state.height <= 0 {
-            state.width = i32::from(crate::REQUESTED_WIDTH);
-            state.height = i32::from(crate::REQUESTED_HEIGHT);
+        // The preferred scale arrives with the surface; one more roundtrip
+        // makes sure it is in before the first frame is sized.
+        queue.roundtrip(&mut state)?;
+        if state.logical.0 <= 0 || state.logical.1 <= 0 {
+            state.logical = (
+                i32::from(crate::REQUESTED_WIDTH),
+                i32::from(crate::REQUESTED_HEIGHT),
+            );
         }
         state.inputs.clear();
         Ok(Self {
@@ -147,9 +154,10 @@ impl WlBackend {
     }
 
     pub fn size(&self) -> (u16, u16) {
+        let scale = self.state.scale.max(1);
         (
-            self.state.width.clamp(1, 8192) as u16,
-            self.state.height.clamp(1, 8192) as u16,
+            (self.state.logical.0 * scale).clamp(1, 8192) as u16,
+            (self.state.logical.1 * scale).clamp(1, 8192) as u16,
         )
     }
 
@@ -182,6 +190,7 @@ impl WlBackend {
         pixels.copy_from_slice(&canvas.pixels);
         let slot = &mut self.state.slots[index];
         slot.busy = true;
+        self.surface.set_buffer_scale(self.state.scale.max(1));
         self.surface.attach(Some(&slot.buffer), 0, 0);
         self.surface.damage_buffer(0, 0, width, height);
         self.surface.commit();
@@ -341,7 +350,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         {
             match interface.as_str() {
                 "wl_compositor" => {
-                    state.compositor = Some(registry.bind(name, version.min(4), qh, ()));
+                    state.compositor = Some(registry.bind(name, version.min(6), qh, ()));
                 }
                 "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => state.wm = Some(registry.bind(name, version.min(6), qh, ())),
@@ -398,8 +407,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         match event {
             xdg_toplevel::Event::Configure { width, height, .. } => {
                 if width > 0 && height > 0 {
-                    state.width = width;
-                    state.height = height;
+                    state.logical = (width, height);
                 }
             }
             xdg_toplevel::Event::Close => state.inputs.push(Input::Close),
@@ -459,10 +467,14 @@ impl Dispatch<wl_touch::WlTouch, ()> for State {
     ) {
         match event {
             wl_touch::Event::Down { id, x, y, .. } if state.touch.is_none() => {
+                let scale = f64::from(state.scale.max(1));
+                let (x, y) = (x * scale, y * scale);
                 state.touch = Some((id, x, y));
                 state.inputs.push(Input::Press(clamp16(x), clamp16(y)));
             }
             wl_touch::Event::Motion { id, x, y, .. } => {
+                let scale = f64::from(state.scale.max(1));
+                let (x, y) = (x * scale, y * scale);
                 if let Some(touch) = state.touch.as_mut().filter(|touch| touch.0 == id) {
                     touch.1 = x;
                     touch.2 = y;
@@ -547,7 +559,20 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for State {
 }
 
 delegate_noop!(State: ignore wl_compositor::WlCompositor);
-delegate_noop!(State: ignore wl_surface::WlSurface);
+impl Dispatch<wl_surface::WlSurface, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_surface::WlSurface,
+        event: wl_surface::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_surface::Event::PreferredBufferScale { factor } = event {
+            state.scale = factor.max(1);
+        }
+    }
+}
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore zwp_text_input_manager_v3::ZwpTextInputManagerV3);
