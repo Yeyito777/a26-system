@@ -19,6 +19,8 @@ const NOTICE_DURATION: Duration = Duration::from_secs(5);
 pub enum View {
     System,
     Wifi,
+    /// Alarms and timers (clock.rs).
+    Clock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +184,9 @@ pub enum KeyAction {
 pub enum Action {
     ShowSystem,
     ShowWifi,
+    ShowClock,
+    /// On the Clock page (handled by `ClockModel`).
+    Clock(crate::clock::ClockAction),
     RefreshWifi,
     SelectNetwork(usize),
     PreviousNetworks,
@@ -205,6 +210,7 @@ pub struct AppModel {
     pub busy: bool,
     pub notice: Option<&'static str>,
     pub password_dialog: Option<PasswordDialog>,
+    pub clock: crate::clock::ClockModel,
     wifi_initialized: bool,
     /// When the shown notice goes away (`None`: it stays).
     notice_until: Option<Instant>,
@@ -227,6 +233,7 @@ impl Default for AppModel {
             busy: false,
             notice: None,
             password_dialog: None,
+            clock: crate::clock::ClockModel::default(),
             wifi_initialized: false,
             notice_until: None,
             failure_acknowledged: false,
@@ -243,9 +250,17 @@ impl AppModel {
         match action {
             Action::ShowSystem => {
                 self.password_dialog = None;
+                self.clock.alarm_editor = None;
+                self.clock.timer_editor = None;
                 self.view = View::System;
                 Vec::new()
             }
+            Action::ShowClock => {
+                self.view = View::Clock;
+                Vec::new()
+            }
+            // The main loop sends these to moon-notifyd.
+            Action::Clock(_) => Vec::new(),
             Action::ShowWifi => {
                 self.view = View::Wifi;
                 if self.wifi_initialized {

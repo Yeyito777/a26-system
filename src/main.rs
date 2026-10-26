@@ -1,4 +1,6 @@
 mod app;
+mod clock;
+mod clock_ui;
 mod control;
 mod gfx;
 mod keys;
@@ -38,6 +40,8 @@ const WIFI_STATUS_INTERVAL: Duration = Duration::from_secs(5);
 /// or the next one-second metrics refresh.
 const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(125);
 const TAP_MOVEMENT_LIMIT: i16 = 32;
+/// How often the Clock page looks for daemon events.
+const CLOCK_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const BOTTOM_GESTURE_RESERVE: i16 = 170;
 
 #[derive(Debug, Clone, Copy)]
@@ -124,6 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut volume = control::read_volume();
     let mut app = AppModel::default();
     let wifi_worker = WifiWorker::spawn();
+    let clock_worker = clock::NotifyWorker::spawn();
     // The System page summarizes the current network, so ask once up front.
     dispatch_requests(&wifi_worker, &mut app, vec![WifiRequest::Status]);
     let mut tap = None;
@@ -145,6 +150,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     while running {
         while let Some(event) = wifi_worker.try_recv() {
             app.apply_wifi_event(event);
+            redraw = true;
+        }
+        while let Some(update) = clock_worker.try_recv() {
+            app.clock.apply(update);
             redraw = true;
         }
 
@@ -187,15 +196,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .and_then(|tap| tap.finish(event.event_x, event.event_y, renderer.height()))
                     {
                         if let Some(action) = renderer.action_at(&app, position.0, position.1) {
-                            perform(&wifi_worker, &mut app, action, &mut keyboard_requested);
+                            perform(
+                                &wifi_worker,
+                                &clock_worker,
+                                &mut app,
+                                action,
+                                &mut keyboard_requested,
+                            );
                             redraw = true;
                         }
                     }
                 }
                 Event::KeyPress(event) if event.event == window => {
                     // Keys come from Moon's system keyboard; only the password
-                    // field accepts them.
-                    if app.password_dialog.is_some()
+                    // field and the Clock page's label accept them.
+                    if app.password_dialog.is_none()
+                        && app.clock.label_focused()
+                        && let Some(input) = key_map.decode(event.detail, event.state)
+                    {
+                        app.clock.type_text(input);
+                        sync_keyboard(&mut app, None, &mut keyboard_requested);
+                        redraw = true;
+                    } else if app.password_dialog.is_some()
                         && let Some(input) = key_map.decode(event.detail, event.state)
                     {
                         let action = match input {
@@ -205,7 +227,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                             KeyInput::Backspace => Action::Key(KeyAction::Backspace),
                             KeyInput::Enter => Action::Return,
                         };
-                        perform(&wifi_worker, &mut app, action, &mut keyboard_requested);
+                        perform(
+                            &wifi_worker,
+                            &clock_worker,
+                            &mut app,
+                            action,
+                            &mut keyboard_requested,
+                        );
                         redraw = true;
                     }
                 }
@@ -259,6 +287,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(at) = app.next_deadline() {
             deadline = deadline.min(at);
         }
+        if app.view == app::View::Clock {
+            // Daemon events arrive on the worker thread; pick them up soon.
+            deadline = deadline.min(Instant::now() + CLOCK_POLL_INTERVAL);
+        }
         wait_for_x(&conn, deadline.saturating_duration_since(Instant::now()))?;
     }
 
@@ -275,12 +307,45 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// password field.
 fn perform(
     worker: &WifiWorker,
+    clock_worker: &clock::NotifyWorker,
     app: &mut AppModel,
     action: Action,
     keyboard_requested: &mut Option<KeyboardPurpose>,
 ) {
+    if let Action::Clock(clock_action) = action {
+        for request in app.clock.handle(clock_action) {
+            clock_worker.send(request);
+        }
+    }
     let requests = app.handle(action);
     dispatch_requests(worker, app, requests);
+    sync_keyboard(app, Some(action), keyboard_requested);
+}
+
+/// Keeps Moon's system keyboard up exactly while a text field has focus.
+fn sync_keyboard(
+    app: &mut AppModel,
+    action: Option<Action>,
+    keyboard_requested: &mut Option<KeyboardPurpose>,
+) {
+    if app.password_dialog.is_none() && app.clock.label_focused() {
+        let refocused = action == Some(Action::Clock(clock::ClockAction::FocusLabel));
+        if refocused || *keyboard_requested != Some(KeyboardPurpose::Text) {
+            let shown = control::show_keyboard(KeyboardPurpose::Text);
+            app.clock.set_system_keyboard(shown);
+            if shown {
+                *keyboard_requested = Some(KeyboardPurpose::Text);
+            }
+        }
+        return;
+    }
+    let Some(action) = action else {
+        if app.password_dialog.is_none() && keyboard_requested.is_some() {
+            control::hide_keyboard();
+            *keyboard_requested = None;
+        }
+        return;
+    };
     match app.password_dialog.as_mut() {
         Some(dialog) => {
             let purpose = match dialog.focus {

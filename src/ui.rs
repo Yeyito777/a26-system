@@ -17,48 +17,48 @@ use crate::text::{self, Weight};
 use crate::wifi::{LinkState, WifiNetwork};
 
 pub const BG: Rgb = 0x000000;
-const CELL: Rgb = 0x1c1c1e;
-const CELL_PRESSED: Rgb = 0x3a3a3c;
-const SEPARATOR: Rgb = 0x38383a;
-const WHITE: Rgb = 0xffffff;
-const SECONDARY: Rgb = 0xebebf5;
-const SECONDARY_ALPHA: f32 = 0.6;
-const TERTIARY_ALPHA: f32 = 0.3;
-const BLUE: Rgb = 0x0a84ff;
-const GREEN: Rgb = 0x30d158;
-const RED: Rgb = 0xff453a;
+pub(crate) const CELL: Rgb = 0x1c1c1e;
+pub(crate) const CELL_PRESSED: Rgb = 0x3a3a3c;
+pub(crate) const SEPARATOR: Rgb = 0x38383a;
+pub(crate) const WHITE: Rgb = 0xffffff;
+pub(crate) const SECONDARY: Rgb = 0xebebf5;
+pub(crate) const SECONDARY_ALPHA: f32 = 0.6;
+pub(crate) const TERTIARY_ALPHA: f32 = 0.3;
+pub(crate) const BLUE: Rgb = 0x0a84ff;
+pub(crate) const GREEN: Rgb = 0x30d158;
+pub(crate) const RED: Rgb = 0xff453a;
 const PINK: Rgb = 0xff375f;
-const TRACK: Rgb = 0x3a3a3c;
+pub(crate) const TRACK: Rgb = 0x3a3a3c;
 
-const MARGIN: f32 = 44.0;
-const CARD_WIDTH: f32 = 1080.0 - 2.0 * MARGIN;
-const CARD_RADIUS: f32 = 30.0;
-const ROW: f32 = 128.0;
+pub(crate) const MARGIN: f32 = 44.0;
+pub(crate) const CARD_WIDTH: f32 = 1080.0 - 2.0 * MARGIN;
+pub(crate) const CARD_RADIUS: f32 = 30.0;
+pub(crate) const ROW: f32 = 128.0;
 const INFO_ROW: f32 = 118.0;
-const TEXT_X: f32 = MARGIN + 44.0;
-const LABEL_SIZE: f32 = 47.0;
-const HEADER_SIZE: f32 = 36.0;
+pub(crate) const TEXT_X: f32 = MARGIN + 44.0;
+pub(crate) const LABEL_SIZE: f32 = 47.0;
+pub(crate) const HEADER_SIZE: f32 = 36.0;
 const LARGE_TITLE_SIZE: f32 = 92.0;
 /// Moon owns the bottom of the screen for its swipe-up gesture.
-const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
+pub(crate) const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
 
 // System page.
 const SYSTEM_CARD_Y: f32 = 190.0;
-const ACTIVITY_Y: f32 = 584.0;
+const ACTIVITY_Y: f32 = 712.0;
 const ACTIVITY_HEIGHT: f32 = 236.0;
-const STORAGE_Y: f32 = 920.0;
+const STORAGE_Y: f32 = 1048.0;
 const STORAGE_HEIGHT: f32 = 236.0;
-const ABOUT_Y: f32 = 1256.0;
+const ABOUT_Y: f32 = 1384.0;
 
 // Wi-Fi page.
-const BACK_BUTTON: RectF = RectF::new(0.0, 0.0, 420.0, 140.0);
+pub(crate) const BACK_BUTTON: RectF = RectF::new(0.0, 0.0, 420.0, 140.0);
 const STATUS_CARD_Y: f32 = 290.0;
 const NETWORK_ROW: f32 = 118.0;
 
 // Password page.
-const NAV_HEIGHT: f32 = 150.0;
-const CANCEL_BUTTON: RectF = RectF::new(0.0, 0.0, 330.0, NAV_HEIGHT);
-const JOIN_BUTTON: RectF = RectF::new(750.0, 0.0, 330.0, NAV_HEIGHT);
+pub(crate) const NAV_HEIGHT: f32 = 150.0;
+pub(crate) const CANCEL_BUTTON: RectF = RectF::new(0.0, 0.0, 330.0, NAV_HEIGHT);
+pub(crate) const JOIN_BUTTON: RectF = RectF::new(750.0, 0.0, 330.0, NAV_HEIGHT);
 const PASSWORD_CARD_Y: f32 = 300.0;
 /// Gap between the last field and the fallback in-app keyboard.
 const FALLBACK_KEYBOARD_GAP: f32 = 212.0;
@@ -123,6 +123,7 @@ impl Renderer {
             match app.view {
                 View::System => draw_system(canvas, system, volume, app, pressed),
                 View::Wifi => draw_wifi(canvas, app, pressed),
+                View::Clock => crate::clock_ui::draw_clock(canvas, &app.clock, pressed),
             }
         }
         self.presenter.present(conn, &self.canvas, 0)?;
@@ -177,7 +178,16 @@ pub fn action_at(app: &AppModel, height: f32, x: i16, y: i16) -> Option<Action> 
             .map(|key| Action::Key(key.action));
     }
     match app.view {
-        View::System => wifi_row().contains(x, y).then_some(Action::ShowWifi),
+        View::System => {
+            if wifi_row().contains(x, y) {
+                Some(Action::ShowWifi)
+            } else if clock_row().contains(x, y) {
+                Some(Action::ShowClock)
+            } else {
+                None
+            }
+        }
+        View::Clock => crate::clock_ui::action_at(&app.clock, x, y),
         View::Wifi => {
             if BACK_BUTTON.contains(x, y) {
                 return Some(Action::ShowSystem);
@@ -208,12 +218,16 @@ pub fn action_at(app: &AppModel, height: f32, x: i16, y: i16) -> Option<Action> 
     }
 }
 
-fn card(y: f32, height: f32) -> RectF {
+pub(crate) fn card(y: f32, height: f32) -> RectF {
     RectF::new(MARGIN, y, CARD_WIDTH, height)
 }
 
 fn wifi_row() -> RectF {
     card(SYSTEM_CARD_Y, ROW)
+}
+
+fn clock_row() -> RectF {
+    card(SYSTEM_CARD_Y + ROW, ROW)
 }
 
 fn field_rect(index: usize) -> RectF {
@@ -228,11 +242,11 @@ fn fallback_keyboard_y(dialog: &PasswordDialog) -> f32 {
     fields_bottom(dialog) + FALLBACK_KEYBOARD_GAP
 }
 
-fn baseline(center_y: f32, weight: Weight, size: f32) -> f32 {
+pub(crate) fn baseline(center_y: f32, weight: Weight, size: f32) -> f32 {
     text::centered_baseline(center_y, weight, size)
 }
 
-fn large_title(canvas: &mut Canvas, title: &str, baseline_y: f32) {
+pub(crate) fn large_title(canvas: &mut Canvas, title: &str, baseline_y: f32) {
     text::draw(
         canvas,
         title,
@@ -245,7 +259,7 @@ fn large_title(canvas: &mut Canvas, title: &str, baseline_y: f32) {
     );
 }
 
-fn section_header(canvas: &mut Canvas, title: &str, card_y: f32) {
+pub(crate) fn section_header(canvas: &mut Canvas, title: &str, card_y: f32) {
     text::draw_tracked(
         canvas,
         title,
@@ -259,7 +273,7 @@ fn section_header(canvas: &mut Canvas, title: &str, card_y: f32) {
     );
 }
 
-fn footer(canvas: &mut Canvas, message: &str, card_bottom: f32, color: Rgb, alpha: f32) {
+pub(crate) fn footer(canvas: &mut Canvas, message: &str, card_bottom: f32, color: Rgb, alpha: f32) {
     let fitted = text::fit(message, Weight::Regular, 38.0, CARD_WIDTH - 88.0);
     text::draw(
         canvas,
@@ -274,7 +288,12 @@ fn footer(canvas: &mut Canvas, message: &str, card_bottom: f32, color: Rgb, alph
 }
 
 /// Draws an inset grouped card with optional pressed row highlighting.
-fn grouped_card(canvas: &mut Canvas, rect: RectF, rows: usize, pressed_row: Option<usize>) {
+pub(crate) fn grouped_card(
+    canvas: &mut Canvas,
+    rect: RectF,
+    rows: usize,
+    pressed_row: Option<usize>,
+) {
     canvas.fill_rrect(rect, CARD_RADIUS, CELL, 1.0);
     if rows == 0 {
         return;
@@ -293,7 +312,7 @@ fn grouped_card(canvas: &mut Canvas, rect: RectF, rows: usize, pressed_row: Opti
     }
 }
 
-fn separator(canvas: &mut Canvas, y: f32, inset: f32) {
+pub(crate) fn separator(canvas: &mut Canvas, y: f32, inset: f32) {
     canvas.fill_rect(
         inset as i32,
         y.round() as i32,
@@ -304,7 +323,7 @@ fn separator(canvas: &mut Canvas, y: f32, inset: f32) {
     );
 }
 
-fn chevron(canvas: &mut Canvas, x: f32, cy: f32, color: Rgb, alpha: f32) {
+pub(crate) fn chevron(canvas: &mut Canvas, x: f32, cy: f32, color: Rgb, alpha: f32) {
     let mut path = Path::new();
     path.stroke_polyline(
         &[(x - 9.0, cy - 17.0), (x + 7.0, cy), (x - 9.0, cy + 17.0)],
@@ -313,7 +332,7 @@ fn chevron(canvas: &mut Canvas, x: f32, cy: f32, color: Rgb, alpha: f32) {
     canvas.fill_path(&path, color, alpha);
 }
 
-fn back_chevron(canvas: &mut Canvas, x: f32, cy: f32) {
+pub(crate) fn back_chevron(canvas: &mut Canvas, x: f32, cy: f32) {
     let mut path = Path::new();
     path.stroke_polyline(
         &[(x + 12.0, cy - 25.0), (x - 12.0, cy), (x + 12.0, cy + 25.0)],
@@ -322,7 +341,7 @@ fn back_chevron(canvas: &mut Canvas, x: f32, cy: f32) {
     canvas.fill_path(&path, BLUE, 1.0);
 }
 
-fn icon_tile(canvas: &mut Canvas, x: f32, cy: f32, color: Rgb) -> RectF {
+pub(crate) fn icon_tile(canvas: &mut Canvas, x: f32, cy: f32, color: Rgb) -> RectF {
     let tile = RectF::new(x, cy - 40.0, 80.0, 80.0);
     canvas.fill_rrect(tile, 19.0, color, 1.0);
     tile
@@ -451,14 +470,14 @@ fn draw_system(
 ) {
     large_title(canvas, "System", 132.0);
 
-    // Wi-Fi and Sound.
-    let top = card(SYSTEM_CARD_Y, ROW * 2.0);
-    grouped_card(
-        canvas,
-        top,
-        2,
-        (pressed == Some(Action::ShowWifi)).then_some(0),
-    );
+    // Wi-Fi, Clock and Sound.
+    let top = card(SYSTEM_CARD_Y, ROW * 3.0);
+    let pressed_row = match pressed {
+        Some(Action::ShowWifi) => Some(0),
+        Some(Action::ShowClock) => Some(1),
+        _ => None,
+    };
+    grouped_card(canvas, top, 3, pressed_row);
     let right = MARGIN + CARD_WIDTH - 44.0;
     let wifi_cy = SYSTEM_CARD_Y + ROW / 2.0;
     icon_tile(canvas, TEXT_X - 4.0, wifi_cy, BLUE);
@@ -487,7 +506,32 @@ fn draw_system(
         SECONDARY_ALPHA,
     );
     separator(canvas, SYSTEM_CARD_Y + ROW - 1.0, label_x);
-    let sound_cy = SYSTEM_CARD_Y + ROW * 1.5;
+    let clock_cy = SYSTEM_CARD_Y + ROW * 1.5;
+    icon_tile(canvas, TEXT_X - 4.0, clock_cy, crate::clock_ui::ORANGE);
+    crate::clock_ui::draw_clock_tile_glyph(canvas, TEXT_X + 36.0, clock_cy);
+    text::draw(
+        canvas,
+        "Alarms & Timers",
+        label_x,
+        baseline(clock_cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        WHITE,
+        1.0,
+    );
+    chevron(canvas, right, clock_cy, SECONDARY, TERTIARY_ALPHA);
+    text::draw_right(
+        canvas,
+        &crate::clock_ui::clock_summary(&app.clock),
+        right - 40.0,
+        baseline(clock_cy, Weight::Regular, LABEL_SIZE),
+        Weight::Regular,
+        LABEL_SIZE,
+        SECONDARY,
+        SECONDARY_ALPHA,
+    );
+    separator(canvas, SYSTEM_CARD_Y + ROW * 2.0 - 1.0, label_x);
+    let sound_cy = SYSTEM_CARD_Y + ROW * 2.5;
     icon_tile(canvas, TEXT_X - 4.0, sound_cy, PINK);
     speaker_glyph(canvas, TEXT_X + 34.0, sound_cy);
     text::draw(
