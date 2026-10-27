@@ -23,7 +23,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$PROJECT_ROOT/scripts/build.sh"
+# A26_SYSTEM_PREBUILT=1: the release binaries and assets were built elsewhere
+# (OSS-Phone-V1's install-all.sh builds them on a host with the musl
+# toolchain) and are already in target/ and assets/.
+if [[ "${A26_SYSTEM_PREBUILT:-0}" == 1 ]]; then
+    for name in a26-system a26-wifi-service a26-wifi-ctl a26-systemctl; do
+        [[ -x "$PROJECT_ROOT/target/$TARGET/release/$name" ]] || {
+            echo "A26_SYSTEM_PREBUILT=1 but target/$TARGET/release/$name is missing" >&2
+            exit 1
+        }
+    done
+else
+    "$PROJECT_ROOT/scripts/build.sh"
+fi
 "$PROJECT_ROOT/scripts/fetch-wifi-packages.sh" >/dev/null
 adb -s "$SERIAL" get-state >/dev/null
 
