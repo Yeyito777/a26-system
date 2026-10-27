@@ -45,7 +45,7 @@ pub(crate) const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
 // System page.
 const SYSTEM_CARD_Y: f32 = 190.0;
 const CARD_B_Y: f32 = 516.0;
-const CARD_C_Y: f32 = 970.0;
+const CARD_C_Y: f32 = 1098.0;
 const ACTIVITY_Y: f32 = 340.0;
 const ACTIVITY_HEIGHT: f32 = 236.0;
 const STORAGE_Y: f32 = 676.0;
@@ -189,6 +189,7 @@ pub fn action_at(app: &AppModel, height: f32, x: i16, y: i16) -> Option<Action> 
             (clock_row(), Action::ShowClock),
             (display_row(), Action::ShowDisplay),
             (wallpaper_row(), Action::ShowWallpaper),
+            (haptics_row(), Action::ToggleHaptics),
             (about_row(), Action::ShowAbout),
         ]
         .into_iter()
@@ -245,6 +246,10 @@ fn display_row() -> RectF {
 
 fn wallpaper_row() -> RectF {
     card(CARD_B_Y + ROW, ROW)
+}
+
+fn haptics_row() -> RectF {
+    card(CARD_B_Y + ROW * 3.0, ROW)
 }
 
 fn about_row() -> RectF {
@@ -521,8 +526,8 @@ fn draw_system(
     // Display, wallpaper and sound.
     grouped_card(
         canvas,
-        card(CARD_B_Y, ROW * 3.0),
-        3,
+        card(CARD_B_Y, ROW * 4.0),
+        4,
         row_pressed(Action::ShowDisplay, 0).or(row_pressed(Action::ShowWallpaper, 1)),
     );
     let brightness = app
@@ -559,6 +564,25 @@ fn draw_system(
         &volume_text,
         false,
     );
+    // Tap haptics: Moon's keyboard, toggles and switches.
+    system_row(
+        canvas,
+        haptics_row(),
+        PINK,
+        draw_haptics_glyph,
+        "Haptics",
+        "",
+        false,
+    );
+    if let Some(on) = app.shell.haptics {
+        let row = haptics_row();
+        let right = MARGIN + CARD_WIDTH - 44.0;
+        crate::display_ui::draw_switch(
+            canvas,
+            RectF::new(right - 104.0, row.y + (ROW - 64.0) / 2.0, 104.0, 64.0),
+            on,
+        );
+    }
 
     grouped_card(canvas, about_row(), 1, row_pressed(Action::ShowAbout, 0));
     system_row(
@@ -581,6 +605,25 @@ fn draw_system(
         "",
         true,
     );
+}
+
+/// A phone between two vibration marks.
+fn draw_haptics_glyph(canvas: &mut Canvas, cx: f32, cy: f32) {
+    canvas.fill_rrect(RectF::new(cx - 9.0, cy - 16.0, 18.0, 32.0), 4.0, WHITE, 1.0);
+    let mut marks = Path::new();
+    for side in [-1.0_f32, 1.0] {
+        let x = cx + side * 18.0;
+        marks.stroke_polyline(
+            &[
+                (x, cy - 10.0),
+                (x + side * 5.0, cy - 4.0),
+                (x, cy + 2.0),
+                (x + side * 5.0, cy + 8.0),
+            ],
+            3.0,
+        );
+    }
+    canvas.fill_path(&marks, WHITE, 1.0);
 }
 
 /// One row of the System page: an icon tile, a label, a value and (for a

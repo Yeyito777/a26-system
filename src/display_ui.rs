@@ -414,7 +414,7 @@ pub fn draw_wallpaper_glyph(canvas: &mut Canvas, cx: f32, cy: f32) {
     canvas.fill_path(&hills, WHITE, 1.0);
 }
 
-fn draw_switch(canvas: &mut Canvas, rect: RectF, on: bool) {
+pub(crate) fn draw_switch(canvas: &mut Canvas, rect: RectF, on: bool) {
     canvas.fill_rrect(rect, rect.h / 2.0, if on { GREEN } else { TRACK }, 1.0);
     let cx = if on {
         rect.x + rect.w - rect.h / 2.0
@@ -441,6 +441,7 @@ mod tests {
             }),
             wallpaper: Some("moon".into()),
             auto_lock_s: Some(30),
+            haptics: Some(true),
             open_target: None,
         };
         app

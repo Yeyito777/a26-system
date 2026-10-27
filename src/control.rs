@@ -32,6 +32,8 @@ pub struct ShellInfo {
     pub display: Option<DisplayState>,
     pub wallpaper: Option<String>,
     pub auto_lock_s: Option<u32>,
+    /// Tap haptics on or off (Moon's `haptics` setting).
+    pub haptics: Option<bool>,
     /// What a tapped notification asked an app to show.
     pub open_target: Option<OpenTarget>,
 }
@@ -75,6 +77,7 @@ fn parse_shell(response: &str) -> ShellInfo {
     info.auto_lock_s = result["settings"]["auto_lock_s"]
         .as_u64()
         .and_then(|v| u32::try_from(v).ok());
+    info.haptics = result["settings"]["haptics"].as_bool();
     let open = &result["open_target"];
     if let (Some(app), Some(target), Some(serial)) = (
         open["app"].as_str(),

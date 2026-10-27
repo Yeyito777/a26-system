@@ -201,6 +201,7 @@ pub enum Action {
     SetWallpaper(usize),
     ToggleAutoBrightness,
     SetBrightness(u8),
+    ToggleHaptics,
     /// On the Clock page (handled by `ClockModel`).
     Clock(crate::clock::ClockAction),
     RefreshWifi,
@@ -298,6 +299,7 @@ impl AppModel {
             Action::SetAutoLock(_)
             | Action::SetWallpaper(_)
             | Action::ToggleAutoBrightness
+            | Action::ToggleHaptics
             | Action::SetBrightness(_) => Vec::new(),
             // The main loop sends these to moon-notifyd.
             Action::Clock(_) => Vec::new(),

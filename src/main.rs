@@ -297,6 +297,10 @@ fn perform(
     action: Action,
     keyboard_requested: &mut Option<KeyboardPurpose>,
 ) {
+    if let Action::Clock(crate::clock::ClockAction::ToggleAlarm(_)) = action {
+        // A switch flipped (Moon applies the user's haptics setting).
+        control::send("haptic light");
+    }
     if let Action::Clock(clock_action) = action {
         for request in app.clock.handle(clock_action) {
             clock_worker.send(request);
@@ -318,7 +322,18 @@ fn shell_command(app: &mut AppModel, action: Action) {
             }
             control::send(&format!("brightness set {level}"));
         }
+        Action::ToggleHaptics => {
+            let on = !app.shell.haptics.unwrap_or(true);
+            let value = if on { "on" } else { "off" };
+            if control::send(&format!("settings set haptics {value}")) {
+                app.shell.haptics = Some(on);
+                if on {
+                    control::send("haptic light");
+                }
+            }
+        }
         Action::ToggleAutoBrightness => {
+            control::send("haptic light");
             if let Some(display) = app.shell.display.as_mut() {
                 display.auto = !display.auto;
                 let on = if display.auto { "on" } else { "off" };
