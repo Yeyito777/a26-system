@@ -331,7 +331,7 @@ fn shell_command(app: &mut AppModel, action: Action) {
             control::send(&format!("brightness set {level}"));
         }
         Action::ToggleHaptics => {
-            let on = !app.shell.haptics.unwrap_or(true);
+            let on = !app.shell.haptics.unwrap_or(false);
             let value = if on { "on" } else { "off" };
             if control::send(&format!("settings set haptics {value}")) {
                 app.shell.haptics = Some(on);
