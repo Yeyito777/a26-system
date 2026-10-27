@@ -1,16 +1,20 @@
 mod app;
+mod battery;
 mod clock;
 mod clock_ui;
 mod comms;
 mod comms_ui;
 mod control;
 mod display_ui;
+mod general_ui;
 mod gfx;
 mod keys;
 mod metrics;
 mod present;
+mod storage;
 mod telephony;
 mod text;
+mod tz;
 mod ui;
 mod wallpapers;
 mod wifi;
@@ -110,7 +114,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut system = SystemInfo::collect();
     let mut app = AppModel::default();
     app.shell = control::read_shell();
+    control::apply_time(&app.shell);
+    app.battery = battery::BatteryInfo::read();
     let mut volume = app.shell.volume;
+    // Counts storage while the Storage page is open.
+    let mut storage_worker: Option<storage::StorageWorker> = None;
     let wifi_worker = WifiWorker::spawn();
     let clock_worker = clock::NotifyWorker::spawn();
     // The System page summarizes the current network, so ask once up front.
@@ -159,6 +167,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 {
                     tap = TapTracker::new(event.event_x, event.event_y, renderer.height());
                     if tap.is_some() {
+                        let height = f32::from(renderer.height());
+                        if app.view == app::View::TimeZone
+                            && general_ui::zone_scrolls(height, f32::from(event.event_y))
+                        {
+                            app.tz_scroll
+                                .begin(f32::from(event.event_y), Instant::now());
+                        }
                         pressed = renderer.action_at(&app, event.event_x, event.event_y);
                         redraw |= pressed.is_some();
                     }
@@ -169,12 +184,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                         if tap.moved && pressed.take().is_some() {
                             redraw = true;
                         }
+                        if tap.moved && app.tz_scroll.dragging() {
+                            let max = general_ui::zone_scroll_max(f32::from(renderer.height()));
+                            app.tz_scroll
+                                .moved(f32::from(event.event_y), max, Instant::now());
+                            redraw = true;
+                        }
                     }
                 }
                 Event::ButtonRelease(event) if event.event == window && event.detail == 1 => {
                     if pressed.take().is_some() {
                         redraw = true;
                     }
+                    let max = general_ui::zone_scroll_max(f32::from(renderer.height()));
+                    app.tz_scroll.end(max, Instant::now());
                     if let Some(position) = tap
                         .take()
                         .and_then(|tap| tap.finish(event.event_x, event.event_y, renderer.height()))
@@ -239,6 +262,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         if now >= next_refresh {
             system.refresh();
             app.shell = control::read_shell();
+            control::apply_time(&app.shell);
+            app.battery = battery::BatteryInfo::read();
             volume = app.shell.volume;
             redraw = true;
             next_refresh = now + REFRESH_INTERVAL;
@@ -254,6 +279,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             dispatch_requests(&wifi_worker, &mut app, requests);
             redraw = true;
         }
+        // The Storage page counts in the background while it is open.
+        if app.view == app::View::Storage {
+            if storage_worker.is_none() && app.storage.is_none() {
+                storage_worker = Some(storage::StorageWorker::spawn());
+            }
+            if let Some(breakdown) = storage_worker
+                .as_ref()
+                .and_then(storage::StorageWorker::try_recv)
+            {
+                app.storage = Some(breakdown);
+                storage_worker = None;
+                redraw = true;
+            }
+        } else if app.view != app::View::Storage && storage_worker.is_none() {
+            // Counted afresh next time.
+            app.storage = None;
+        }
+        let max = general_ui::zone_scroll_max(f32::from(renderer.height()));
+        let flinging = app.view == app::View::TimeZone && app.tz_scroll.step(max, now);
+        redraw |= flinging;
         let busy = app.busy || app.scanning;
         if busy && now >= next_busy_frame {
             redraw = true;
@@ -274,6 +319,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         if let Some(at) = app.next_deadline() {
             deadline = deadline.min(at);
+        }
+        if flinging {
+            deadline = deadline.min(Instant::now() + Duration::from_millis(16));
+        }
+        if storage_worker.is_some() {
+            deadline = deadline.min(Instant::now() + Duration::from_millis(100));
         }
         if app.view == app::View::Clock {
             // Daemon events arrive on the worker thread; pick them up soon.
@@ -339,6 +390,33 @@ fn shell_command(app: &mut AppModel, action: Action) {
                     control::send("haptic light");
                 }
             }
+        }
+        Action::Toggle24h => {
+            let on = !app.shell.time.as_ref().is_some_and(|time| time.clock_24h);
+            let value = if on { "on" } else { "off" };
+            if control::send(&format!("settings set clock_24h {value}")) {
+                if let Some(time) = app.shell.time.as_mut() {
+                    time.clock_24h = on;
+                }
+                control::send("haptic light");
+            }
+        }
+        Action::SetTimeZone(index) => {
+            if let Some((id, _, rule)) = tz::ZONES.get(index)
+                && control::send(&format!("settings set timezone {id}"))
+            {
+                let time = app.shell.time.get_or_insert_with(Default::default);
+                time.zone = Some((*id).to_owned());
+                time.tz = Some((*rule).to_owned());
+                control::apply_time(&app.shell);
+            }
+        }
+        Action::PowerMenu(restart) => {
+            control::send(if restart {
+                "power menu restart"
+            } else {
+                "power menu"
+            });
         }
         Action::ToggleAutoBrightness => {
             control::send("haptic light");

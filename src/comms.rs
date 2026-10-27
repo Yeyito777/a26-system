@@ -553,7 +553,9 @@ pub fn run(kind: Kind) -> Result<(), Box<dyn Error>> {
         // looked at when the window comes forward, and every second.
         if check_target || now >= next_shell_poll {
             next_shell_poll = now + Duration::from_secs(1);
-            if let Some(open) = control::read_shell().open_target
+            let shell = control::read_shell();
+            redraw |= control::apply_time(&shell);
+            if let Some(open) = shell.open_target
                 && open.app == kind.id()
                 && seen_target != Some(open.serial)
             {

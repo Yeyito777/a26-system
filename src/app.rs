@@ -26,8 +26,14 @@ pub enum View {
     Display,
     AutoLock,
     Wallpaper,
-    /// Activity, storage and the device.
+    /// Activity and the device.
     About,
+    /// Battery, Date & Time with its time-zone picker, Storage
+    /// (general_ui.rs).
+    Battery,
+    DateTime,
+    TimeZone,
+    Storage,
 }
 
 impl View {
@@ -36,8 +42,15 @@ impl View {
     pub fn depth(self) -> u8 {
         match self {
             View::System => 0,
-            View::Wifi | View::Clock | View::Display | View::Wallpaper | View::About => 1,
-            View::AutoLock => 2,
+            View::Wifi
+            | View::Clock
+            | View::Display
+            | View::Wallpaper
+            | View::About
+            | View::Battery
+            | View::DateTime
+            | View::Storage => 1,
+            View::AutoLock | View::TimeZone => 2,
         }
     }
 }
@@ -208,6 +221,16 @@ pub enum Action {
     ShowAutoLock,
     ShowWallpaper,
     ShowAbout,
+    ShowBattery,
+    ShowDateTime,
+    ShowTimeZone,
+    ShowStorage,
+    /// Moon settings: the 24-hour clock and the time zone (by its index in
+    /// tz::ZONES).
+    Toggle24h,
+    SetTimeZone(usize),
+    /// Moon's power menu (`true`: set to restart).
+    PowerMenu(bool),
     /// Moon settings (sent over its control socket by the main loop).
     SetAutoLock(u32),
     SetWallpaper(usize),
@@ -242,6 +265,11 @@ pub struct AppModel {
     pub clock: crate::clock::ClockModel,
     /// Moon's display state and settings, refreshed every second.
     pub shell: crate::control::ShellInfo,
+    pub battery: crate::battery::BatteryInfo,
+    /// Storage counted by the worker (None while it counts).
+    pub storage: Option<crate::storage::Breakdown>,
+    /// The time-zone picker's scroll.
+    pub tz_scroll: crate::comms::Scroll,
     wifi_initialized: bool,
     /// When the shown notice goes away (`None`: it stays).
     notice_until: Option<Instant>,
@@ -266,6 +294,9 @@ impl Default for AppModel {
             password_dialog: None,
             clock: crate::clock::ClockModel::default(),
             shell: crate::control::ShellInfo::default(),
+            battery: crate::battery::BatteryInfo::default(),
+            storage: None,
+            tz_scroll: crate::comms::Scroll::default(),
             wifi_initialized: false,
             notice_until: None,
             failure_acknowledged: false,
@@ -307,6 +338,29 @@ impl AppModel {
                 self.view = View::About;
                 Vec::new()
             }
+            Action::ShowBattery => {
+                self.view = View::Battery;
+                Vec::new()
+            }
+            Action::ShowDateTime => {
+                self.view = View::DateTime;
+                Vec::new()
+            }
+            Action::ShowTimeZone => {
+                self.view = View::TimeZone;
+                self.tz_scroll.reset();
+                Vec::new()
+            }
+            Action::ShowStorage => {
+                self.view = View::Storage;
+                Vec::new()
+            }
+            // Chosen: back to Date & Time (the main loop tells Moon).
+            Action::SetTimeZone(_) => {
+                self.view = View::DateTime;
+                Vec::new()
+            }
+            Action::Toggle24h | Action::PowerMenu(_) => Vec::new(),
             // The main loop sends these to Moon.
             Action::SetAutoLock(_)
             | Action::SetWallpaper(_)
