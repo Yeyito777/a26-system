@@ -175,7 +175,7 @@ fn draw_battery(canvas: &mut Canvas, info: &BatteryInfo, pressed: Option<Action>
             }
         },
     );
-    let details = [
+    let mut details = vec![
         (
             "Health",
             if info.health.is_empty() {
@@ -189,10 +189,6 @@ fn draw_battery(canvas: &mut Canvas, info: &BatteryInfo, pressed: Option<Action>
             info.temperature_c
                 .map_or_else(|| "—".into(), |c| format!("{c:.1} °C")),
         ),
-        (
-            "Charge Cycles",
-            info.cycles.map_or_else(|| "—".into(), |c| c.to_string()),
-        ),
         ("Current", current),
         (
             "Voltage",
@@ -205,6 +201,10 @@ fn draw_battery(canvas: &mut Canvas, info: &BatteryInfo, pressed: Option<Action>
                 .map_or_else(|| "—".into(), |mah| format!("{mah} mAh")),
         ),
     ];
+    // The A26's kernel reports -1: no count, no row.
+    if let Some(cycles) = info.cycles {
+        details.insert(2, ("Charge Cycles", cycles.to_string()));
+    }
     info_rows(canvas, details_y, &details);
 }
 
@@ -288,6 +288,8 @@ fn draw_time_zone(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) 
     let (top, bottom) = (TOP, height - GESTURE_RESERVE);
     let offset = app.tz_scroll.value(Instant::now());
     let chosen = app.shell.time.as_ref().and_then(|time| time.zone.clone());
+    // Each zone's offset now, daylight time included, as on iPhone.
+    let now = crate::clock::unix_now();
     canvas.set_clip(0, top as i32, canvas.width, bottom as i32);
     let list = card(top - offset, ROW * ZONES.len() as f32);
     grouped_card(canvas, list, 0, None);
@@ -329,7 +331,7 @@ fn draw_time_zone(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) 
         };
         text::draw_right(
             canvas,
-            &tz::offset_label(rule),
+            &tz::offset_label(tz::current_offset(rule, now)),
             right,
             line,
             Weight::Regular,

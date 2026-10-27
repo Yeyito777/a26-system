@@ -148,30 +148,177 @@ pub fn city(id: &str) -> Option<&'static str> {
         .map(|(_, city, _)| *city)
 }
 
-/// A rule's standard offset from UTC in minutes (POSIX counts west as
-/// positive: `EST5` is UTC-5).
-pub fn standard_offset(rule: &str) -> i32 {
-    let rest = match rule.strip_prefix('<') {
-        Some(quoted) => quoted.split_once('>').map_or("", |(_, rest)| rest),
-        None => rule.trim_start_matches(|c: char| c.is_ascii_alphabetic()),
-    };
-    let (sign, rest) = match rest.as_bytes().first() {
-        Some(b'-') => (1, &rest[1..]),
-        Some(b'+') => (-1, &rest[1..]),
-        _ => (-1, rest),
-    };
-    let end = rest
-        .find(|c: char| !(c.is_ascii_digit() || c == ':'))
-        .unwrap_or(rest.len());
-    let mut parts = rest[..end].split(':');
-    let hours: i32 = parts.next().and_then(|h| h.parse().ok()).unwrap_or(0);
-    let minutes: i32 = parts.next().and_then(|m| m.parse().ok()).unwrap_or(0);
-    sign * (hours * 60 + minutes)
+/// A POSIX TZ rule (`EST5EDT,M3.2.0,M11.1.0`): offsets in seconds east of
+/// UTC, and daylight time's start and end when the zone has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rule {
+    standard: i32,
+    daylight: Option<Daylight>,
 }
 
-/// "UTC−5", "UTC+5:30", "UTC".
-pub fn offset_label(rule: &str) -> String {
-    let minutes = standard_offset(rule);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Daylight {
+    offset: i32,
+    start: Transition,
+    end: Transition,
+}
+
+/// `Mm.w.d/time`: weekday d (0 = Sunday) of week w (5 = the last) of month
+/// m, at `time` seconds past local midnight (may be negative or past 24 h).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Transition {
+    month: u32,
+    week: u32,
+    weekday: u32,
+    time: i32,
+}
+
+/// Parses `[+-]hh[:mm[:ss]]` from the start of `text`: seconds and the rest.
+fn parse_duration(text: &str) -> Option<(i32, &str)> {
+    let (sign, text) = match text.as_bytes().first()? {
+        b'-' => (-1, &text[1..]),
+        b'+' => (1, &text[1..]),
+        _ => (1, text),
+    };
+    let end = text
+        .find(|c: char| !(c.is_ascii_digit() || c == ':'))
+        .unwrap_or(text.len());
+    if end == 0 {
+        return None;
+    }
+    let mut seconds = 0;
+    let mut unit = 3600;
+    for part in text[..end].split(':') {
+        seconds += part.parse::<i32>().ok()? * unit;
+        unit /= 60;
+    }
+    Some((sign * seconds, &text[end..]))
+}
+
+/// Skips a zone name: `<...>` or letters.
+fn skip_name(text: &str) -> Option<&str> {
+    match text.strip_prefix('<') {
+        Some(quoted) => quoted.split_once('>').map(|(_, rest)| rest),
+        None => {
+            let rest = text.trim_start_matches(|c: char| c.is_ascii_alphabetic());
+            (rest.len() < text.len()).then_some(rest)
+        }
+    }
+}
+
+fn parse_transition(text: &str) -> Option<Transition> {
+    let (date, time) = match text.split_once('/') {
+        Some((date, time)) => (date, parse_duration(time)?.0),
+        None => (text, 2 * 3600),
+    };
+    let mut fields = date.strip_prefix('M')?.split('.');
+    let mut next = || fields.next()?.parse::<u32>().ok();
+    let (month, week, weekday) = (next()?, next()?, next()?);
+    ((1..=12).contains(&month) && (1..=5).contains(&week) && weekday <= 6).then_some(Transition {
+        month,
+        week,
+        weekday,
+        time,
+    })
+}
+
+fn parse(rule: &str) -> Option<Rule> {
+    let rest = skip_name(rule)?;
+    // POSIX counts west as positive: `EST5` is UTC-5.
+    let (west, rest) = parse_duration(rest)?;
+    let standard = -west;
+    if rest.is_empty() {
+        return Some(Rule {
+            standard,
+            daylight: None,
+        });
+    }
+    let rest = skip_name(rest)?;
+    let (offset, rest) = match parse_duration(rest) {
+        Some((west, rest)) => (-west, rest),
+        None => (standard + 3600, rest),
+    };
+    let (start, end) = rest.strip_prefix(',')?.split_once(',')?;
+    Some(Rule {
+        standard,
+        daylight: Some(Daylight {
+            offset,
+            start: parse_transition(start)?,
+            end: parse_transition(end)?,
+        }),
+    })
+}
+
+/// Days since 1970-01-01 of a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+fn year_of(days: i64) -> i64 {
+    // The inverse of days_from_civil, as far as the year.
+    let days = days + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    year_of_era + era * 400 + i64::from(month_index >= 10)
+}
+
+/// The transition in `year`, in seconds since the epoch of local time with
+/// `offset` (the offset in force before it).
+fn transition_at(transition: Transition, year: i64, offset: i32) -> i64 {
+    let first = days_from_civil(year, transition.month, 1);
+    // 1970-01-01 was a Thursday (4).
+    let first_weekday = (first + 4).rem_euclid(7) as u32;
+    let mut day = 1 + (transition.weekday + 7 - first_weekday) % 7 + (transition.week - 1) * 7;
+    let (next_year, next_month) = if transition.month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, transition.month + 1)
+    };
+    let month_days = (days_from_civil(next_year, next_month, 1) - first) as u32;
+    while day > month_days {
+        day -= 7;
+    }
+    (first + i64::from(day) - 1) * 86_400 + i64::from(transition.time) - i64::from(offset)
+}
+
+/// The zone's offset from UTC at `now` (Unix seconds), in minutes east:
+/// daylight time included.
+pub fn current_offset(rule: &str, now: i64) -> i32 {
+    let Some(rule) = parse(rule) else {
+        return 0;
+    };
+    let Some(daylight) = rule.daylight else {
+        return rule.standard / 60;
+    };
+    let year = year_of((now + i64::from(rule.standard)).div_euclid(86_400));
+    let start = transition_at(daylight.start, year, rule.standard);
+    let end = transition_at(daylight.end, year, daylight.offset);
+    let in_daylight = if start < end {
+        (start..end).contains(&now)
+    } else {
+        // Southern hemisphere: daylight time spans the new year.
+        !(end..start).contains(&now)
+    };
+    if in_daylight {
+        daylight.offset / 60
+    } else {
+        rule.standard / 60
+    }
+}
+
+/// "UTC−5", "UTC+5:30", "UTC" for an offset in minutes east.
+pub fn offset_label(minutes: i32) -> String {
     if minutes == 0 {
         return "UTC".into();
     }
@@ -188,13 +335,53 @@ pub fn offset_label(rule: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Unix seconds of a UTC date and time.
+    fn utc(year: i64, month: u32, day: u32, hour: i64, minute: i64) -> i64 {
+        days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60
+    }
+
     #[test]
     fn offsets_read_like_utc() {
-        assert_eq!(offset_label("EST5EDT,M3.2.0,M11.1.0"), "UTC−5");
-        assert_eq!(offset_label("IST-5:30"), "UTC+5:30");
-        assert_eq!(offset_label("<+0545>-5:45"), "UTC+5:45");
-        assert_eq!(offset_label("<-03>3"), "UTC−3");
-        assert_eq!(offset_label("UTC0"), "UTC");
+        assert_eq!(offset_label(-300), "UTC−5");
+        assert_eq!(offset_label(330), "UTC+5:30");
+        assert_eq!(offset_label(0), "UTC");
+        assert_eq!(current_offset("IST-5:30", 0), 330);
+        assert_eq!(current_offset("<+0545>-5:45", 0), 345);
+        assert_eq!(current_offset("<-03>3", 0), -180);
+        assert_eq!(current_offset("UTC0", 0), 0);
         assert_eq!(city("America/Panama"), Some("Panama"));
+        assert_eq!(utc(1970, 1, 1, 0, 0), 0);
+        assert_eq!(year_of(days_from_civil(2026, 12, 31)), 2026);
+        assert_eq!(year_of(days_from_civil(2027, 1, 1)), 2027);
+    }
+
+    #[test]
+    fn daylight_time_follows_the_rules() {
+        let new_york = "EST5EDT,M3.2.0,M11.1.0";
+        // 2026: 8 March 02:00 EST to 1 November 02:00 EDT.
+        assert_eq!(current_offset(new_york, utc(2026, 10, 27, 8, 0)), -240);
+        assert_eq!(current_offset(new_york, utc(2026, 12, 1, 12, 0)), -300);
+        assert_eq!(current_offset(new_york, utc(2026, 3, 8, 6, 59)), -300);
+        assert_eq!(current_offset(new_york, utc(2026, 3, 8, 7, 0)), -240);
+        assert_eq!(current_offset(new_york, utc(2026, 11, 1, 5, 59)), -240);
+        assert_eq!(current_offset(new_york, utc(2026, 11, 1, 6, 0)), -300);
+        // Europe: the last Sunday of March 01:00 UTC to October's.
+        let berlin = "CET-1CEST,M3.5.0,M10.5.0/3";
+        assert_eq!(current_offset(berlin, utc(2026, 3, 29, 0, 59)), 60);
+        assert_eq!(current_offset(berlin, utc(2026, 3, 29, 1, 0)), 120);
+        assert_eq!(current_offset(berlin, utc(2026, 10, 25, 0, 59)), 120);
+        assert_eq!(current_offset(berlin, utc(2026, 10, 25, 1, 0)), 60);
+        // Southern hemisphere, half-hour zone: daylight time over the new year.
+        let adelaide = "ACST-9:30ACDT,M10.1.0,M4.1.0/3";
+        assert_eq!(current_offset(adelaide, utc(2026, 1, 15, 0, 0)), 630);
+        assert_eq!(current_offset(adelaide, utc(2026, 6, 15, 0, 0)), 570);
+        // Santiago: transitions at 24:00 on a Saturday.
+        let santiago = "<-04>4<-03>,M9.1.6/24,M4.1.6/24";
+        assert_eq!(current_offset(santiago, utc(2026, 1, 15, 0, 0)), -180);
+        assert_eq!(current_offset(santiago, utc(2026, 7, 15, 0, 0)), -240);
+        // Every zone offered parses.
+        for (id, _, rule) in ZONES {
+            assert!(parse(rule).is_some(), "{id}: {rule}");
+        }
     }
 }
