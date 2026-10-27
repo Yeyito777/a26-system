@@ -309,11 +309,7 @@ fn draw_recents(
     let (top, bottom) = (recents_top(), recents_bottom(height));
     if recents.is_empty() {
         if model.recents.is_some() || !model.connected {
-            let detail = match model.service() {
-                Service::Ready => "",
-                service => crate::comms::service_text(service),
-            };
-            empty_state(canvas, "No Recents", detail, (top + bottom) / 2.0);
+            empty_state(canvas, "No Recents", "", (top + bottom) / 2.0);
         }
         return;
     }
@@ -426,8 +422,8 @@ fn draw_threads(
     if threads.is_empty() {
         if model.threads.is_some() || !model.connected {
             let (title, detail) = match service {
-                Service::NoSim => ("No SIM", "Insert a SIM to send and receive messages."),
-                Service::Unavailable => ("No Messages", "Cellular service unavailable"),
+                // Minimal, as on iPhone: the status bar already says why.
+                Service::NoSim => ("No Messages", "No SIM"),
                 _ => ("No Messages", ""),
             };
             empty_state(canvas, title, detail, (LIST_TOP + bottom) / 2.0);
@@ -435,13 +431,10 @@ fn draw_threads(
         return;
     }
     if service != Service::Ready {
-        let line = format!(
-            "{} · messages can't be sent",
-            crate::comms::service_text(service)
-        );
+        let line = crate::comms::service_text(service);
         text::draw(
             canvas,
-            &line,
+            line,
             MARGIN,
             LIST_TOP + 30.0,
             Weight::Regular,
@@ -681,10 +674,7 @@ fn draw_thread(
         }
     }
     if model.service() != Service::Ready {
-        let line = format!(
-            "{} · messages can't be sent",
-            crate::comms::service_text(model.service())
-        );
+        let line = crate::comms::service_text(model.service()).to_owned();
         text::draw_centered(
             canvas,
             &line,

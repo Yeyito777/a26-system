@@ -427,7 +427,7 @@ pub fn service_text(service: Service) -> &'static str {
         Service::Airplane => "Airplane Mode is on",
         Service::NoSim => "No SIM",
         Service::SimLocked => "SIM locked",
-        Service::NoNetwork { emergency: true } => "Emergency calls only",
+        Service::NoNetwork { emergency: true } => "SOS only",
         Service::NoNetwork { emergency: false } => "No service",
     }
 }
