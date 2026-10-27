@@ -48,7 +48,8 @@ impl BatteryInfo {
             health: read("health").unwrap_or_default(),
             temperature_c: number::<i32>("temp").map(|tenths| tenths as f32 / 10.0),
             cycles: number("battery_cycle"),
-            current_ma: number("current_now"),
+            // Microamps, as `voltage_now` is microvolts.
+            current_ma: number::<i32>("current_now").map(|ua| ua / 1000),
             voltage_mv: number::<u32>("voltage_now").map(|uv| uv / 1000),
             capacity_mah: number::<u32>("charge_full")
                 .map(|uah| uah / 1000)
