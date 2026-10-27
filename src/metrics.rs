@@ -21,6 +21,11 @@ pub struct SystemInfo {
     pub storage_free: String,
     /// Used fraction of the root filesystem, for the storage bar.
     pub storage_fraction: Option<f32>,
+    /// Used and free bytes of the root filesystem.
+    pub storage_bytes: Option<(u64, u64)>,
+    /// OSS Phone's version and build (Moon's `share/VERSION`).
+    pub version: String,
+    pub build: String,
     previous_cpu: Option<CpuTimes>,
 }
 
@@ -37,9 +42,30 @@ impl SystemInfo {
             .map(|(used, free)| (format_bytes(used), format_bytes(free)))
             .unwrap_or_else(|| ("UNKNOWN".into(), "UNKNOWN".into()));
 
+        let version_file = std::env::var("MOON_VERSION_FILE")
+            .unwrap_or_else(|_| "/opt/a26-shell/share/VERSION".into());
+        let version_text = fs::read_to_string(version_file).unwrap_or_default();
+        let mut version_lines = version_text.lines().map(str::trim);
+        let version = version_lines
+            .next()
+            .filter(|line| !line.is_empty())
+            .unwrap_or("OSS Phone")
+            .to_owned();
+        // "build f4229b4", "built 2026-10-27" -> "f4229b4 · 2026-10-27".
+        let build = version_lines
+            .map(|line| {
+                line.trim_start_matches("built ")
+                    .trim_start_matches("build ")
+            })
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
         Self {
             kernel,
             alpine,
+            storage_bytes: usage,
+            version,
+            build,
             memory,
             cpu_usage: None,
             gpu_usage: read_gpu_usage(),
@@ -58,7 +84,8 @@ impl SystemInfo {
             self.previous_cpu = Some(current);
         }
         self.gpu_usage = read_gpu_usage();
-        if let Some((used, free)) = storage_usage("/") {
+        self.storage_bytes = storage_usage("/");
+        if let Some((used, free)) = self.storage_bytes {
             self.storage_used = format_bytes(used);
             self.storage_free = format_bytes(free);
             self.storage_fraction = used_fraction(used, free);
@@ -144,7 +171,7 @@ fn used_fraction(used: u64, free: u64) -> Option<f32> {
     (total > 0).then(|| used as f32 / total as f32)
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
     format!("{:.1} GB", bytes as f64 / GIB)
 }

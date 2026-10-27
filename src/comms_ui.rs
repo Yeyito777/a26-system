@@ -812,8 +812,7 @@ fn local(t: i64) -> libc::tm {
 }
 
 fn clock_text(tm: &libc::tm) -> String {
-    let (time, half) = crate::clock::alarm_time(tm.tm_hour as u8, tm.tm_min as u8);
-    format!("{time} {half}")
+    crate::clock::clock_text(tm.tm_hour as u8, tm.tm_min as u8)
 }
 
 const WEEKDAYS: [&str; 7] = [

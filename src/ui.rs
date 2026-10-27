@@ -34,7 +34,7 @@ pub(crate) const MARGIN: f32 = 44.0;
 pub(crate) const CARD_WIDTH: f32 = 1080.0 - 2.0 * MARGIN;
 pub(crate) const CARD_RADIUS: f32 = 30.0;
 pub(crate) const ROW: f32 = 128.0;
-const INFO_ROW: f32 = 118.0;
+pub(crate) const INFO_ROW: f32 = 118.0;
 pub(crate) const TEXT_X: f32 = MARGIN + 44.0;
 pub(crate) const LABEL_SIZE: f32 = 47.0;
 pub(crate) const HEADER_SIZE: f32 = 36.0;
@@ -46,11 +46,10 @@ pub(crate) const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
 const SYSTEM_CARD_Y: f32 = 190.0;
 const CARD_B_Y: f32 = 516.0;
 const CARD_C_Y: f32 = 1098.0;
+const CARD_D_Y: f32 = CARD_C_Y + ROW * 4.0 + 70.0;
 const ACTIVITY_Y: f32 = 340.0;
 const ACTIVITY_HEIGHT: f32 = 236.0;
-const STORAGE_Y: f32 = 676.0;
-const STORAGE_HEIGHT: f32 = 236.0;
-const ABOUT_Y: f32 = 1012.0;
+const ABOUT_Y: f32 = 676.0;
 
 // Wi-Fi page.
 pub(crate) const BACK_BUTTON: RectF = RectF::new(0.0, 0.0, 420.0, 140.0);
@@ -127,6 +126,9 @@ impl Renderer {
                 View::Wifi => draw_wifi(canvas, app, pressed),
                 View::Clock => crate::clock_ui::draw_clock(canvas, &app.clock, pressed),
                 View::About => draw_about(canvas, system, pressed),
+                View::Battery | View::DateTime | View::TimeZone | View::Storage => {
+                    crate::general_ui::draw(canvas, app, system, pressed)
+                }
                 View::Display | View::AutoLock | View::Wallpaper => {
                     crate::display_ui::draw(canvas, app, pressed)
                 }
@@ -190,12 +192,20 @@ pub fn action_at(app: &AppModel, height: f32, x: i16, y: i16) -> Option<Action> 
             (display_row(), Action::ShowDisplay),
             (wallpaper_row(), Action::ShowWallpaper),
             (haptics_row(), Action::ToggleHaptics),
-            (about_row(), Action::ShowAbout),
+            (general_row(0), Action::ShowBattery),
+            (general_row(1), Action::ShowDateTime),
+            (general_row(2), Action::ShowStorage),
+            (general_row(3), Action::ShowAbout),
+            (power_row(0), Action::PowerMenu(true)),
+            (power_row(1), Action::PowerMenu(false)),
         ]
         .into_iter()
         .find(|(row, _)| row.contains(x, y))
         .map(|(_, action)| action),
         View::About => BACK_BUTTON.contains(x, y).then_some(Action::ShowSystem),
+        View::Battery | View::DateTime | View::TimeZone | View::Storage => {
+            crate::general_ui::action_at(app, height, x, y)
+        }
         View::Display | View::AutoLock | View::Wallpaper => crate::display_ui::action_at(app, x, y),
         View::Clock => crate::clock_ui::action_at(&app.clock, x, y),
         View::Wifi => {
@@ -252,8 +262,13 @@ fn haptics_row() -> RectF {
     card(CARD_B_Y + ROW * 3.0, ROW)
 }
 
-fn about_row() -> RectF {
-    card(CARD_C_Y, ROW)
+/// Battery, Date & Time, Storage, About.
+fn general_row(index: usize) -> RectF {
+    card(CARD_C_Y + ROW * index as f32, ROW)
+}
+
+fn power_row(index: usize) -> RectF {
+    card(CARD_D_Y + ROW * index as f32, ROW)
 }
 
 fn field_rect(index: usize) -> RectF {
@@ -489,7 +504,7 @@ fn wifi_summary(app: &AppModel) -> String {
 
 fn draw_system(
     canvas: &mut Canvas,
-    _system: &SystemInfo,
+    system: &SystemInfo,
     volume: Option<u8>,
     app: &AppModel,
     pressed: Option<Action>,
@@ -584,10 +599,49 @@ fn draw_system(
         );
     }
 
-    grouped_card(canvas, about_row(), 1, row_pressed(Action::ShowAbout, 0));
+    // Battery, time, storage and the device.
+    let general = [
+        Action::ShowBattery,
+        Action::ShowDateTime,
+        Action::ShowStorage,
+        Action::ShowAbout,
+    ];
+    let pressed_general = general.iter().position(|action| pressed == Some(*action));
+    grouped_card(canvas, card(CARD_C_Y, ROW * 4.0), 4, pressed_general);
+    let battery = app
+        .battery
+        .percent
+        .map_or_else(String::new, |p| format!("{p}%"));
     system_row(
         canvas,
-        about_row(),
+        general_row(0),
+        GREEN,
+        draw_battery_tile_glyph,
+        "Battery",
+        &battery,
+        true,
+    );
+    system_row(
+        canvas,
+        general_row(1),
+        BLUE,
+        crate::clock_ui::draw_clock_tile_glyph,
+        "Date & Time",
+        "",
+        true,
+    );
+    system_row(
+        canvas,
+        general_row(2),
+        0x8e8e93,
+        draw_storage_tile_glyph,
+        "Storage",
+        &format!("{} free", system.storage_free),
+        true,
+    );
+    system_row(
+        canvas,
+        general_row(3),
         0x8e8e93,
         |canvas, cx, cy| {
             text::draw_centered(
@@ -605,6 +659,51 @@ fn draw_system(
         "",
         true,
     );
+
+    // Restart and Power Off: Moon's power menu, set to either.
+    let pressed_power = [Action::PowerMenu(true), Action::PowerMenu(false)]
+        .iter()
+        .position(|action| pressed == Some(*action));
+    grouped_card(canvas, card(CARD_D_Y, ROW * 2.0), 2, pressed_power);
+    for (index, (label, color)) in [("Restart", BLUE), ("Power Off", RED)]
+        .into_iter()
+        .enumerate()
+    {
+        let cy = CARD_D_Y + ROW * (index as f32 + 0.5);
+        if index > 0 {
+            separator(canvas, CARD_D_Y + ROW - 1.0, TEXT_X);
+        }
+        text::draw(
+            canvas,
+            label,
+            TEXT_X,
+            baseline(cy, Weight::Regular, LABEL_SIZE),
+            Weight::Regular,
+            LABEL_SIZE,
+            color,
+            1.0,
+        );
+    }
+}
+
+/// A battery, filled.
+fn draw_battery_tile_glyph(canvas: &mut Canvas, cx: f32, cy: f32) {
+    let body = RectF::new(cx - 22.0, cy - 12.0, 40.0, 24.0);
+    canvas.stroke_rrect(body, 6.0, 3.5, WHITE, 1.0);
+    canvas.fill_rrect(RectF::new(cx + 20.0, cy - 5.0, 4.0, 10.0), 2.0, WHITE, 1.0);
+    canvas.fill_rrect(body.inset(5.5), 2.5, WHITE, 1.0);
+}
+
+/// Three stacked disks.
+fn draw_storage_tile_glyph(canvas: &mut Canvas, cx: f32, cy: f32) {
+    for offset in [-12.0, 0.0, 12.0] {
+        canvas.fill_rrect(
+            RectF::new(cx - 20.0, cy + offset - 4.5, 40.0, 9.0),
+            4.5,
+            WHITE,
+            1.0,
+        );
+    }
 }
 
 /// A phone between two vibration marks.
@@ -692,7 +791,6 @@ pub(crate) fn draw_about(canvas: &mut Canvas, system: &SystemInfo, pressed: Opti
         },
     );
     large_title(canvas, "About", 236.0);
-    let right = MARGIN + CARD_WIDTH - 44.0;
 
     // Activity: CPU and GPU meters side by side.
     section_header(canvas, "ACTIVITY", ACTIVITY_Y);
@@ -749,64 +847,11 @@ pub(crate) fn draw_about(canvas: &mut Canvas, system: &SystemInfo, pressed: Opti
         }
     }
 
-    // Storage bar.
-    section_header(canvas, "STORAGE", STORAGE_Y);
-    grouped_card(canvas, card(STORAGE_Y, STORAGE_HEIGHT), 0, None);
-    text::draw(
-        canvas,
-        &format!("{} used", system.storage_used),
-        TEXT_X,
-        STORAGE_Y + 82.0,
-        Weight::SemiBold,
-        LABEL_SIZE,
-        WHITE,
-        1.0,
-    );
-    text::draw_right(
-        canvas,
-        &format!("{} free", system.storage_free),
-        right,
-        STORAGE_Y + 82.0,
-        Weight::Regular,
-        LABEL_SIZE,
-        SECONDARY,
-        SECONDARY_ALPHA,
-    );
-    let bar = RectF::new(TEXT_X, STORAGE_Y + 124.0, CARD_WIDTH - 88.0, 30.0);
-    canvas.fill_rrect(bar, 8.0, TRACK, 1.0);
-    if let Some(fraction) = system.storage_fraction {
-        let used_right = (bar.x + bar.w * fraction.clamp(0.0, 1.0)).round() as i32;
-        canvas.set_clip(0, 0, used_right, canvas.height);
-        canvas.fill_rrect(bar, 8.0, BLUE, 1.0);
-        canvas.reset_clip();
-    }
-    let legend_y = STORAGE_Y + 204.0;
-    canvas.fill_circle(TEXT_X + 10.0, legend_y - 12.0, 10.0, BLUE, 1.0);
-    text::draw(
-        canvas,
-        "Used",
-        TEXT_X + 32.0,
-        legend_y,
-        Weight::Regular,
-        36.0,
-        SECONDARY,
-        SECONDARY_ALPHA,
-    );
-    canvas.fill_circle(TEXT_X + 160.0, legend_y - 12.0, 10.0, TRACK, 1.0);
-    text::draw(
-        canvas,
-        "Free",
-        TEXT_X + 182.0,
-        legend_y,
-        Weight::Regular,
-        36.0,
-        SECONDARY,
-        SECONDARY_ALPHA,
-    );
-
     // About.
     section_header(canvas, "ABOUT", ABOUT_Y);
     let rows = [
+        ("Version", system.version.clone()),
+        ("Build", system.build.clone()),
         ("Device", "Samsung Galaxy A26".to_owned()),
         (
             "Software",
@@ -830,7 +875,7 @@ fn title_case(value: &str) -> String {
     }
 }
 
-fn info_rows(canvas: &mut Canvas, y: f32, rows: &[(&str, String)]) {
+pub(crate) fn info_rows(canvas: &mut Canvas, y: f32, rows: &[(&str, String)]) {
     grouped_card(canvas, card(y, INFO_ROW * rows.len() as f32), 0, None);
     let right = MARGIN + CARD_WIDTH - 44.0;
     for (index, (label, value)) in rows.iter().enumerate() {
@@ -1595,8 +1640,14 @@ mod tests {
             action_at(&app, HEIGHT, wx as i16, wy as i16),
             Some(Action::ShowWifi)
         );
-        assert_eq!(action_at(&app, HEIGHT, 540, 1400), None);
+        // The gap between cards, and Moon's gesture strip.
+        assert_eq!(action_at(&app, HEIGHT, 540, (CARD_D_Y - 35.0) as i16), None);
         assert_eq!(action_at(&app, HEIGHT, 540, 2150), None);
+        let (px, py) = power_row(1).center();
+        assert_eq!(
+            action_at(&app, HEIGHT, px as i16, py as i16),
+            Some(Action::PowerMenu(false))
+        );
 
         app.view = View::Wifi;
         app.networks.push(WifiNetwork {

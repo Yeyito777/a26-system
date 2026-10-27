@@ -34,8 +34,50 @@ pub struct ShellInfo {
     pub auto_lock_s: Option<u32>,
     /// Tap haptics on or off (Moon's `haptics` setting).
     pub haptics: Option<bool>,
+    /// Moon's local time (zone id, TZ rule, 24-hour clock).
+    pub time: Option<TimeInfo>,
     /// What a tapped notification asked an app to show.
     pub open_target: Option<OpenTarget>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimeInfo {
+    pub zone: Option<String>,
+    pub tz: Option<String>,
+    pub clock_24h: bool,
+}
+
+static CLOCK_24H: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The 24-hour clock is on (as of Moon's last state).
+pub fn clock_24h() -> bool {
+    CLOCK_24H.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Follows Moon's local time: its time zone (this process's `TZ`) and its
+/// 24-hour clock. Returns true when anything changed (redraw).
+pub fn apply_time(info: &ShellInfo) -> bool {
+    let Some(time) = &info.time else {
+        return false;
+    };
+    let mut changed =
+        CLOCK_24H.swap(time.clock_24h, std::sync::atomic::Ordering::Relaxed) != time.clock_24h;
+    if let Some(rule) = &time.tz
+        && std::env::var("TZ").ok().as_deref() != Some(rule.as_str())
+    {
+        // SAFETY: the UI thread is the only one that reads the time zone;
+        // the workers never call into the C library's local time.
+        unsafe {
+            std::env::set_var("TZ", rule);
+            tzset();
+        }
+        changed = true;
+    }
+    changed
+}
+
+unsafe extern "C" {
+    fn tzset();
 }
 
 /// Moon's `open_target`: a notification's `open.target` for an app.
@@ -78,6 +120,13 @@ fn parse_shell(response: &str) -> ShellInfo {
         .as_u64()
         .and_then(|v| u32::try_from(v).ok());
     info.haptics = result["settings"]["haptics"].as_bool();
+    if let Some(time) = result.get("time").filter(|t| t.is_object()) {
+        info.time = Some(TimeInfo {
+            zone: time["zone"].as_str().map(str::to_owned),
+            tz: time["tz"].as_str().map(str::to_owned),
+            clock_24h: time["clock_24h"].as_bool().unwrap_or(false),
+        });
+    }
     let open = &result["open_target"];
     if let (Some(app), Some(target), Some(serial)) = (
         open["app"].as_str(),

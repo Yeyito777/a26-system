@@ -442,6 +442,7 @@ mod tests {
             wallpaper: Some("moon".into()),
             auto_lock_s: Some(30),
             haptics: Some(true),
+            time: None,
             open_target: None,
         };
         app

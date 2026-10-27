@@ -67,6 +67,49 @@ pub fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// The time of day as clocks show it: "13:05" with the 24-hour clock (Moon's
+/// setting, `control::clock_24h`), else "1:05 PM".
+pub fn clock_text(hour: u8, minute: u8) -> String {
+    if crate::control::clock_24h() {
+        format!("{hour}:{minute:02}")
+    } else {
+        let (time, half) = alarm_time(hour, minute);
+        format!("{time} {half}")
+    }
+}
+
+/// "Tue, Oct 27, 1:35 AM EST": the local date and time with its zone.
+pub fn local_date_time_text(t: i64) -> String {
+    // SAFETY: localtime_r fills the zeroed tm from a valid time_t; tm_zone
+    // then points at a static zone name (or is null).
+    let (tm, zone) = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let time = t as _;
+        libc::localtime_r(&time, &mut tm);
+        let zone = if tm.tm_zone.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(tm.tm_zone)
+                .to_string_lossy()
+                .into_owned()
+        };
+        (tm, zone)
+    };
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{}, {} {}, {} {zone}",
+        DAYS[tm.tm_wday.clamp(0, 6) as usize],
+        MONTHS[tm.tm_mon.clamp(0, 11) as usize],
+        tm.tm_mday,
+        clock_text(tm.tm_hour as u8, tm.tm_min as u8)
+    )
+    .trim_end()
+    .to_owned()
+}
+
 /// "7:30" and "AM"/"PM".
 pub fn alarm_time(hour: u8, minute: u8) -> (String, &'static str) {
     let display = match hour % 12 {
