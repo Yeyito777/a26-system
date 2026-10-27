@@ -521,7 +521,16 @@ pub fn run(kind: Kind) -> Result<(), Box<dyn Error>> {
                         .and_then(|tap| tap.finish(event.event_x, event.event_y, renderer.height()))
                         && let Some(Hit::Action(action)) = comms_ui::hit(&model, height, x, y, now)
                     {
-                        for request in model.handle(action, now) {
+                        let before = std::mem::discriminant(&model.page);
+                        let opening = matches!(model.page, Page::Threads);
+                        let requests = model.handle(action, now);
+                        if std::mem::discriminant(&model.page) != before
+                            && matches!(model.page, Page::Thread(_) | Page::Threads)
+                        {
+                            // A conversation opening or closing slides.
+                            control::transition(opening);
+                        }
+                        for request in requests {
                             worker.send(request);
                         }
                     }

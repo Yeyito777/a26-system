@@ -30,6 +30,18 @@ pub enum View {
     About,
 }
 
+impl View {
+    /// How deep the page sits (the System page is 0): moving deeper is a
+    /// push, back up a pop.
+    pub fn depth(self) -> u8 {
+        match self {
+            View::System => 0,
+            View::Wifi | View::Clock | View::Display | View::Wallpaper | View::About => 1,
+            View::AutoLock => 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardMode {
     Lower,

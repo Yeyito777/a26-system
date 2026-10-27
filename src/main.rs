@@ -307,7 +307,12 @@ fn perform(
         }
     }
     shell_command(app, action);
+    let page = app.view;
     let requests = app.handle(action);
+    if app.view.depth() != page.depth() && app.password_dialog.is_none() {
+        // Before the new page is drawn: Moon slides it over the old one.
+        control::transition(app.view.depth() > page.depth());
+    }
     dispatch_requests(worker, app, requests);
     sync_keyboard(app, Some(action), keyboard_requested);
 }

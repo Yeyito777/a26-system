@@ -94,6 +94,22 @@ fn parse_shell(response: &str) -> ShellInfo {
     info
 }
 
+/// Tells Moon this app is about to show another page (`push` deeper, else
+/// back). Moon snapshots the page on screen and answers; the app then draws
+/// the new page and Moon slides one over the other (GPU mode; elsewhere it
+/// declines and the page simply changes).
+pub fn transition(push: bool) -> bool {
+    let command: &[u8] = if push {
+        b"transition push\n"
+    } else {
+        b"transition pop\n"
+    };
+    request(&socket(), command)
+        .and_then(|response| serde_json::from_str::<serde_json::Value>(&response).ok())
+        .and_then(|document| document.pointer("/result/started")?.as_bool())
+        .unwrap_or(false)
+}
+
 /// Sends one command to Moon (`brightness set 40`, `settings set ...`).
 /// Returns whether Moon accepted it.
 pub fn send(command: &str) -> bool {
