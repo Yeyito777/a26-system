@@ -104,10 +104,26 @@ pub fn transition(push: bool) -> bool {
     } else {
         b"transition pop\n"
     };
-    request(&socket(), command)
+    let started = request(&socket(), command)
         .and_then(|response| serde_json::from_str::<serde_json::Value>(&response).ok())
         .and_then(|document| document.pointer("/result/started")?.as_bool())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    TRANSITION_DRAWING.store(started, std::sync::atomic::Ordering::Relaxed);
+    started
+}
+
+/// A transition started and the new page has not been reported drawn yet.
+static TRANSITION_DRAWING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// After drawing: tells Moon the new page is on screen (`transition
+/// ready`), so the slide starts with it complete. `synced` runs first: an X
+/// round trip, so the server has drawn everything sent so far.
+pub fn page_drawn(synced: impl FnOnce()) {
+    if TRANSITION_DRAWING.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        synced();
+        send("transition ready");
+    }
 }
 
 /// Sends one command to Moon (`brightness set 40`, `settings set ...`).

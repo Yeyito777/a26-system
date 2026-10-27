@@ -583,6 +583,9 @@ pub fn run(kind: Kind) -> Result<(), Box<dyn Error>> {
         }
         if (redraw || flinging) && running {
             renderer.render(&conn, &model, pressed, now)?;
+            control::page_drawn(|| {
+                let _ = conn.get_input_focus().map(|cookie| cookie.reply());
+            });
             redraw = false;
         }
         let mut deadline = next_shell_poll;

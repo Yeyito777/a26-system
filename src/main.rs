@@ -262,6 +262,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if redraw && running {
             renderer.render(&conn, &system, volume, &app, pressed)?;
+            control::page_drawn(|| {
+                let _ = conn.get_input_focus().map(|cookie| cookie.reply());
+            });
             redraw = false;
         }
 
