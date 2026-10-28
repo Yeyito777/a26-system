@@ -41,9 +41,10 @@ struct Renderer {
     depth: u8,
     canvas: Canvas,
     presenter: Presenter,
-    /// The last chat frame's key and scroll offset (view::chat_frame_key).
-    frame_key: Option<u64>,
-    frame_offset: f32,
+    /// What the last chat frame showed (view::chat_frame), so the next one
+    /// redraws only what changed.
+    chat_frame: Option<view::ChatFrame>,
+    list_frame: Option<view::ListFrame>,
 }
 
 impl Renderer {
@@ -59,8 +60,8 @@ impl Renderer {
             depth,
             canvas: Canvas::new(i32::from(width), i32::from(height)),
             presenter: Presenter::create(conn, window, depth, width, height)?,
-            frame_key: None,
-            frame_offset: 0.0,
+            chat_frame: None,
+            list_frame: None,
         })
     }
 
@@ -74,7 +75,8 @@ impl Renderer {
         self.presenter.destroy(conn);
         self.presenter = presenter;
         self.canvas = Canvas::new(i32::from(width), i32::from(height));
-        self.frame_key = None;
+        self.chat_frame = None;
+        self.list_frame = None;
         Ok(())
     }
 
@@ -186,6 +188,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let mut next_dots = Instant::now();
     let mut running = true;
     let mut redraw = true;
+    let mut was_flinging = false;
 
     // The first frame is drawn before the window maps (as the System app).
     draw_frame(
@@ -518,6 +521,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 view.chat_scroll.step(max, now)
             }
         };
+        // A fling's last step settles the offset (at an edge) without
+        // asking for a frame: draw it.
+        redraw |= was_flinging && !flinging;
+        was_flinging = flinging;
         if model
             .notice
             .as_ref()
@@ -619,6 +626,22 @@ fn perform(
     }
 }
 
+/// A development switch from the environment, read once.
+fn env_flag(name: &'static str) -> bool {
+    use std::sync::OnceLock;
+    static FLAGS: OnceLock<(bool, bool)> = OnceLock::new();
+    let (profile, verify) = FLAGS.get_or_init(|| {
+        (
+            std::env::var_os("EXOCORTEX_APP_PROFILE").is_some(),
+            std::env::var_os("EXOCORTEX_APP_VERIFY").is_some(),
+        )
+    });
+    match name {
+        "EXOCORTEX_APP_PROFILE" => *profile,
+        _ => *verify,
+    }
+}
+
 fn draw_frame(
     conn: &impl Connection,
     renderer: &mut Renderer,
@@ -629,42 +652,76 @@ fn draw_frame(
 ) -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     let height = renderer.height();
-    let key = view::chat_frame_key(model, view, pressed, height);
-    let offset = view.chat_scroll.value(now).round();
-    let same = key.is_some() && key == renderer.frame_key;
-    if same && offset == renderer.frame_offset {
-        // Nothing on screen changed.
-        return Ok(());
-    }
-    // Only the transcript scrolled: move what is drawn, draw what it uncovered.
-    let moved = if same {
-        view::scroll_chat(
-            &mut renderer.canvas,
-            model,
-            view,
-            pressed,
-            height,
-            renderer.frame_offset,
-            offset,
-        )
-    } else {
-        None
+    // Only what changed is drawn and presented when the last frame is known.
+    let chat = view::chat_frame(model, view, pressed, height, now);
+    let list = view::list_frame(model, view, pressed, height, now);
+    let update = match (&renderer.chat_frame, &chat, &renderer.list_frame, &list) {
+        (Some(old), Some(new), _, _) => {
+            view::draw_chat_update(&mut renderer.canvas, model, view, old, new)
+        }
+        (_, _, Some(old), Some(new)) => {
+            view::draw_list_update(&mut renderer.canvas, model, old, new)
+        }
+        _ => None,
     };
-    match moved {
-        Some((y0, y1, dy)) => renderer.presenter.scroll(conn, y0, y1, dy)?,
+    renderer.chat_frame = chat;
+    renderer.list_frame = list;
+    let kind = match update {
+        // Nothing on screen changed.
+        Some(damage) if damage.rows.is_empty() && damage.moved.is_none() => return Ok(()),
+        Some(damage) => {
+            if let Some((y0, y1, dy)) = damage.moved {
+                renderer.presenter.scroll(conn, y0, y1, dy)?;
+            }
+            let drawn = started.elapsed();
+            renderer
+                .presenter
+                .present_rows(conn, &renderer.canvas, 0, &damage.rows)?;
+            if env_flag("EXOCORTEX_APP_VERIFY") {
+                // Development check: the partial frame equals a full one.
+                let mut full = Canvas::new(renderer.canvas.width, renderer.canvas.height);
+                full.clear(crate::ui::BG);
+                view::draw(&mut full, model, view, pressed, now);
+                let width = full.width as usize;
+                let rows: Vec<usize> = (0..full.height as usize)
+                    .filter(|y| {
+                        full.pixels[y * width..(y + 1) * width]
+                            != renderer.canvas.pixels[y * width..(y + 1) * width]
+                    })
+                    .collect();
+                if let Some(&y) = rows.first() {
+                    let row = y * width..(y + 1) * width;
+                    let xs: Vec<usize> = (0..width)
+                        .filter(|x| {
+                            full.pixels[row.start + x] != renderer.canvas.pixels[row.start + x]
+                        })
+                        .collect();
+                    eprintln!(
+                        "exocortex: partial frame differs in {} rows from {y} (x {:?}..{:?}, {} px; full {:06x} partial {:06x}) ({damage:?})",
+                        rows.len(),
+                        xs.first(),
+                        xs.last(),
+                        xs.len(),
+                        full.pixels[row.start + xs[0]],
+                        renderer.canvas.pixels[row.start + xs[0]],
+                    );
+                }
+            }
+            (drawn, "partial")
+        }
         None => {
             renderer.canvas.clear(crate::ui::BG);
             view::draw(&mut renderer.canvas, model, view, pressed, now);
+            let drawn = started.elapsed();
+            renderer.presenter.present(conn, &renderer.canvas, 0)?;
+            (drawn, "full")
         }
-    }
-    renderer.frame_key = key;
-    renderer.frame_offset = offset;
-    let drawn = started.elapsed();
-    renderer.presenter.present(conn, &renderer.canvas, 0)?;
+    };
+    let (drawn, kind) = kind;
     conn.flush()?;
-    if std::env::var_os("EXOCORTEX_APP_PROFILE").is_some() {
+    if env_flag("EXOCORTEX_APP_PROFILE") {
         eprintln!(
-            "exocortex: frame drawn in {:.2} ms, presented in {:.2} ms",
+            "exocortex: frame drawn in {:.2} ms, presented in {:.2} ms ({kind})",
             drawn.as_secs_f64() * 1000.0,
             (started.elapsed() - drawn).as_secs_f64() * 1000.0
         );

@@ -87,7 +87,7 @@ pub enum Hit {
 }
 
 /// Drawing commands of a laid-out piece, relative to its top.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Op {
     Text {
         x: f32,
@@ -109,6 +109,32 @@ enum Op {
         cy: f32,
         open: bool,
     },
+}
+
+/// Vertical positions on a 1/16 pixel grid: then moving a piece by whole
+/// pixels changes no float rounding, so a scrolled frame (rows moved) and a
+/// redrawn one agree to the last bit.
+fn snap(value: f32) -> f32 {
+    (value * 16.0).round() / 16.0
+}
+
+fn quantized(mut laid: Laid) -> Laid {
+    for op in &mut laid.ops {
+        match op {
+            Op::Text { baseline, .. } => *baseline = snap(*baseline),
+            Op::Rect { rect, .. } => {
+                rect.y = snap(rect.y);
+                rect.h = snap(rect.h);
+            }
+            Op::Chevron { cy, .. } => *cy = snap(*cy),
+        }
+    }
+    for (rect, _) in &mut laid.hits {
+        rect.y = snap(rect.y);
+        rect.h = snap(rect.h);
+    }
+    laid.h = snap(laid.h);
+    laid
 }
 
 /// One laid-out transcript piece: its height, drawing and tap targets.
@@ -1086,7 +1112,7 @@ impl ViewState {
     fn cached(&mut self, key: u64, make: impl FnOnce() -> Laid) -> Rc<Laid> {
         self.cache
             .entry(key)
-            .or_insert_with(|| Rc::new(make()))
+            .or_insert_with(|| Rc::new(quantized(make())))
             .clone()
     }
 
@@ -1135,7 +1161,7 @@ impl ViewState {
             ));
         }
         if let Some(error) = &chat.error {
-            pieces.push((2, Rc::new(lay_notice(error, RED, 3))));
+            pieces.push((2, Rc::new(quantized(lay_notice(error, RED, 3)))));
         }
         let mut items = Vec::new();
         let mut used = HashMap::new();
@@ -1315,8 +1341,23 @@ fn effort_chips(efforts: &[String], top: f32) -> Vec<(RectF, String)> {
 
 // ----- Drawing ---------------------------------------------------------------
 
-fn draw_ops(canvas: &mut Canvas, ops: &[Op], dy: f32) {
+/// Rows an op may touch, relative to its piece (generous: glyphs, emoji
+/// and anti-aliasing included).
+fn op_rows(op: &Op) -> (f32, f32) {
+    match op {
+        Op::Text { baseline, size, .. } => (baseline - size * 1.4, baseline + size * 0.7),
+        Op::Rect { rect, .. } => (rect.y - 2.0, rect.y + rect.h + 2.0),
+        Op::Chevron { cy, .. } => (cy - 20.0, cy + 20.0),
+    }
+}
+
+/// Draws the ops of a piece placed at `dy` that can reach rows `clip`.
+fn draw_ops(canvas: &mut Canvas, ops: &[Op], dy: f32, clip: (f32, f32)) {
     for op in ops {
+        let (top, bottom) = op_rows(op);
+        if top + dy >= clip.1 || bottom + dy <= clip.0 {
+            continue;
+        }
         match op {
             Op::Text {
                 x,
@@ -1461,25 +1502,21 @@ fn status_line(canvas: &mut Canvas, model: &Model, y: f32) {
     );
 }
 
-fn draw_list(
+/// The list's rows that fall in rows `clip`, scrolled to `offset`.
+fn draw_list_rows(
     canvas: &mut Canvas,
-    model: &mut Model,
-    view: &mut ViewState,
-    pressed: Option<&Hit>,
-    height: f32,
-    now: Instant,
+    model: &Model,
+    rows: &[Row],
+    pressed: Option<&Action>,
+    clip: (f32, f32),
+    offset: f32,
 ) {
-    let pressed = pressed_action(pressed).cloned();
-    let top = list_top(model);
-    let bottom = list_bottom(height);
-    let folder = model.current_folder().map(str::to_owned);
-    let rows: Vec<Row> = model.sidebar.rows(folder.as_deref()).to_vec();
-    let offset = view.list_scroll.value(now);
-    canvas.set_clip(0, top as i32, W as i32, bottom as i32);
+    let list_top = list_top(model);
+    canvas.set_clip(0, clip.0 as i32, W as i32, clip.1 as i32);
     let today = crate::comms_ui::local_day(crate::clock::unix_now());
     for (index, row) in rows.iter().enumerate() {
-        let y = top + index as f32 * ROW_H - offset;
-        if y + ROW_H < top || y > bottom {
+        let y = list_top + index as f32 * ROW_H - offset;
+        if y + ROW_H < clip.0 || y > clip.1 {
             continue;
         }
         match row {
@@ -1489,7 +1526,7 @@ fn draw_list(
                 count,
                 pinned,
             } => {
-                if pressed == Some(Action::OpenFolder(id.clone())) {
+                if pressed == Some(&Action::OpenFolder(id.clone())) {
                     canvas.fill_rect(0, y as i32, W as i32, ROW_H as i32, ROW_PRESSED, 1.0);
                 }
                 folder_glyph(canvas, INSET + 44.0, y + ROW_H / 2.0);
@@ -1544,7 +1581,7 @@ fn draw_list(
                 let Some(summary) = model.sidebar.conversations.get(id) else {
                     continue;
                 };
-                if pressed == Some(Action::OpenConversation(id.clone())) {
+                if pressed == Some(&Action::OpenConversation(id.clone())) {
                     canvas.fill_rect(0, y as i32, W as i32, ROW_H as i32, ROW_PRESSED, 1.0);
                 }
                 if summary.unread {
@@ -1619,6 +1656,120 @@ fn draw_list(
         }
     }
     canvas.reset_clip();
+}
+
+/// What a list frame showed, so a scroll moves its rows (`draw_list_update`).
+#[derive(Clone, PartialEq)]
+pub struct ListFrame {
+    bounds: (i32, i32),
+    offset: f32,
+    key: u64,
+    pressed: Option<Action>,
+}
+
+/// The current list frame's record, or None on other pages and the sheet.
+pub fn list_frame(
+    model: &Model,
+    view: &ViewState,
+    pressed: Option<&Hit>,
+    height: f32,
+    now: Instant,
+) -> Option<ListFrame> {
+    if model.page != Page::List || model.picker {
+        return None;
+    }
+    let mut key = DefaultHasher::new();
+    (
+        model.sidebar.version,
+        model.sidebar.loaded,
+        &model.folders,
+        model.connected,
+        model.was_connected,
+        height as i32,
+        format!("{pressed:?}"),
+    )
+        .hash(&mut key);
+    Some(ListFrame {
+        bounds: (list_top(model) as i32, list_bottom(height) as i32),
+        offset: view.list_scroll.value(now).round(),
+        key: key.finish(),
+        pressed: pressed_action(pressed).cloned(),
+    })
+}
+
+/// The list frame on `canvas` (drawn for `old`) scrolled to `new`'s offset:
+/// its rows moved, the uncovered strip drawn. None when more changed.
+pub fn draw_list_update(
+    canvas: &mut Canvas,
+    model: &mut Model,
+    old: &ListFrame,
+    new: &ListFrame,
+) -> Option<FrameDamage> {
+    if old.key != new.key || old.bounds != new.bounds {
+        return None;
+    }
+    let (top, bottom) = new.bounds;
+    let shift = (new.offset - old.offset) as i32;
+    if shift == 0 {
+        return Some(FrameDamage::default());
+    }
+    if shift.abs() > (bottom - top) / 2 {
+        return None;
+    }
+    let width = canvas.width as usize;
+    let strip = if shift > 0 {
+        canvas.pixels.copy_within(
+            (top + shift) as usize * width..bottom as usize * width,
+            top as usize * width,
+        );
+        (bottom - shift, bottom)
+    } else {
+        canvas.pixels.copy_within(
+            top as usize * width..(bottom + shift) as usize * width,
+            (top - shift) as usize * width,
+        );
+        (top, top - shift)
+    };
+    canvas.fill_rect(0, strip.0, W as i32, strip.1 - strip.0, BG, 1.0);
+    let folder = model.current_folder().map(str::to_owned);
+    let rows: Vec<Row> = model.sidebar.rows(folder.as_deref()).to_vec();
+    draw_list_rows(
+        canvas,
+        model,
+        &rows,
+        new.pressed.as_ref(),
+        (strip.0 as f32, strip.1 as f32),
+        new.offset,
+    );
+    Some(FrameDamage {
+        moved: Some((top, bottom, -shift)),
+        rows: vec![strip],
+    })
+}
+
+fn draw_list(
+    canvas: &mut Canvas,
+    model: &mut Model,
+    view: &mut ViewState,
+    pressed: Option<&Hit>,
+    height: f32,
+    now: Instant,
+) {
+    let pressed = pressed_action(pressed).cloned();
+    let top = list_top(model);
+    let bottom = list_bottom(height);
+    let folder = model.current_folder().map(str::to_owned);
+    let rows: Vec<Row> = model.sidebar.rows(folder.as_deref()).to_vec();
+    // Whole pixels, so a scrolled frame equals a shifted one.
+    let offset = view.list_scroll.value(now).round();
+    draw_list_rows(
+        canvas,
+        model,
+        &rows,
+        pressed.as_ref(),
+        (top, bottom),
+        offset,
+    );
     if rows.is_empty() {
         let (title, detail) = if !model.sidebar.loaded {
             ("", "")
@@ -1743,7 +1894,7 @@ fn draw_transcript(
                 );
             }
         }
-        draw_ops(canvas, &item.laid.ops, y);
+        draw_ops(canvas, &item.laid.ops, y, clip);
     }
     if model.streaming() {
         // Three dots after the reply while the model works.
@@ -1762,14 +1913,40 @@ fn draw_transcript(
     canvas.reset_clip();
 }
 
-/// Everything a chat frame shows except where its transcript is scrolled:
-/// equal keys and a new offset make a frame `scroll_chat` can shift.
-pub fn chat_frame_key(
+/// What a chat frame showed: enough to draw the next one by changing only
+/// what differs (`draw_chat_update`).
+#[derive(Clone)]
+pub struct ChatFrame {
+    bounds: (i32, i32),
+    height: i32,
+    offset: f32,
+    items: Vec<(f32, Rc<Laid>)>,
+    /// The working dots' phase and their center in content coordinates.
+    dots: Option<(u8, f32)>,
+    pressed: Option<Action>,
+    nav: u64,
+    composer: u64,
+}
+
+/// Rows a frame changed: rows moved inside the presented copy (`y0, y1,
+/// dy`, for `Presenter::scroll`), then rows drawn anew (for
+/// `Presenter::present_rows`).
+#[derive(Debug, Default, PartialEq)]
+pub struct FrameDamage {
+    pub moved: Option<(i32, i32, i32)>,
+    pub rows: Vec<(i32, i32)>,
+}
+
+/// The current chat frame's record, or None when it shows something the
+/// incremental path does not draw (another page, the model sheet, a notice
+/// or connection pill, a loading or empty chat).
+pub fn chat_frame(
     model: &Model,
     view: &mut ViewState,
     pressed: Option<&Hit>,
     height: f32,
-) -> Option<u64> {
+    now: Instant,
+) -> Option<ChatFrame> {
     if model.page != Page::Chat
         || model.picker
         || !model.connected
@@ -1780,64 +1957,178 @@ pub fn chat_frame_key(
         return None;
     }
     view.layout(model);
-    let mut hasher = DefaultHasher::new();
-    view.layout.key.hash(&mut hasher);
-    format!("{pressed:?}").hash(&mut hasher);
-    model.composer.hash(&mut hasher);
-    (view.keyboard, view.dots, model.streaming(), height as i32).hash(&mut hasher);
+    let (top, bottom) = transcript_bounds(model, height, view.keyboard);
+    let mut nav = DefaultHasher::new();
     let selection = model.selection();
-    (selection.provider, selection.model, selection.effort).hash(&mut hasher);
+    (selection.provider, selection.model, selection.effort).hash(&mut nav);
     model
         .open_summary()
         .map(|s| s.display_title().to_owned())
-        .hash(&mut hasher);
-    Some(hasher.finish())
+        .hash(&mut nav);
+    let mut composer = DefaultHasher::new();
+    (&model.composer, view.keyboard, model.streaming()).hash(&mut composer);
+    Some(ChatFrame {
+        bounds: (top as i32, bottom as i32),
+        height: height as i32,
+        offset: view.chat_scroll.value(now).round(),
+        items: view
+            .layout
+            .items
+            .iter()
+            .map(|item| (item.y, item.laid.clone()))
+            .collect(),
+        dots: model
+            .streaming()
+            .then_some((view.dots % 3, view.layout.height - 34.0)),
+        pressed: pressed_action(pressed).cloned(),
+        nav: nav.finish(),
+        composer: composer.finish(),
+    })
 }
 
-/// The frame on `canvas` scrolled from `from` to `to` (whole pixels): the
-/// transcript's rows are moved and only the uncovered strip is drawn.
-/// Returns the moved rows and by how much (for the presenter), or None when
-/// a full redraw is better.
-pub fn scroll_chat(
+/// Where two layouts of one piece start to differ (relative to it), if
+/// anywhere: the top of every op after the first that differs.
+fn first_change(old: &Laid, new: &Laid) -> Option<f32> {
+    let shared = old.ops.len().min(new.ops.len());
+    let first = (0..shared)
+        .find(|&index| old.ops[index] != new.ops[index])
+        .unwrap_or(shared);
+    if first == old.ops.len() && first == new.ops.len() && old.h == new.h {
+        return None;
+    }
+    let top = old.ops[first..]
+        .iter()
+        .chain(&new.ops[first..])
+        .map(|op| op_rows(op).0)
+        .fold(old.h.min(new.h), f32::min);
+    Some(top)
+}
+
+/// Turns the frame on `canvas` (drawn for `old`) into the one for `new` by
+/// moving the transcript's rows as far as it scrolled and drawing only what
+/// changed: the uncovered strip, the transcript from the first change down,
+/// the dots, the bar or the composer. None when a full redraw is needed.
+/// The result is pixel-identical to a full redraw (tested).
+pub fn draw_chat_update(
     canvas: &mut Canvas,
     model: &Model,
     view: &ViewState,
-    pressed: Option<&Hit>,
-    height: f32,
-    from: f32,
-    to: f32,
-) -> Option<(i32, i32, i32)> {
-    let (top, bottom) = transcript_bounds(model, height, view.keyboard);
-    let (top, bottom) = (top as i32, bottom as i32);
-    let shift = (to - from) as i32;
-    if shift == 0 || shift.abs() > (bottom - top) / 2 {
+    old: &ChatFrame,
+    new: &ChatFrame,
+) -> Option<FrameDamage> {
+    if old.bounds != new.bounds || old.height != new.height {
         return None;
     }
-    let width = canvas.width as usize;
-    let (strip, moved) = if shift > 0 {
-        canvas.pixels.copy_within(
-            (top + shift) as usize * width..bottom as usize * width,
-            top as usize * width,
+    let (top, bottom) = new.bounds;
+    let shift = (new.offset - old.offset) as i32;
+    if shift.abs() > (bottom - top) / 2 {
+        return None;
+    }
+    // Content (in transcript coordinates) from which the frames differ.
+    let mut change = f32::INFINITY;
+    for index in 0..old.items.len().max(new.items.len()) {
+        match (old.items.get(index), new.items.get(index)) {
+            (Some((old_y, old_laid)), Some((new_y, new_laid))) if old_y == new_y => {
+                if Rc::ptr_eq(old_laid, new_laid) {
+                    continue;
+                }
+                if let Some(at) = first_change(old_laid, new_laid) {
+                    change = new_y + at;
+                    break;
+                }
+            }
+            (old_item, new_item) => {
+                change = old_item
+                    .map(|(y, _)| *y)
+                    .into_iter()
+                    .chain(new_item.map(|(y, _)| *y))
+                    .fold(f32::INFINITY, f32::min);
+                break;
+            }
+        }
+    }
+    if old.dots != new.dots {
+        for (_, y) in old.dots.iter().chain(&new.dots) {
+            change = change.min(y - 16.0);
+        }
+    }
+    let mut damage = FrameDamage::default();
+    let mut redraw: Vec<(i32, i32)> = Vec::new();
+    if shift != 0 {
+        let width = canvas.width as usize;
+        if shift > 0 {
+            canvas.pixels.copy_within(
+                (top + shift) as usize * width..bottom as usize * width,
+                top as usize * width,
+            );
+            redraw.push((bottom - shift, bottom));
+        } else {
+            canvas.pixels.copy_within(
+                top as usize * width..(bottom + shift) as usize * width,
+                (top - shift) as usize * width,
+            );
+            redraw.push((top, top - shift));
+        }
+        damage.moved = Some((top, bottom, -shift));
+    }
+    if change.is_finite() {
+        let from = (NAV_H + change - new.offset).floor() as i32;
+        if from < bottom {
+            redraw.push((from.max(top), bottom));
+        }
+    }
+    // A row pressed or let go: its highlight's rows.
+    let mut nav_pressed = false;
+    let mut composer_pressed = false;
+    if old.pressed != new.pressed {
+        for action in old.pressed.iter().chain(&new.pressed) {
+            match action {
+                Action::Back | Action::ShowPicker => nav_pressed = true,
+                Action::Send | Action::Abort => composer_pressed = true,
+                _ => {}
+            }
+            for (y, laid) in &new.items {
+                for (rect, hit) in &laid.hits {
+                    if hit == action {
+                        let y0 = (NAV_H + y + rect.y - new.offset).floor() as i32 - 1;
+                        let y1 = (NAV_H + y + rect.y + rect.h - new.offset).ceil() as i32 + 1;
+                        if y1 > top && y0 < bottom {
+                            redraw.push((y0.max(top), y1.min(bottom)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    redraw.sort_unstable();
+    let mut merged: Vec<(i32, i32)> = Vec::new();
+    for (y0, y1) in redraw {
+        match merged.last_mut() {
+            Some(last) if y0 <= last.1 => last.1 = last.1.max(y1),
+            _ => merged.push((y0, y1)),
+        }
+    }
+    for &(y0, y1) in &merged {
+        canvas.fill_rect(0, y0, W as i32, y1 - y0, BG, 1.0);
+        draw_transcript(
+            canvas,
+            model,
+            view,
+            new.pressed.as_ref(),
+            (y0 as f32, y1 as f32),
+            new.offset,
         );
-        ((bottom - shift, bottom), -shift)
-    } else {
-        canvas.pixels.copy_within(
-            top as usize * width..(bottom + shift) as usize * width,
-            (top - shift) as usize * width,
-        );
-        ((top, top - shift), -shift)
-    };
-    canvas.fill_rect(0, strip.0, W as i32, strip.1 - strip.0, BG, 1.0);
-    let pressed = pressed_action(pressed);
-    draw_transcript(
-        canvas,
-        model,
-        view,
-        pressed,
-        (strip.0 as f32, strip.1 as f32),
-        to,
-    );
-    Some((top, bottom, moved))
+    }
+    damage.rows = merged;
+    if old.nav != new.nav || nav_pressed {
+        draw_nav(canvas, model, new.pressed.as_ref());
+        damage.rows.push((0, NAV_H as i32));
+    }
+    if old.composer != new.composer || composer_pressed {
+        draw_composer(canvas, model, view, new.pressed.as_ref(), new.height as f32);
+        damage.rows.push((bottom, new.height));
+    }
+    Some(damage)
 }
 
 fn draw_chat(
@@ -1904,68 +2195,7 @@ fn draw_chat(
         );
     }
     canvas.reset_clip();
-
-    // Navigation bar.
-    canvas.fill_rect(0, 0, W as i32, NAV_H as i32, BG, 1.0);
-    let back_alpha = if pressed_action == Some(Action::Back) {
-        0.4
-    } else {
-        1.0
-    };
-    back_chevron(canvas, MARGIN + 6.0, 72.0);
-    text::draw(
-        canvas,
-        "Chats",
-        MARGIN + 36.0,
-        baseline(72.0, Weight::Regular, 47.0),
-        Weight::Regular,
-        47.0,
-        BLUE,
-        back_alpha,
-    );
-    let title = model
-        .open_summary()
-        .map_or("New Conversation", |s| s.display_title())
-        .to_owned();
-    let title = text::fit(&title, Weight::SemiBold, 44.0, 560.0);
-    text::draw_centered(
-        canvas,
-        &title,
-        W / 2.0 + 40.0,
-        66.0,
-        Weight::SemiBold,
-        44.0,
-        WHITE,
-        1.0,
-    );
-    let selection = model.selection();
-    let mut label = model.model_label(&selection);
-    if !selection.effort.is_empty() {
-        label = format!("{label} · {}", selection.effort);
-    }
-    let picker_alpha = if pressed_action == Some(Action::ShowPicker) {
-        0.4
-    } else {
-        1.0
-    };
-    let label = text::fit(&label, Weight::Medium, 34.0, 520.0);
-    let label_w = text::measure(&label, Weight::Medium, 34.0);
-    let lx = W / 2.0 + 40.0 - (label_w + 30.0) / 2.0;
-    text::draw(
-        canvas,
-        &label,
-        lx,
-        116.0,
-        Weight::Medium,
-        34.0,
-        BLUE,
-        picker_alpha,
-    );
-    let mut caret = Path::new();
-    let cx = lx + label_w + 20.0;
-    caret.stroke_polyline(&[(cx - 9.0, 100.0), (cx, 109.0), (cx + 9.0, 100.0)], 4.5);
-    canvas.fill_path(&caret, BLUE, picker_alpha);
-    canvas.fill_rect(0, NAV_H as i32 - 2, W as i32, 2, SEPARATOR, 1.0);
+    draw_nav(canvas, model, pressed_action.as_ref());
     if !model.connected {
         let message = if model.was_connected {
             "Reconnecting…"
@@ -2002,8 +2232,81 @@ fn draw_chat(
             1.0,
         );
     }
+    draw_composer(canvas, model, view, pressed_action.as_ref(), height);
+}
 
-    // Composer.
+/// The chat's navigation bar: back, title, model.
+fn draw_nav(canvas: &mut Canvas, model: &Model, pressed_action: Option<&Action>) {
+    canvas.fill_rect(0, 0, W as i32, NAV_H as i32, BG, 1.0);
+    let back_alpha = if pressed_action == Some(&Action::Back) {
+        0.4
+    } else {
+        1.0
+    };
+    back_chevron(canvas, MARGIN + 6.0, 72.0);
+    text::draw(
+        canvas,
+        "Chats",
+        MARGIN + 36.0,
+        baseline(72.0, Weight::Regular, 47.0),
+        Weight::Regular,
+        47.0,
+        BLUE,
+        back_alpha,
+    );
+    let title = model
+        .open_summary()
+        .map_or("New Conversation", |s| s.display_title())
+        .to_owned();
+    let title = text::fit(&title, Weight::SemiBold, 44.0, 560.0);
+    text::draw_centered(
+        canvas,
+        &title,
+        W / 2.0 + 40.0,
+        66.0,
+        Weight::SemiBold,
+        44.0,
+        WHITE,
+        1.0,
+    );
+    let selection = model.selection();
+    let mut label = model.model_label(&selection);
+    if !selection.effort.is_empty() {
+        label = format!("{label} · {}", selection.effort);
+    }
+    let picker_alpha = if pressed_action == Some(&Action::ShowPicker) {
+        0.4
+    } else {
+        1.0
+    };
+    let label = text::fit(&label, Weight::Medium, 34.0, 520.0);
+    let label_w = text::measure(&label, Weight::Medium, 34.0);
+    let lx = W / 2.0 + 40.0 - (label_w + 30.0) / 2.0;
+    text::draw(
+        canvas,
+        &label,
+        lx,
+        116.0,
+        Weight::Medium,
+        34.0,
+        BLUE,
+        picker_alpha,
+    );
+    let mut caret = Path::new();
+    let cx = lx + label_w + 20.0;
+    caret.stroke_polyline(&[(cx - 9.0, 100.0), (cx, 109.0), (cx + 9.0, 100.0)], 4.5);
+    canvas.fill_path(&caret, BLUE, picker_alpha);
+    canvas.fill_rect(0, NAV_H as i32 - 2, W as i32, 2, SEPARATOR, 1.0);
+}
+
+/// The composer: its field, text, caret, and the send or stop button.
+fn draw_composer(
+    canvas: &mut Canvas,
+    model: &Model,
+    view: &ViewState,
+    pressed_action: Option<&Action>,
+    height: f32,
+) {
     let geometry = composer(model, height, view.keyboard);
     canvas.fill_rect(
         0,
@@ -2069,7 +2372,7 @@ fn draw_chat(
     let (sx, sy) = geometry.send;
     let typed = !model.composer.trim().is_empty();
     if model.streaming() && !typed {
-        let down = pressed_action == Some(Action::Abort);
+        let down = pressed_action == Some(&Action::Abort);
         canvas.fill_circle(sx, sy, SEND_R, 0x3a3a3c, if down { 0.6 } else { 1.0 });
         canvas.fill_rrect(
             RectF::new(sx - 16.0, sy - 16.0, 32.0, 32.0),
@@ -2078,7 +2381,7 @@ fn draw_chat(
             1.0,
         );
     } else {
-        let down = pressed_action == Some(Action::Send);
+        let down = pressed_action == Some(&Action::Send);
         let alpha = if !typed || !model.connected {
             0.35
         } else if down {
@@ -2546,29 +2849,190 @@ mod tests {
         assert!(canvas.pixels.contains(&BLUE));
     }
 
-    #[test]
-    fn a_shifted_frame_equals_a_redrawn_one() {
+    /// Draws the frame, applies `change`, updates the frame incrementally,
+    /// and checks it against a full redraw and that nothing outside the
+    /// damage changed (what the presenter skips comparing).
+    fn update_matches(
+        model: &mut Model,
+        view: &mut ViewState,
+        height: f32,
+        change: impl FnOnce(&mut Model, &mut ViewState),
+    ) -> FrameDamage {
+        update_matches_with(model, view, height, None, None, change)
+    }
+
+    fn update_matches_with(
+        model: &mut Model,
+        view: &mut ViewState,
+        height: f32,
+        before: Option<&Hit>,
+        after: Option<&Hit>,
+        change: impl FnOnce(&mut Model, &mut ViewState),
+    ) -> FrameDamage {
         let now = Instant::now();
+        let mut canvas = Canvas::new(1080, height as i32);
+        canvas.clear(BG);
+        draw(&mut canvas, model, view, before, now);
+        let old = chat_frame(model, view, before, height, now).expect("a chat frame");
+        let mut shadow = canvas.pixels.clone();
+        change(model, view);
+        let new = chat_frame(model, view, after, height, now).expect("a chat frame");
+        let damage = draw_chat_update(&mut canvas, model, view, &old, &new).expect("incremental");
+        let mut full = Canvas::new(1080, height as i32);
+        full.clear(BG);
+        draw(&mut full, model, view, after, now);
+        assert!(
+            full.pixels == canvas.pixels,
+            "incremental frame differs: {damage:?}"
+        );
+        let width = 1080;
+        if let Some((y0, y1, dy)) = damage.moved {
+            let rows = y1 - y0 - dy.abs();
+            let (src, dst) = if dy > 0 { (y0, y0 + dy) } else { (y0 - dy, y0) };
+            shadow.copy_within(
+                (src * width) as usize..((src + rows) * width) as usize,
+                (dst * width) as usize,
+            );
+        }
+        for y in 0..height as i32 {
+            if damage.rows.iter().any(|(y0, y1)| (*y0..*y1).contains(&y)) {
+                continue;
+            }
+            let row = (y * width) as usize..((y + 1) * width) as usize;
+            assert!(
+                shadow[row.clone()] == canvas.pixels[row],
+                "row {y} changed outside the damage"
+            );
+        }
+        damage
+    }
+
+    fn long_chat(height: f32) -> (Model, ViewState) {
         let mut model = chat_model();
         model.handle(Action::ToggleExpanded("group:t0".into()));
+        model.handle(Action::ToggleExpanded("tool:t1".into()));
+        model.handle(Action::ToggleExpanded("tool:t2".into()));
         let mut view = ViewState::new();
-        let height = 900.0;
         let max = view.chat_max(&model, height);
-        assert!(max > 200.0, "the transcript must scroll: {max}");
-        let mut shifted = Canvas::new(1080, height as i32);
-        view.chat_scroll.offset = 40.0;
-        shifted.clear(BG);
-        draw(&mut shifted, &mut model, &mut view, None, now);
-        let key = chat_frame_key(&model, &mut view, None, height);
-        for to in [97.0, 60.0, 180.0] {
-            let from = view.chat_scroll.offset;
-            view.chat_scroll.offset = to;
-            assert_eq!(chat_frame_key(&model, &mut view, None, height), key);
-            assert!(scroll_chat(&mut shifted, &model, &view, None, height, from, to).is_some());
+        assert!(max > 300.0, "the transcript must scroll: {max}");
+        view.chat_scroll.offset = 120.0;
+        (model, view)
+    }
+
+    #[test]
+    fn a_scrolled_frame_equals_a_redrawn_one() {
+        let height = 900.0;
+        let (mut model, mut view) = long_chat(height);
+        for to in [177.0, 140.0, 260.0, 200.0, 20.0] {
+            let damage = update_matches(&mut model, &mut view, height, |_, view| {
+                view.chat_scroll.offset = to;
+            });
+            assert!(damage.moved.is_some());
+            let redrawn: i32 = damage.rows.iter().map(|(a, b)| b - a).sum();
+            assert!(redrawn <= 200, "only the uncovered strip: {damage:?}");
+        }
+        // Unchanged: nothing to draw.
+        let damage = update_matches(&mut model, &mut view, height, |_, _| {});
+        assert_eq!(damage, FrameDamage::default());
+    }
+
+    #[test]
+    fn streaming_typing_and_the_bar_update_only_what_changed() {
+        let height = 900.0;
+        let (mut model, mut view) = long_chat(height);
+        let now = Instant::now();
+        for line in [
+            r#"{"type":"streaming_started","convId":"c","provider":"a","model":"m","startedAt":7}"#,
+            r#"{"type":"text_chunk","convId":"c","text":"A reply that **grows**, word by word, "}"#,
+        ] {
+            model.apply(parse_event(line), now);
+        }
+        view.chat_scroll.offset = view.chat_max(&model, height);
+        for chunk in [
+            "and wraps onto",
+            " a second line with `code`,",
+            " then\n\n- a list",
+        ] {
+            let damage = update_matches(&mut model, &mut view, height, |model, view| {
+                model.apply(
+                    parse_event(&format!(
+                        r#"{{"type":"text_chunk","convId":"c","text":"{}"}}"#,
+                        chunk.replace('\n', "\\n")
+                    )),
+                    now,
+                );
+                // Following the newest line, as the app does.
+                view.chat_scroll.offset = view.chat_max(model, height);
+            });
+            let redrawn: i32 = damage.rows.iter().map(|(a, b)| b - a).sum();
+            assert!(redrawn < 400, "only the reply's end: {damage:?}");
+        }
+        update_matches(&mut model, &mut view, height, |_, view| view.dots += 1);
+        // Pressing a tool row, the back button and the stop button.
+        let mut previous: Option<Hit> = None;
+        for pressed in [
+            Some(Hit::Action(Action::ToggleExpanded("tool:t1".into()))),
+            Some(Hit::Action(Action::Back)),
+            Some(Hit::Action(Action::Abort)),
+            None,
+        ] {
+            let damage = update_matches_with(
+                &mut model,
+                &mut view,
+                height,
+                previous.as_ref(),
+                pressed.as_ref(),
+                |_, _| {},
+            );
+            if pressed == Some(Hit::Action(Action::Back)) {
+                assert!(damage.rows.contains(&(0, NAV_H as i32)));
+            }
+            previous = pressed;
+        }
+        let damage = update_matches(&mut model, &mut view, height, |model, _| {
+            model.composer.push('h');
+        });
+        assert!(damage.moved.is_none() && damage.rows.len() == 1);
+        update_matches(&mut model, &mut view, height, |model, _| {
+            model.apply(
+                parse_event(r#"{"type":"conversation_updated","summary":{"id":"c","provider":"anthropic","model":"m","effort":"high","title":"Renamed","pinned":false,"sortOrder":0,"streaming":true,"unread":false}}"#),
+                now,
+            );
+        });
+    }
+
+    #[test]
+    fn a_scrolled_list_equals_a_redrawn_one() {
+        let now = Instant::now();
+        let mut model = Model::new();
+        model.on_connected();
+        let rows: Vec<String> = (0..30)
+            .map(|i| format!(r#"{{"id":"c{i}","provider":"anthropic","model":"m","title":"Conversation {i}","pinned":{},"sortOrder":{i},"streaming":{},"unread":{}}}"#, i < 2, i % 7 == 0, i % 3 == 0))
+            .collect();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversations_list","conversations":[{}],"folders":[]}}"#,
+                rows.join(",")
+            )),
+            now,
+        );
+        let mut view = ViewState::new();
+        let height = 2216.0;
+        let mut canvas = Canvas::new(1080, height as i32);
+        canvas.clear(BG);
+        view.list_scroll.offset = 100.0;
+        draw(&mut canvas, &mut model, &mut view, None, now);
+        for to in [161.0, 140.0, 900.0, 600.0] {
+            let old = list_frame(&model, &view, None, height, now).unwrap();
+            view.list_scroll.offset = to;
+            let new = list_frame(&model, &view, None, height, now).unwrap();
+            let damage =
+                draw_list_update(&mut canvas, &mut model, &old, &new).expect("incremental");
+            assert_eq!(damage.rows.len(), 1);
             let mut full = Canvas::new(1080, height as i32);
             full.clear(BG);
             draw(&mut full, &mut model, &mut view, None, now);
-            assert!(full.pixels == shifted.pixels, "frame at {to} differs");
+            assert!(full.pixels == canvas.pixels, "list frame at {to} differs");
         }
     }
 

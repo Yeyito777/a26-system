@@ -37,6 +37,9 @@ pub struct Presenter {
     /// Pixmap areas changed server-side (`scroll`) that the window still
     /// has to get with the next present.
     moved: Vec<Damage>,
+    /// Rows the server holds that `shadow` does not (moved there by
+    /// `scroll`): uploaded, not compared, when next presented.
+    stale: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,12 +74,14 @@ impl Presenter {
             valid: false,
             scratch: Vec::new(),
             moved: Vec::new(),
+            stale: vec![false; height as usize],
         })
     }
 
     /// Forgets what the server holds, forcing the next frame to upload fully.
     pub fn invalidate(&mut self) {
         self.valid = false;
+        self.moved.clear();
     }
 
     /// Moves rows `y0..y1` of the presented frame by `dy` inside the server's
@@ -107,11 +112,9 @@ impl Presenter {
             self.width as u16,
             rows as u16,
         )?;
-        let width = self.width as usize;
-        self.shadow.copy_within(
-            src as usize * width..(src + rows) as usize * width,
-            dst as usize * width,
-        );
+        // Rather than moving the shadow too (megabytes per frame), the
+        // moved rows are no longer known to match it.
+        self.stale[dst as usize..(dst + rows) as usize].fill(true);
         self.moved.push(Damage {
             x0: 0,
             y0: dst,
@@ -134,9 +137,25 @@ impl Presenter {
         canvas: &Canvas,
         window_y: i32,
     ) -> Result<Option<Damage>, Box<dyn Error>> {
+        let all = [(0, self.height)];
+        self.present_rows(conn, canvas, window_y, &all)
+    }
+
+    /// `present`, comparing only rows `rows` (each `y0..y1`): the caller
+    /// knows the canvas changed nowhere else since the last present (beyond
+    /// what `scroll` moved). An added fast path, not in Moon's copy.
+    pub fn present_rows<C: Connection>(
+        &mut self,
+        conn: &C,
+        canvas: &Canvas,
+        window_y: i32,
+        rows: &[(i32, i32)],
+    ) -> Result<Option<Damage>, Box<dyn Error>> {
         if canvas.width != self.width || canvas.height != self.height {
             return Err("canvas size does not match presenter".into());
         }
+        let all = [(0, self.height)];
+        let rows = if self.valid { rows } else { &all[..] };
         let width = self.width as usize;
         let chunks = width.div_ceil(CHUNK);
         let mut dirty = vec![false; chunks];
@@ -144,66 +163,75 @@ impl Presenter {
         // Damage rectangles still growing downward, merged across bands.
         let mut open: Vec<Damage> = Vec::new();
         let mut closed: Vec<Damage> = Vec::new();
-        let mut band_y = 0;
-        while band_y < self.height {
-            let band_end = (band_y + BAND_ROWS).min(self.height);
-            dirty.fill(!self.valid);
-            if self.valid {
-                for y in band_y..band_end {
-                    let start = y as usize * width;
-                    let new = &canvas.pixels[start..start + width];
-                    let old = &self.shadow[start..start + width];
-                    if new == old {
-                        continue;
-                    }
-                    for (chunk, flag) in dirty.iter_mut().enumerate() {
-                        if *flag {
+        for &(y0, y1) in rows {
+            let (y0, y1) = (y0.clamp(0, self.height), y1.clamp(0, self.height));
+            let mut band_y = y0;
+            while band_y < y1 {
+                let band_end = (band_y + BAND_ROWS).min(y1);
+                let stale = self.stale[band_y as usize..band_end as usize]
+                    .iter()
+                    .any(|row| *row);
+                dirty.fill(!self.valid || stale);
+                if self.valid && !stale {
+                    for y in band_y..band_end {
+                        let start = y as usize * width;
+                        let new = &canvas.pixels[start..start + width];
+                        let old = &self.shadow[start..start + width];
+                        if new == old {
                             continue;
                         }
-                        let a = chunk * CHUNK;
-                        let b = (a + CHUNK).min(width);
-                        *flag = new[a..b] != old[a..b];
+                        for (chunk, flag) in dirty.iter_mut().enumerate() {
+                            if *flag {
+                                continue;
+                            }
+                            let a = chunk * CHUNK;
+                            let b = (a + CHUNK).min(width);
+                            *flag = new[a..b] != old[a..b];
+                        }
                     }
                 }
-            }
-            runs.clear();
-            let mut chunk = 0;
-            while chunk < chunks {
-                if !dirty[chunk] {
-                    chunk += 1;
-                    continue;
+                runs.clear();
+                let mut chunk = 0;
+                while chunk < chunks {
+                    if !dirty[chunk] {
+                        chunk += 1;
+                        continue;
+                    }
+                    let first = chunk;
+                    // Bridge single clean chunks to keep the request count low.
+                    while chunk < chunks
+                        && (dirty[chunk] || (chunk + 1 < chunks && dirty[chunk + 1]))
+                    {
+                        chunk += 1;
+                    }
+                    let x0 = (first * CHUNK) as i32;
+                    let x1 = ((chunk * CHUNK).min(width)) as i32;
+                    runs.push((x0, x1));
                 }
-                let first = chunk;
-                // Bridge single clean chunks to keep the request count low.
-                while chunk < chunks && (dirty[chunk] || (chunk + 1 < chunks && dirty[chunk + 1])) {
-                    chunk += 1;
+                self.stale[band_y as usize..band_end as usize].fill(false);
+                let mut still_open = Vec::with_capacity(runs.len());
+                for &(x0, x1) in &runs {
+                    self.upload(conn, canvas, x0, band_y, x1, band_end)?;
+                    if let Some(position) = open
+                        .iter()
+                        .position(|d| d.x0 == x0 && d.x1 == x1 && d.y1 == band_y)
+                    {
+                        let mut grown = open.swap_remove(position);
+                        grown.y1 = band_end;
+                        still_open.push(grown);
+                    } else {
+                        still_open.push(Damage {
+                            x0,
+                            y0: band_y,
+                            x1,
+                            y1: band_end,
+                        });
+                    }
                 }
-                let x0 = (first * CHUNK) as i32;
-                let x1 = ((chunk * CHUNK).min(width)) as i32;
-                runs.push((x0, x1));
+                closed.append(&mut open);
+                open = still_open;
+                band_y = band_end;
             }
-            let mut still_open = Vec::with_capacity(runs.len());
-            for &(x0, x1) in &runs {
-                self.upload(conn, canvas, x0, band_y, x1, band_end)?;
-                if let Some(position) = open
-                    .iter()
-                    .position(|d| d.x0 == x0 && d.x1 == x1 && d.y1 == band_y)
-                {
-                    let mut grown = open.swap_remove(position);
-                    grown.y1 = band_end;
-                    still_open.push(grown);
-                } else {
-                    still_open.push(Damage {
-                        x0,
-                        y0: band_y,
-                        x1,
-                        y1: band_end,
-                    });
-                }
-            }
-            closed.append(&mut open);
-            open = still_open;
-            band_y = band_end;
         }
         closed.append(&mut open);
         closed.append(&mut self.moved);

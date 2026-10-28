@@ -31,6 +31,8 @@ pub struct Sidebar {
     pub loaded: bool,
     /// Rows by folder, rebuilt after any change.
     rows: HashMap<Option<String>, Vec<Row>>,
+    /// Bumped on every change (the list view's redraw key).
+    pub version: u64,
 }
 
 fn order(pinned: bool, sort: f64) -> (bool, f64) {
@@ -40,6 +42,7 @@ fn order(pinned: bool, sort: f64) -> (bool, f64) {
 impl Sidebar {
     fn changed(&mut self) {
         self.rows.clear();
+        self.version = self.version.wrapping_add(1);
     }
 
     pub fn apply(&mut self, event: &Event) -> bool {

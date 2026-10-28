@@ -59,10 +59,21 @@ daemon buffered the broadcasts it could not read, and a new connection drops
 them and brings the list up to date.
 
 Drawing is the System app's CPU canvas and `Presenter`. Layout is cached per
-history entry, so a streaming reply lays out only itself. Scrolling a
-conversation moves its rows on the canvas and, with `Presenter::scroll`, in
-the server's pixmap, and draws only the strip the move uncovered; a test
-checks that this frame equals a full redraw.
+history entry, so a streaming reply lays out only itself, and every vertical
+position is snapped to 1/16 px so that moving drawn pixels by whole rows gives
+exactly what drawing them there would. A frame is drawn incrementally when
+the last one is known (`view::ChatFrame`, `ListFrame`): a scroll moves the
+transcript's (or list's) rows on the canvas and, with `Presenter::scroll`,
+in the server's pixmap, then draws only the uncovered strip; a reply that
+grows, a press, the working dots, the bar and the composer redraw only
+their rows (from the first op of the reply that changed). The presenter then
+compares and uploads only those rows (`Presenter::present_rows`); rows moved
+on the server are marked stale rather than moved in its shadow too, and are
+uploaded, not compared, when next drawn. Tests check each kind of
+incremental frame against a full redraw, pixel for pixel, and that nothing
+changed outside its damage. `EXOCORTEX_APP_VERIFY=1` makes the app check
+every incremental frame against a full redraw at run time and log any
+difference (development only: it costs a full draw per frame).
 
 ## Notifications: `exocortex-notify`
 
@@ -149,7 +160,8 @@ soon as it is.
 | `A26_SHELL_SOCKET` | `/run/a26-shell/control.sock` | both (Moon's state, keyboard, transitions, leases) |
 | `MOON_NOTIFY_SOCKET` | `/run/moon-notify/notify.sock` | both |
 | `MOON_FONTS` | `/opt/a26-shell/share/fonts` | the app (fallback glyphs) |
-| `EXOCORTEX_APP_PROFILE` | unset | the app: logs each frame's draw and present time |
+| `EXOCORTEX_APP_PROFILE` | unset | the app: logs each frame's draw and present time, and whether it was full or partial |
+| `EXOCORTEX_APP_VERIFY` | unset | the app: checks each partial frame against a full redraw (slow; development) |
 
 The bridge logs connections and the conversations it notifies for (never
 their text) to stderr.
