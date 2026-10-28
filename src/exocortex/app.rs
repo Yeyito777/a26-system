@@ -203,6 +203,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     while running {
         let now = Instant::now();
         let before_depth = page_depth(&model);
+        let before_folders = model.folders.len();
         let before_start = (
             model.chat.id.clone(),
             model.chat.start,
@@ -450,7 +451,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // A page change slides (Moon snapshots the old page first).
         let after_depth = page_depth(&model);
         if after_depth != before_depth {
-            if after_depth > before_depth {
+            // Each folder level opens at its top (one scroll serves them
+            // all); back from a chat, the list is where it was.
+            if model.folders.len() != before_folders {
                 view.list_scroll.reset();
             }
             if model.page == Page::Chat {
@@ -595,6 +598,8 @@ fn perform(
     let depth = page_depth(model);
     match &action {
         Action::Send => view.follow = true,
+        // The tapped row stays under the finger as it opens.
+        Action::ToggleExpanded(_) => view.follow = false,
         Action::ShowPicker => view.sheet_scroll.reset(),
         Action::Back if *keyboard => {
             control::hide_keyboard();

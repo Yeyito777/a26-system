@@ -632,7 +632,8 @@ fn main() {
             if alive && revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
                 // Answers are not needed: a refused post is logged, not retried.
                 let result = socket.read_lines(|text| {
-                    if text.contains("\"ok\":false") {
+                    // Withdrawing what is already gone is not news.
+                    if text.contains("\"ok\":false") && !text.contains("\"not_found\"") {
                         log(&format!("moon-notifyd refused: {text}"));
                     }
                 });
