@@ -6,6 +6,7 @@ mod comms;
 mod comms_ui;
 mod control;
 mod display_ui;
+mod exocortex;
 mod general_ui;
 mod gfx;
 mod keys;
@@ -94,10 +95,12 @@ impl TapTracker {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let kind = parse_arguments()?;
+    let app = parse_arguments()?;
     disable_process_dumps()?;
-    if let Some(kind) = kind {
-        return comms::run(kind);
+    match app {
+        AppKind::Comms(kind) => return comms::run(kind),
+        AppKind::Exocortex => return exocortex::app::run(),
+        AppKind::System => {}
     }
 
     let (conn, screen_number) = RustConnection::connect(None)?;
@@ -641,22 +644,32 @@ fn intern_atom(conn: &RustConnection, name: &[u8]) -> Result<u32, Box<dyn Error>
     Ok(conn.intern_atom(false, name)?.reply()?.atom)
 }
 
+enum AppKind {
+    System,
+    Comms(comms::Kind),
+    Exocortex,
+}
+
 /// No arguments: the System app; `--app phone|messages`: Phone or
-/// Messages (comms.rs).
-fn parse_arguments() -> Result<Option<comms::Kind>, Box<dyn Error>> {
+/// Messages (comms.rs); `--app exocortex`: the Exocortex app.
+fn parse_arguments() -> Result<AppKind, Box<dyn Error>> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     match arguments.as_slice() {
-        [] => Ok(None),
+        [] => Ok(AppKind::System),
         [flag] if matches!(flag.as_str(), "--help" | "-h") => {
-            println!("usage: {APP_NAME} [--app phone|messages]");
+            println!("usage: {APP_NAME} [--app phone|messages|exocortex]");
             std::process::exit(0);
         }
+        [flag, app] if flag == "--app" && app == "exocortex" => Ok(AppKind::Exocortex),
         [flag, app] if flag == "--app" && comms::Kind::parse(app).is_some() => {
-            Ok(comms::Kind::parse(app))
+            Ok(AppKind::Comms(comms::Kind::parse(app).expect("checked")))
         }
         // Never echo arbitrary argv: credentials are not accepted here, and an
         // accidental secret-shaped argument must not be copied to diagnostics.
-        _ => Err(format!("unexpected argument; usage: {APP_NAME} [--app phone|messages]").into()),
+        _ => Err(format!(
+            "unexpected argument; usage: {APP_NAME} [--app phone|messages|exocortex]"
+        )
+        .into()),
     }
 }
 

@@ -796,7 +796,7 @@ fn wrap(text_in: &str, width: f32) -> Vec<String> {
 }
 
 /// (year, day of year) in local time.
-fn local_day(t: i64) -> (i32, i32) {
+pub(crate) fn local_day(t: i64) -> (i32, i32) {
     let tm = local(t);
     (tm.tm_year, tm.tm_yday)
 }
@@ -827,7 +827,7 @@ const WEEKDAYS: [&str; 7] = [
 
 /// iOS list times: "4:12 PM" today, "Yesterday", a weekday this week, else
 /// the date.
-fn when_text(t: i64, today: (i32, i32)) -> String {
+pub(crate) fn when_text(t: i64, today: (i32, i32)) -> String {
     let tm = local(t);
     let days = if tm.tm_year == today.0 {
         today.1 - tm.tm_yday

@@ -7,6 +7,7 @@ BINARY="$PROJECT_ROOT/target/$TARGET/release/a26-system"
 WIFI_BINARY="$PROJECT_ROOT/target/$TARGET/release/a26-wifi-service"
 WIFI_CTL="$PROJECT_ROOT/target/$TARGET/release/a26-wifi-ctl"
 SYSTEM_CTL="$PROJECT_ROOT/target/$TARGET/release/a26-systemctl"
+EXOCORTEX_NOTIFY="$PROJECT_ROOT/target/$TARGET/release/exocortex-notify"
 
 for command in cargo rustup aarch64-linux-musl-gcc python3 readelf; do
     if ! command -v "$command" >/dev/null 2>&1; then
@@ -21,7 +22,7 @@ python3 scripts/prepare-assets.py
 scripts/check.sh
 cargo build --locked --release --target "$TARGET"
 
-for executable in "$BINARY" "$WIFI_BINARY" "$WIFI_CTL" "$SYSTEM_CTL"; do
+for executable in "$BINARY" "$WIFI_BINARY" "$WIFI_CTL" "$SYSTEM_CTL" "$EXOCORTEX_NOTIFY"; do
     if readelf -l "$executable" | grep -q 'Requesting program interpreter'; then
         echo "build is dynamically linked; expected a static musl executable: $executable" >&2
         exit 1
@@ -33,3 +34,4 @@ echo "  ${BINARY#"$PROJECT_ROOT/"}"
 echo "  ${WIFI_BINARY#"$PROJECT_ROOT/"}"
 echo "  ${WIFI_CTL#"$PROJECT_ROOT/"}"
 echo "  ${SYSTEM_CTL#"$PROJECT_ROOT/"}"
+echo "  ${EXOCORTEX_NOTIFY#"$PROJECT_ROOT/"}"

@@ -77,11 +77,24 @@ talk to `moon-telephonyd` (OSS-Phone-V1 `docs/telephony-protocol.md`;
 say plainly when there is no SIM or no service. Calls themselves are Moon's
 call screen; see OSS-Phone-V1 `docs/telephony-ui.md`.
 
+## Exocortex
+
+`a26-system --app exocortex` is a client for the user's Exocortex daemon
+(`EXOCORTEX_SOCKET`, else `/opt/exocortex/config/runtime/exocortexd.sock`):
+the conversation list with its folders, pinned conversations first, a
+conversation's history (paged as it scrolls) and its streaming reply as
+markdown, tool calls folded to rows, new conversations, a model and effort
+sheet, and a composer on Moon's keyboard. `exocortex-notify`, a separate
+always-running bridge, posts a Moon notification when a conversation's turn
+finishes (not while the app shows that conversation) and holds Moon's lease
+while a turn runs. See [`docs/exocortex.md`](docs/exocortex.md).
+
 ## Repository layout
 
 ```text
-assets/                     System icon source and generated BGRX pixels
+assets/                     icon sources and generated BGRX pixels, fonts
 scripts/prepare-assets.py   deterministic PNG-to-BGRX conversion
+scripts/draw-exocortex-icon.py  draws the Exocortex icon source
 scripts/check.sh            host format, test, clippy, and debug-build checks
 scripts/build.sh            checked static aarch64 musl release build
 scripts/install.sh          build, pinned package, and ADB installation
@@ -90,12 +103,15 @@ scripts/wifi-start.sh        start the native Wi-Fi supervisor over root ADB
 scripts/wifi-stop.sh         stop native Wi-Fi before restoring Android
 scripts/phone/               DHCP routing/DNS and offline package installers
 src/                        X11 UI, Wi-Fi backend, telemetry, controls, and font
+src/exocortex/              the Exocortex app (protocol, link, model, view)
+src/bin/exocortex-notify.rs the Exocortex notification bridge
 wifi-packages/               pinned Alpine package sources and SHA-256 manifest
 docs/system-view.png        capture of the separately managed app on-device
 docs/wifi-backend-protocol.md  root-only backend contract and secret rules
+docs/exocortex.md           the Exocortex app and its notification bridge
 ```
 
-`assets/system-app.bgrx` is exactly 220x220 pixels, four bytes per pixel in
+`assets/system-app.bgrx` (and `exocortex-app.bgrx`) is exactly 220x220 pixels, four bytes per pixel in
 B,G,R,X byte order. It is committed so the launcher can consume it directly.
 The PNG is the editable/source asset.
 
@@ -155,10 +171,12 @@ Within the Linux root filesystem rooted at `/data/local/a26-linux`, it installs:
 - `/opt/a26-system/bin/a26-wifi-service`
 - `/opt/a26-system/bin/a26-wifi-ctl`
 - `/opt/a26-system/bin/a26-systemctl`
+- `/opt/a26-system/bin/exocortex-notify`
 - `/opt/a26-system/libexec/a26-udhcpc.script`
 - `/opt/a26-system/libexec/a26-wifi-start`
 - `/opt/a26-system/libexec/a26-wifi-stop`
 - `/opt/a26-system/share/system-app.bgrx`
+- `/opt/a26-system/share/exocortex-app.bgrx`
 
 It also installs the pinned Alpine 3.24 `wpa_supplicant`, `iw`, and required
 libraries from verified APKs. Installation does **not** activate or restart the
