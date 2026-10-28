@@ -1,0 +1,620 @@
+//! The Exocortex app's event loop: X input, the daemon link and Moon's
+//! state, one `poll(2)` for all of them. It draws only when something
+//! changed (or a fling, the working dots, a notice ends), and never waits
+//! on the daemon: that is the link thread's job.
+
+use std::error::Error;
+use std::os::fd::AsRawFd;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use x11rb::connection::Connection;
+use x11rb::protocol::Event as XEvent;
+use x11rb::protocol::xproto::{ConnectionExt as _, Window};
+
+use crate::control::{self, KeyboardPurpose, ShellInfo};
+use crate::gfx::Canvas;
+use crate::keys::{KeyInput, KeyMap};
+use crate::present::Presenter;
+
+use super::handoff;
+use super::line::{self, Waker};
+use super::link::{DaemonLink, LinkEvent};
+use super::model::{Action, Model, Page};
+use super::proto;
+use super::view::{self, Hit, ScrollArea, ViewState};
+
+/// How long a notice ("Message not sent") stays.
+const NOTICE_FOR: Duration = Duration::from_secs(4);
+/// While in front, Moon's state (a tapped notification's target) is read
+/// this often.
+const SHELL_POLL: Duration = Duration::from_secs(1);
+/// Back from the background after this long: reconnect, so the daemon drops
+/// what it buffered for the frozen app and the list is current.
+const STALE_AFTER: Duration = Duration::from_secs(20);
+const DOTS_EVERY: Duration = Duration::from_millis(420);
+
+struct Renderer {
+    window: Window,
+    depth: u8,
+    canvas: Canvas,
+    presenter: Presenter,
+}
+
+impl Renderer {
+    fn new<C: Connection>(
+        conn: &C,
+        window: Window,
+        depth: u8,
+        width: u16,
+        height: u16,
+    ) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            window,
+            depth,
+            canvas: Canvas::new(i32::from(width), i32::from(height)),
+            presenter: Presenter::create(conn, window, depth, width, height)?,
+        })
+    }
+
+    fn resize<C: Connection>(
+        &mut self,
+        conn: &C,
+        width: u16,
+        height: u16,
+    ) -> Result<(), Box<dyn Error>> {
+        let presenter = Presenter::create(conn, self.window, self.depth, width, height)?;
+        self.presenter.destroy(conn);
+        self.presenter = presenter;
+        self.canvas = Canvas::new(i32::from(width), i32::from(height));
+        Ok(())
+    }
+
+    fn size(&self) -> (u16, u16) {
+        (self.canvas.width as u16, self.canvas.height as u16)
+    }
+
+    fn height(&self) -> f32 {
+        self.canvas.height as f32
+    }
+}
+
+/// Reads Moon's state off the UI thread when asked.
+struct ShellReader {
+    requests: Sender<()>,
+    results: Receiver<ShellInfo>,
+    waker: Arc<Waker>,
+    busy: bool,
+}
+
+impl ShellReader {
+    fn spawn() -> std::io::Result<Self> {
+        let waker = Arc::new(Waker::new()?);
+        let (request_tx, request_rx) = mpsc::channel::<()>();
+        let (result_tx, result_rx) = mpsc::channel();
+        let wake = waker.clone();
+        thread::Builder::new()
+            .name("exocortex-shell".into())
+            .spawn(move || {
+                while request_rx.recv().is_ok() {
+                    if result_tx.send(control::read_shell()).is_err() {
+                        return;
+                    }
+                    wake.wake();
+                }
+            })?;
+        Ok(Self {
+            requests: request_tx,
+            results: result_rx,
+            waker,
+            busy: false,
+        })
+    }
+
+    fn ask(&mut self) {
+        if !self.busy && self.requests.send(()).is_ok() {
+            self.busy = true;
+        }
+    }
+
+    fn take(&mut self) -> Option<ShellInfo> {
+        self.waker.drain();
+        let mut latest = None;
+        while let Ok(info) = self.results.try_recv() {
+            latest = Some(info);
+            self.busy = false;
+        }
+        latest
+    }
+}
+
+fn withdraw_notification(conversation: String) {
+    // Best effort: moon-notifyd may be absent (Android, a host).
+    let _ = thread::Builder::new()
+        .name("exocortex-withdraw".into())
+        .spawn(move || {
+            let _ = handoff::withdraw(&conversation);
+        });
+}
+
+/// The height taps are judged against: Moon keeps the bottom of the screen
+/// for its home gesture, but with its keyboard up the window ends above it.
+fn tap_height(renderer: &Renderer, view: &ViewState) -> u16 {
+    renderer.size().1 + if view.keyboard { 400 } else { 0 }
+}
+
+fn page_depth(model: &Model) -> usize {
+    match model.page {
+        Page::List => model.folders.len(),
+        Page::Chat => 100,
+    }
+}
+
+pub fn run() -> Result<(), Box<dyn Error>> {
+    let (conn, screen_number) = x11rb::rust_connection::RustConnection::connect(None)?;
+    let screen = &conn.setup().roots[screen_number];
+    let (window, protocols) = crate::create_window(&conn, screen, handoff::APP_ID)?;
+    let key_map = KeyMap::query(&conn)?;
+    let mut renderer = Renderer::new(
+        &conn,
+        window,
+        screen.root_depth,
+        crate::REQUESTED_WIDTH,
+        crate::REQUESTED_HEIGHT,
+    )?;
+    let link = DaemonLink::spawn(proto::socket_path())?;
+    let mut shell = ShellReader::spawn()?;
+    let mut model = Model::new();
+    let mut view = ViewState::new();
+    let mut tap: Option<crate::TapTracker> = None;
+    let mut pressed: Option<Hit> = None;
+    let mut dragging: Option<ScrollArea> = None;
+    let mut seen_target: Option<u64> = None;
+    let mut shown: Option<Option<String>> = None;
+    let mut keyboard_requested = false;
+    let mut mapped = false;
+    let mut unmapped_at: Option<Instant> = None;
+    let mut next_shell_poll = Instant::now();
+    let mut next_dots = Instant::now();
+    let mut running = true;
+    let mut redraw = true;
+
+    // The first frame is drawn before the window maps (as the System app).
+    draw_frame(
+        &conn,
+        &mut renderer,
+        &mut model,
+        &mut view,
+        pressed.as_ref(),
+        Instant::now(),
+    )?;
+    conn.map_window(window)?;
+    conn.flush()?;
+    shell.ask();
+
+    while running {
+        let now = Instant::now();
+        let before_depth = page_depth(&model);
+        let before_start = (
+            model.chat.id.clone(),
+            model.chat.start,
+            model.chat.start_block,
+        );
+        let before_height = if model.page == Page::Chat {
+            view.content_height(&model)
+        } else {
+            0.0
+        };
+
+        // Daemon events.
+        for event in link.drain() {
+            match event {
+                LinkEvent::Connected => {
+                    for command in model.on_connected() {
+                        link.send(command);
+                    }
+                }
+                LinkEvent::Disconnected => model.on_disconnected(),
+                LinkEvent::Event(event) => {
+                    for command in model.apply(*event, now) {
+                        link.send(command);
+                    }
+                }
+            }
+            redraw = true;
+        }
+
+        // Moon's state: a tapped notification's target.
+        if let Some(info) = shell.take() {
+            redraw |= control::apply_time(&info);
+            if let Some(open) = info.open_target
+                && open.app == handoff::APP_ID
+                && seen_target != Some(open.serial)
+            {
+                seen_target = Some(open.serial);
+                // A target younger than 10 s is still wanted: a notification
+                // just started (or brought forward) the app for it.
+                if open.age_ms < 10_000 {
+                    if model.page == Page::List {
+                        control::transition(true);
+                    }
+                    for command in model.open_target(&open.target) {
+                        link.send(command);
+                    }
+                    view.chat_scroll.reset();
+                    view.follow = true;
+                    redraw = true;
+                }
+            }
+        }
+
+        // X events.
+        while let Some(event) = conn.poll_for_event()? {
+            let now = Instant::now();
+            match event {
+                XEvent::Expose(event) if event.window == window && event.count == 0 => {
+                    renderer.presenter.expose(&conn, 0)?;
+                    conn.flush()?;
+                }
+                XEvent::ConfigureNotify(event) if event.window == window => {
+                    if (event.width, event.height) != renderer.size() {
+                        renderer.resize(&conn, event.width, event.height)?;
+                        // Moon shrinks the window above its keyboard.
+                        view.keyboard =
+                            keyboard_requested && event.height < crate::REQUESTED_HEIGHT - 300;
+                        redraw = true;
+                    }
+                }
+                XEvent::MapNotify(event) if event.window == window => {
+                    mapped = true;
+                    if unmapped_at
+                        .take()
+                        .is_some_and(|at| now.duration_since(at) > STALE_AFTER)
+                    {
+                        link.reconnect();
+                    }
+                    shell.ask();
+                    next_shell_poll = now + SHELL_POLL;
+                    redraw = true;
+                }
+                XEvent::UnmapNotify(event) if event.window == window => {
+                    mapped = false;
+                    unmapped_at = Some(now);
+                }
+                XEvent::ButtonPress(event) if event.event == window && event.detail == 1 => {
+                    tap = crate::TapTracker::new(
+                        event.event_x,
+                        event.event_y,
+                        tap_height(&renderer, &view),
+                    );
+                    if tap.is_some() {
+                        let height = renderer.height();
+                        let y = f32::from(event.event_y);
+                        dragging = view::scroll_area(&model, &view, height, y);
+                        match dragging {
+                            Some(ScrollArea::List) => view.list_scroll.begin(y, now),
+                            Some(ScrollArea::Chat) => view.chat_scroll.begin(y, now),
+                            Some(ScrollArea::Sheet) => view.sheet_scroll.begin(y, now),
+                            None => {}
+                        }
+                        pressed = view::hit(
+                            &mut model,
+                            &mut view,
+                            height,
+                            event.event_x,
+                            event.event_y,
+                            now,
+                        )
+                        .filter(|hit| matches!(hit, Hit::Action(_)));
+                        redraw = true;
+                    }
+                }
+                XEvent::MotionNotify(event) if event.event == window => {
+                    if let Some(tap) = &mut tap {
+                        tap.observe(event.event_x, event.event_y);
+                        if tap.moved {
+                            pressed = None;
+                            let height = renderer.height();
+                            let y = f32::from(event.event_y);
+                            match dragging {
+                                Some(ScrollArea::List) => {
+                                    let max = view::list_max(&mut model, height);
+                                    view.list_scroll.moved(y, max, now);
+                                }
+                                Some(ScrollArea::Chat) => {
+                                    let max = view.chat_max(&model, height);
+                                    view.chat_scroll.moved(y, max, now);
+                                    view.follow = false;
+                                    if keyboard_requested {
+                                        // Dragging the transcript puts the keyboard away.
+                                        control::hide_keyboard();
+                                        keyboard_requested = false;
+                                        view.keyboard = false;
+                                    }
+                                }
+                                Some(ScrollArea::Sheet) => {
+                                    let max = view::sheet_max(&model, height);
+                                    view.sheet_scroll.moved(y, max, now);
+                                }
+                                None => {}
+                            }
+                            redraw = true;
+                        }
+                    }
+                }
+                XEvent::ButtonRelease(event) if event.event == window && event.detail == 1 => {
+                    let height = renderer.height();
+                    match dragging.take() {
+                        Some(ScrollArea::List) => {
+                            let max = view::list_max(&mut model, height);
+                            view.list_scroll.end(max, now);
+                        }
+                        Some(ScrollArea::Chat) => {
+                            let max = view.chat_max(&model, height);
+                            view.chat_scroll.end(max, now);
+                        }
+                        Some(ScrollArea::Sheet) => {
+                            let max = view::sheet_max(&model, height);
+                            view.sheet_scroll.end(max, now);
+                        }
+                        None => {}
+                    }
+                    pressed = None;
+                    if let Some((x, y)) = tap.take().and_then(|tap| {
+                        tap.finish(event.event_x, event.event_y, tap_height(&renderer, &view))
+                    }) && let Some(hit) = view::hit(&mut model, &mut view, height, x, y, now)
+                    {
+                        match hit {
+                            Hit::Action(action) => {
+                                perform(
+                                    &link,
+                                    &mut model,
+                                    &mut view,
+                                    action,
+                                    &mut keyboard_requested,
+                                );
+                            }
+                            Hit::Composer => {
+                                let visible = control::show_keyboard(KeyboardPurpose::Text);
+                                keyboard_requested = visible;
+                                view.follow = true;
+                            }
+                            Hit::Transcript => {
+                                if keyboard_requested {
+                                    control::hide_keyboard();
+                                    keyboard_requested = false;
+                                    view.keyboard = false;
+                                }
+                            }
+                            Hit::SheetBackdrop => {
+                                model.handle(Action::HidePicker);
+                            }
+                        }
+                    }
+                    redraw = true;
+                }
+                XEvent::KeyPress(event) if event.event == window => {
+                    if model.page == Page::Chat
+                        && !model.picker
+                        && let Some(input) = key_map.decode(event.detail, event.state)
+                    {
+                        match input {
+                            KeyInput::Character(character) => model.composer.push(character),
+                            KeyInput::Backspace => {
+                                model.composer.pop();
+                            }
+                            KeyInput::Enter => {
+                                perform(
+                                    &link,
+                                    &mut model,
+                                    &mut view,
+                                    Action::Send,
+                                    &mut keyboard_requested,
+                                );
+                                // Moon puts its keyboard away on Return; a chat keeps it.
+                                if keyboard_requested {
+                                    keyboard_requested =
+                                        control::show_keyboard(KeyboardPurpose::Text);
+                                }
+                            }
+                        }
+                        view.follow = true;
+                        redraw = true;
+                    }
+                }
+                XEvent::ClientMessage(event)
+                    if event.window == window
+                        && event.type_ == protocols.wm_protocols
+                        && event.data.as_data32()[0] == protocols.wm_delete_window =>
+                {
+                    running = false;
+                }
+                XEvent::DestroyNotify(event) if event.window == window => running = false,
+                _ => {}
+            }
+        }
+
+        let now = Instant::now();
+        let height = renderer.height();
+
+        // A page change slides (Moon snapshots the old page first).
+        let after_depth = page_depth(&model);
+        if after_depth != before_depth {
+            if after_depth > before_depth {
+                view.list_scroll.reset();
+            }
+            if model.page == Page::Chat {
+                view.chat_scroll.reset();
+                view.follow = true;
+            }
+            redraw = true;
+        }
+
+        // Tell the bridge what is shown; withdraw what the user now sees.
+        let showing = model.shown_conversation().map(str::to_owned);
+        if shown.as_ref() != Some(&showing) {
+            if let Some(id) = &showing {
+                withdraw_notification(id.clone());
+            }
+            let _ = handoff::write_view(showing.as_deref());
+            shown = Some(showing);
+        }
+        if model.page != Page::Chat && keyboard_requested {
+            control::hide_keyboard();
+            keyboard_requested = false;
+            view.keyboard = false;
+        }
+
+        // Keep the transcript where the user left it.
+        if model.page == Page::Chat {
+            let height_now = view.content_height(&model);
+            let older_added = before_start.0 == model.chat.id
+                && (model.chat.start, model.chat.start_block) < (before_start.1, before_start.2);
+            if older_added && !view.follow {
+                let delta = height_now - before_height;
+                view.chat_scroll.shift(delta);
+            }
+            let max = view.chat_max(&model, height);
+            if view.follow && !view.chat_scroll.dragging() {
+                view.chat_scroll.reset();
+                view.chat_scroll.offset = max;
+            } else if !view.chat_scroll.dragging()
+                && view.chat_scroll.value(now) >= max - 40.0
+                && max > 0.0
+            {
+                view.follow = true;
+            }
+            if view.near_top(now) {
+                for command in model.load_older() {
+                    link.send(command);
+                }
+            }
+        }
+
+        let flinging = match (model.picker, model.page) {
+            (true, _) => {
+                let max = view::sheet_max(&model, height);
+                view.sheet_scroll.step(max, now)
+            }
+            (false, Page::List) => {
+                let max = view::list_max(&mut model, height);
+                view.list_scroll.step(max, now)
+            }
+            (false, Page::Chat) => {
+                let max = view.chat_max(&model, height);
+                view.chat_scroll.step(max, now)
+            }
+        };
+        if model
+            .notice
+            .as_ref()
+            .is_some_and(|(_, at)| now.duration_since(*at) >= NOTICE_FOR)
+        {
+            model.notice = None;
+            redraw = true;
+        }
+        let animating = mapped && model.page == Page::Chat && model.streaming();
+        if animating && now >= next_dots {
+            view.dots = view.dots.wrapping_add(1);
+            next_dots = now + DOTS_EVERY;
+            redraw = true;
+        }
+        if mapped && now >= next_shell_poll {
+            shell.ask();
+            next_shell_poll = now + SHELL_POLL;
+        }
+
+        if (redraw || flinging) && running {
+            draw_frame(
+                &conn,
+                &mut renderer,
+                &mut model,
+                &mut view,
+                pressed.as_ref(),
+                now,
+            )?;
+            control::page_drawn(|| {
+                let _ = conn.get_input_focus().map(|cookie| cookie.reply());
+            });
+            redraw = false;
+        }
+
+        // Sleep until X input, a daemon event, Moon's answer or a deadline.
+        let mut deadline: Option<Instant> = None;
+        let mut soonest = |at: Instant| deadline = Some(deadline.map_or(at, |d| d.min(at)));
+        if mapped {
+            soonest(next_shell_poll);
+        }
+        if flinging {
+            soonest(now + Duration::from_millis(8));
+        }
+        if animating {
+            soonest(next_dots);
+        }
+        if let Some((_, at)) = &model.notice {
+            soonest(*at + NOTICE_FOR);
+        }
+        let timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+        conn.flush()?;
+        let mut fds = [
+            line::pollfd(conn.stream().as_raw_fd(), libc::POLLIN),
+            line::pollfd(link.fd(), libc::POLLIN),
+            line::pollfd(shell.waker.fd(), libc::POLLIN),
+        ];
+        line::poll(&mut fds, timeout)?;
+    }
+
+    if keyboard_requested {
+        control::hide_keyboard();
+    }
+    handoff::clear_view();
+    renderer.presenter.destroy(&conn);
+    let _ = conn.flush();
+    Ok(())
+}
+
+fn perform(
+    link: &DaemonLink,
+    model: &mut Model,
+    view: &mut ViewState,
+    action: Action,
+    keyboard: &mut bool,
+) {
+    let depth = page_depth(model);
+    match &action {
+        Action::Send => view.follow = true,
+        Action::ShowPicker => view.sheet_scroll.reset(),
+        Action::Back if *keyboard => {
+            control::hide_keyboard();
+            *keyboard = false;
+            view.keyboard = false;
+        }
+        _ => {}
+    }
+    let commands = model.handle(action);
+    let after = page_depth(model);
+    if after != depth {
+        // Before the new page is drawn: Moon slides it over the old one.
+        control::transition(after > depth);
+    }
+    for command in commands {
+        link.send(command);
+    }
+}
+
+fn draw_frame(
+    conn: &impl Connection,
+    renderer: &mut Renderer,
+    model: &mut Model,
+    view: &mut ViewState,
+    pressed: Option<&Hit>,
+    now: Instant,
+) -> Result<(), Box<dyn Error>> {
+    renderer.canvas.clear(crate::ui::BG);
+    view::draw(&mut renderer.canvas, model, view, pressed, now);
+    renderer.presenter.present(conn, &renderer.canvas, 0)?;
+    conn.flush()?;
+    Ok(())
+}

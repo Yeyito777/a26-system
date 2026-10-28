@@ -184,6 +184,18 @@ impl Scroll {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+
+    /// Moves the content under the finger or fling by `delta` (content was
+    /// added above what is shown).
+    pub fn shift(&mut self, delta: f32) {
+        self.offset += delta;
+        if let Some((_, from)) = &mut self.drag {
+            *from += delta;
+        }
+        if let Some((_, from, _)) = &mut self.fling {
+            *from += delta;
+        }
+    }
 }
 
 pub struct CommsModel {

@@ -1,7 +1,8 @@
 //! Vendored from Moon (OSS-Phone-V1 `src/a26-shell/src`); keep in sync.
 #![allow(dead_code)]
 //! Anti-aliased text using the embedded Inter typeface (SIL OFL 1.1, see
-//! `assets/fonts/OFL.txt`), with fallbacks for everything Inter lacks so a
+//! `assets/fonts/OFL.txt`; this copy adds Inter Italic and JetBrains Mono,
+//! `OFL-JetBrainsMono.txt`, for the Exocortex app), with fallbacks for everything Inter lacks so a
 //! message never shows a '?': Noto Sans (Latin extended, Greek, Cyrillic,
 //! Vietnamese), Noto Sans Symbols 2, Symbols and Math, and Noto Color Emoji (colour
 //! bitmaps; ZWJ sequences, skin tones, keycaps and flags through its
@@ -32,9 +33,13 @@ pub enum Weight {
     DisplayLight,
     DisplayMedium,
     DisplaySemiBold,
+    /// Inter Italic (emphasis in the Exocortex app's markdown).
+    Italic,
+    /// JetBrains Mono NL (code in the Exocortex app's markdown).
+    Mono,
 }
 
-const WEIGHTS: [Weight; 7] = [
+const WEIGHTS: [Weight; 9] = [
     Weight::Regular,
     Weight::Medium,
     Weight::SemiBold,
@@ -42,6 +47,8 @@ const WEIGHTS: [Weight; 7] = [
     Weight::DisplayLight,
     Weight::DisplayMedium,
     Weight::DisplaySemiBold,
+    Weight::Italic,
+    Weight::Mono,
 ];
 
 fn font_bytes(weight: Weight) -> &'static [u8] {
@@ -53,6 +60,8 @@ fn font_bytes(weight: Weight) -> &'static [u8] {
         Weight::DisplayLight => include_bytes!("../assets/fonts/InterDisplay-Light.ttf"),
         Weight::DisplayMedium => include_bytes!("../assets/fonts/InterDisplay-Medium.ttf"),
         Weight::DisplaySemiBold => include_bytes!("../assets/fonts/InterDisplay-SemiBold.ttf"),
+        Weight::Italic => include_bytes!("../assets/fonts/Inter-Italic.ttf"),
+        Weight::Mono => include_bytes!("../assets/fonts/JetBrainsMonoNL-Regular.ttf"),
     }
 }
 
