@@ -41,6 +41,9 @@ struct Renderer {
     depth: u8,
     canvas: Canvas,
     presenter: Presenter,
+    /// The last chat frame's key and scroll offset (view::chat_frame_key).
+    frame_key: Option<u64>,
+    frame_offset: f32,
 }
 
 impl Renderer {
@@ -56,6 +59,8 @@ impl Renderer {
             depth,
             canvas: Canvas::new(i32::from(width), i32::from(height)),
             presenter: Presenter::create(conn, window, depth, width, height)?,
+            frame_key: None,
+            frame_offset: 0.0,
         })
     }
 
@@ -69,6 +74,7 @@ impl Renderer {
         self.presenter.destroy(conn);
         self.presenter = presenter;
         self.canvas = Canvas::new(i32::from(width), i32::from(height));
+        self.frame_key = None;
         Ok(())
     }
 
@@ -218,9 +224,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 LinkEvent::Disconnected => model.on_disconnected(),
                 LinkEvent::Event(event) => {
+                    redraw |= model.affects_view(&event);
                     for command in model.apply(*event, now) {
                         link.send(command);
                     }
+                    continue;
                 }
             }
             redraw = true;
@@ -526,7 +534,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             next_shell_poll = now + SHELL_POLL;
         }
 
-        if (redraw || flinging) && running {
+        // Hidden (in the background, perhaps leased awake), nothing is drawn:
+        // MapNotify draws what changed meanwhile.
+        if (redraw || flinging) && running && mapped {
             draw_frame(
                 &conn,
                 &mut renderer,
@@ -612,9 +622,47 @@ fn draw_frame(
     pressed: Option<&Hit>,
     now: Instant,
 ) -> Result<(), Box<dyn Error>> {
-    renderer.canvas.clear(crate::ui::BG);
-    view::draw(&mut renderer.canvas, model, view, pressed, now);
+    let started = Instant::now();
+    let height = renderer.height();
+    let key = view::chat_frame_key(model, view, pressed, height);
+    let offset = view.chat_scroll.value(now).round();
+    let same = key.is_some() && key == renderer.frame_key;
+    if same && offset == renderer.frame_offset {
+        // Nothing on screen changed.
+        return Ok(());
+    }
+    // Only the transcript scrolled: move what is drawn, draw what it uncovered.
+    let moved = if same {
+        view::scroll_chat(
+            &mut renderer.canvas,
+            model,
+            view,
+            pressed,
+            height,
+            renderer.frame_offset,
+            offset,
+        )
+    } else {
+        None
+    };
+    match moved {
+        Some((y0, y1, dy)) => renderer.presenter.scroll(conn, y0, y1, dy)?,
+        None => {
+            renderer.canvas.clear(crate::ui::BG);
+            view::draw(&mut renderer.canvas, model, view, pressed, now);
+        }
+    }
+    renderer.frame_key = key;
+    renderer.frame_offset = offset;
+    let drawn = started.elapsed();
     renderer.presenter.present(conn, &renderer.canvas, 0)?;
     conn.flush()?;
+    if std::env::var_os("EXOCORTEX_APP_PROFILE").is_some() {
+        eprintln!(
+            "exocortex: frame drawn in {:.2} ms, presented in {:.2} ms",
+            drawn.as_secs_f64() * 1000.0,
+            (started.elapsed() - drawn).as_secs_f64() * 1000.0
+        );
+    }
     Ok(())
 }

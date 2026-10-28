@@ -27,7 +27,7 @@ trap cleanup EXIT
 # (OSS-Phone-V1's install-all.sh builds them on a host with the musl
 # toolchain) and are already in target/ and assets/.
 if [[ "${A26_SYSTEM_PREBUILT:-0}" == 1 ]]; then
-    for name in a26-system a26-wifi-service a26-wifi-ctl a26-systemctl; do
+    for name in a26-system a26-wifi-service a26-wifi-ctl a26-systemctl exocortex-notify; do
         [[ -x "$PROJECT_ROOT/target/$TARGET/release/$name" ]] || {
             echo "A26_SYSTEM_PREBUILT=1 but target/$TARGET/release/$name is missing" >&2
             exit 1
@@ -44,7 +44,9 @@ cp "$PROJECT_ROOT/target/$TARGET/release/a26-system" "$HOST_STAGE/a26-system"
 cp "$PROJECT_ROOT/target/$TARGET/release/a26-wifi-service" "$HOST_STAGE/a26-wifi-service"
 cp "$PROJECT_ROOT/target/$TARGET/release/a26-wifi-ctl" "$HOST_STAGE/a26-wifi-ctl"
 cp "$PROJECT_ROOT/target/$TARGET/release/a26-systemctl" "$HOST_STAGE/a26-systemctl"
+cp "$PROJECT_ROOT/target/$TARGET/release/exocortex-notify" "$HOST_STAGE/exocortex-notify"
 cp "$PROJECT_ROOT/assets/system-app.bgrx" "$HOST_STAGE/system-app.bgrx"
+cp "$PROJECT_ROOT/assets/exocortex-app.bgrx" "$HOST_STAGE/exocortex-app.bgrx"
 cp "$PROJECT_ROOT/scripts/phone/a26-udhcpc.script" "$HOST_STAGE/a26-udhcpc.script"
 cp "$PROJECT_ROOT/scripts/phone/a26-wifi-start" "$HOST_STAGE/a26-wifi-start"
 cp "$PROJECT_ROOT/scripts/phone/a26-wifi-stop" "$HOST_STAGE/a26-wifi-stop"
@@ -73,7 +75,7 @@ chown -R 0:0 \"\$stage\"
 chmod 0700 \"\$stage\" \"\$stage/wifi-packages\"
 find \"\$stage\" -type f -exec chmod 0600 {} \\;
 test -z \"\$(find \"\$stage\" -type l -print -quit)\"
-test \"\$(find \"\$stage\" -type f | wc -l)\" -eq 16
+test \"\$(find \"\$stage\" -type f | wc -l)\" -eq 18
 cd \"\$stage\"
 sha256sum -c MANIFEST.sha256
 
@@ -88,16 +90,18 @@ chmod 0700 \"\$root/tmp/a26-install-wifi-packages.sh\"
 
 dest=\"\$root/opt/a26-system\"
 mkdir -p \"\$dest/bin\" \"\$dest/share\" \"\$dest/libexec\"
-for name in a26-system a26-wifi-service a26-wifi-ctl a26-systemctl; do
+for name in a26-system a26-wifi-service a26-wifi-ctl a26-systemctl exocortex-notify; do
     cp \"\$stage/\$name\" \"\$dest/bin/\$name.new\"
     chown 0:0 \"\$dest/bin/\$name.new\"
     chmod 0755 \"\$dest/bin/\$name.new\"
     mv -f \"\$dest/bin/\$name.new\" \"\$dest/bin/\$name\"
 done
-cp \"\$stage/system-app.bgrx\" \"\$dest/share/system-app.bgrx.new\"
-chown 0:0 \"\$dest/share/system-app.bgrx.new\"
-chmod 0644 \"\$dest/share/system-app.bgrx.new\"
-mv -f \"\$dest/share/system-app.bgrx.new\" \"\$dest/share/system-app.bgrx\"
+for icon in system-app.bgrx exocortex-app.bgrx; do
+    cp \"\$stage/\$icon\" \"\$dest/share/\$icon.new\"
+    chown 0:0 \"\$dest/share/\$icon.new\"
+    chmod 0644 \"\$dest/share/\$icon.new\"
+    mv -f \"\$dest/share/\$icon.new\" \"\$dest/share/\$icon\"
+done
 for name in a26-udhcpc.script a26-wifi-start a26-wifi-stop; do
     cp \"\$stage/\$name\" \"\$dest/libexec/\$name.new\"
     chown 0:0 \"\$dest/libexec/\$name.new\"
@@ -113,4 +117,4 @@ mv -f /data/local/tmp/a26-wifi-cleanup-android.sh.new \
 rm -rf \"\$pkg\" \"\$root/tmp/a26-install-wifi-packages.sh\" \"\$stage\"'"
 
 "$PROJECT_ROOT/scripts/integrate-native-session.sh"
-echo "installed a26-system and native Wi-Fi support (service activation unchanged)"
+echo "installed a26-system (System, Phone, Messages, Exocortex), exocortex-notify and native Wi-Fi support (service activation unchanged)"

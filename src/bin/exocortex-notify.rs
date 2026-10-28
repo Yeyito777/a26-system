@@ -1,7 +1,8 @@
 //! `exocortex-notify`: posts Moon notifications for the Exocortex daemon.
 //!
-//! It stays connected to the daemon (a plain client that asks for no
-//! bootstrap, so it only hears the broadcasts every client gets) and to
+//! It stays connected to the daemon (a plain client whose bootstrap asks for
+//! a first page of no rows, so it learns which conversations stream, then
+//! only hears the broadcasts every client gets) and to
 //! `moon-notifyd`, and sleeps in `poll(2)` between events. When a top-level
 //! conversation's turn chain ends with the owner waiting on it
 //! (`ownerTurnFinished`), or its goal stops and needs them, it reads the
@@ -11,9 +12,13 @@
 //! The notification is withdrawn when the conversation is read anywhere or
 //! deleted (the app withdraws it itself when it opens it).
 //!
-//! Both peers come and go: the daemon restarts, moon-notifyd is absent in
-//! Android mode. Each reconnects with backoff; posts wait (newest per
-//! conversation, at most 12 h) until moon-notifyd is there.
+//! While any conversation streams (subagents too) it holds Moon's
+//! `transfer` lease for `exocortex`, renewed every minute, so turning the
+//! screen off does not deep-suspend the phone under a running turn.
+//!
+//! Its peers come and go: the daemon restarts, moon-notifyd and Moon are
+//! absent in Android mode. Each is retried with backoff; posts wait (newest
+//! per conversation, at most 12 h) until moon-notifyd is there.
 
 #[path = "../exocortex/handoff.rs"]
 mod handoff;
@@ -24,7 +29,7 @@ mod markdown;
 #[path = "../exocortex/proto.rs"]
 mod proto;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -32,12 +37,20 @@ use serde_json::{Value, json};
 use line::LineSocket;
 use proto::{Block, Entry, Event, Summary};
 
-const CAPABILITIES: [&str; 4] = [
+/// Compact sidebar deltas, and an incremental bootstrap whose first page
+/// holds every conversation showing activity (which ones stream).
+const CAPABILITIES: [&str; 5] = [
     "token-stats-on-demand",
     "sidebar-state-patch",
     "sidebar-reorder-delta",
     "targeted-unwind",
+    "sidebar-incremental",
 ];
+/// The lease Moon grants (its maximum), and how often it is renewed.
+const LEASE_SECONDS: u64 = 120;
+const LEASE_RENEW: Duration = Duration::from_secs(60);
+/// Moon is absent (Android mode, a restart): ask again this much later.
+const LEASE_RETRY: Duration = Duration::from_secs(15);
 const DAEMON_BACKOFF: [u64; 7] = [500, 1000, 2000, 4000, 8000, 15000, 30000];
 const NOTIFY_BACKOFF: [u64; 6] = [1000, 2000, 5000, 10000, 30000, 60000];
 const POST_TTL: Duration = Duration::from_secs(12 * 3600);
@@ -74,6 +87,8 @@ struct Bridge<F: FnMut(&str) -> bool> {
     known: HashMap<String, Known>,
     /// Reply fetches in flight: request id → conversation and title.
     fetches: HashMap<String, (String, String)>,
+    /// Conversations streaming now (any, subagents included).
+    streaming: HashSet<String>,
     next_request: u64,
     app_showing: F,
 }
@@ -83,6 +98,7 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
         Self {
             known: HashMap::new(),
             fetches: HashMap::new(),
+            streaming: HashSet::new(),
             next_request: 0,
             app_showing,
         }
@@ -90,10 +106,21 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
 
     fn on_connected(&mut self) -> Vec<Effect> {
         self.fetches.clear();
-        vec![Effect::Daemon(proto::client_capabilities(
-            &CAPABILITIES,
-            None,
-        ))]
+        // A first page of no rows: just the conversations showing activity.
+        vec![
+            Effect::Daemon(proto::client_capabilities(&CAPABILITIES, Some(0))),
+            Effect::Daemon(proto::ping("notify-bootstrap")),
+        ]
+    }
+
+    fn on_disconnected(&mut self) {
+        self.fetches.clear();
+        self.streaming.clear();
+    }
+
+    /// Something streams: Moon must not deep-suspend.
+    fn wants_lease(&self) -> bool {
+        !self.streaming.is_empty()
     }
 
     fn on_line(&mut self, text: &str) -> Vec<Effect> {
@@ -106,9 +133,19 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
                 | "error",
             )
             | None => {}
+            // The bootstrap's rest (megabytes) holds no activity: skipped.
+            Some("conversations_list") if !text.contains("\"sidebarRest\":true") => {}
             Some(_) => return Vec::new(),
         }
         match proto::parse_event(text) {
+            Event::ConversationsList { conversations, .. } => {
+                self.streaming = conversations
+                    .into_iter()
+                    .filter(|summary| summary.streaming)
+                    .map(|summary| summary.id)
+                    .collect();
+                Vec::new()
+            }
             Event::ConversationUpdated {
                 summary,
                 stream_stop_reason,
@@ -116,6 +153,7 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
             } => self.on_update(summary, stream_stop_reason, owner_turn_finished),
             Event::ConversationDeleted { conv_id } => {
                 self.known.remove(&conv_id);
+                self.streaming.remove(&conv_id);
                 vec![Effect::Withdraw(conv_id)]
             }
             Event::ConversationHistoryLoaded { req_id, window, .. } => {
@@ -151,6 +189,11 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
         stop_reason: Option<String>,
         owner_turn_finished: bool,
     ) -> Vec<Effect> {
+        if summary.streaming {
+            self.streaming.insert(summary.id.clone());
+        } else {
+            self.streaming.remove(&summary.id);
+        }
         if summary.parent_conversation_id.is_some() {
             // Subagents report to their parent conversation, not the user.
             return Vec::new();
@@ -312,6 +355,41 @@ fn clean_title(title: &str) -> String {
     }
 }
 
+/// Holds Moon's lease while something streams: acquired, renewed before it
+/// lapses, released when nothing does. Moon's answers decide `held`.
+struct LeaseKeeper {
+    held: bool,
+    next: Instant,
+}
+
+impl LeaseKeeper {
+    fn new(now: Instant) -> Self {
+        Self {
+            held: false,
+            next: now,
+        }
+    }
+
+    /// Does what is due; `moon` sends one control command and says whether
+    /// Moon accepted it.
+    fn step(&mut self, want: bool, now: Instant, mut moon: impl FnMut(&str) -> bool) {
+        if want && now >= self.next {
+            let command = format!("lease acquire {} transfer {LEASE_SECONDS}", handoff::APP_ID);
+            self.held = moon(&command);
+            self.next = now + if self.held { LEASE_RENEW } else { LEASE_RETRY };
+        } else if !want && self.held {
+            // A lost release lapses by itself within LEASE_SECONDS.
+            let _ = moon(&format!("lease release {} transfer", handoff::APP_ID));
+            self.held = false;
+            self.next = now;
+        }
+    }
+
+    fn deadline(&self, want: bool) -> Option<Instant> {
+        want.then_some(self.next)
+    }
+}
+
 // ----- I/O ------------------------------------------------------------------
 
 /// A post or withdrawal waiting for moon-notifyd.
@@ -382,6 +460,7 @@ fn main() {
     let mut outbox: VecDeque<Pending> = VecDeque::new();
     let mut next_id: u64 = 0;
     let mut daemon_was_up = false;
+    let mut lease = LeaseKeeper::new(Instant::now());
 
     loop {
         let now = Instant::now();
@@ -438,6 +517,11 @@ fn main() {
             }
         }
 
+        lease.step(bridge.wants_lease(), now, |command| {
+            handoff::moon_request(command, Duration::from_millis(500))
+                .is_some_and(|reply| reply["ok"].as_bool() == Some(true))
+        });
+
         // Sleep until a socket speaks or a retry is due.
         let mut fds = Vec::with_capacity(2);
         if let Some(socket) = &daemon.socket {
@@ -452,6 +536,9 @@ fn main() {
         }
         if notify.socket.is_none() && !outbox.is_empty() {
             deadline = Some(deadline.map_or(notify.retry_at, |d| d.min(notify.retry_at)));
+        }
+        if let Some(at) = lease.deadline(bridge.wants_lease()) {
+            deadline = Some(deadline.map_or(at, |d| d.min(at)));
         }
         let timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
         if line::poll(&mut fds, timeout).is_err() {
@@ -529,6 +616,7 @@ fn main() {
                 outbox.pop_front();
             }
             if !alive {
+                bridge.on_disconnected();
                 log("disconnected from the daemon");
                 daemon.lost(&DAEMON_BACKOFF, now);
                 daemon_was_up = true;
@@ -647,6 +735,86 @@ mod tests {
             bridge.on_line(&goal("blocked")).is_empty(),
             "only on a change"
         );
+    }
+
+    #[test]
+    fn streaming_conversations_are_tracked_for_the_lease() {
+        let mut bridge = Bridge::new(|_| false);
+        let effects = bridge.on_connected();
+        assert_eq!(effects.len(), 2);
+        let Effect::Daemon(caps) = &effects[0] else {
+            panic!()
+        };
+        assert_eq!(caps["sidebarView"]["rows"], 0);
+        bridge.on_line(r#"{"type":"conversations_list","conversations":[{"id":"a","streaming":true},{"id":"b","streaming":false}],"folders":[],"sidebarPartial":{"remaining":9,"folderConversationCounts":{}}}"#);
+        assert!(bridge.wants_lease());
+        // The rest of the bootstrap is not even parsed.
+        bridge.on_line(r#"{"type":"conversations_list","conversations":[{"id":"z","streaming":true}],"sidebarRest":true}"#);
+        assert_eq!(bridge.streaming.len(), 1);
+        bridge.on_line(r#"{"type":"conversation_updated","summary":{"id":"s","streaming":true,"parentConversationId":"a"}}"#);
+        bridge.on_line(r#"{"type":"conversation_updated","summary":{"id":"a","streaming":false}}"#);
+        assert!(bridge.wants_lease(), "a subagent streams");
+        bridge.on_line(r#"{"type":"conversation_deleted","convId":"s"}"#);
+        assert!(!bridge.wants_lease());
+        bridge.on_line(r#"{"type":"conversation_updated","summary":{"id":"a","streaming":true}}"#);
+        bridge.on_disconnected();
+        assert!(!bridge.wants_lease());
+    }
+
+    #[test]
+    fn the_lease_is_acquired_renewed_retried_and_released() {
+        let start = Instant::now();
+        let mut keeper = LeaseKeeper::new(start);
+        let mut sent = Vec::new();
+        let mut moon_up = false;
+        let step = |keeper: &mut LeaseKeeper,
+                    want: bool,
+                    at: Duration,
+                    up: bool,
+                    sent: &mut Vec<String>| {
+            keeper.step(want, start + at, |command| {
+                sent.push(command.to_owned());
+                up
+            });
+        };
+        step(&mut keeper, false, Duration::ZERO, moon_up, &mut sent);
+        assert!(sent.is_empty());
+        // Moon absent: retried later, not in a loop.
+        step(&mut keeper, true, Duration::ZERO, moon_up, &mut sent);
+        assert_eq!(sent, vec!["lease acquire exocortex transfer 120"]);
+        assert!(!keeper.held);
+        step(
+            &mut keeper,
+            true,
+            Duration::from_secs(5),
+            moon_up,
+            &mut sent,
+        );
+        assert_eq!(sent.len(), 1);
+        moon_up = true;
+        step(&mut keeper, true, LEASE_RETRY, moon_up, &mut sent);
+        assert!(keeper.held);
+        assert_eq!(
+            keeper.deadline(true),
+            Some(start + LEASE_RETRY + LEASE_RENEW)
+        );
+        step(
+            &mut keeper,
+            true,
+            LEASE_RETRY + LEASE_RENEW,
+            moon_up,
+            &mut sent,
+        );
+        assert_eq!(sent.len(), 3, "renewed");
+        step(
+            &mut keeper,
+            false,
+            LEASE_RETRY + LEASE_RENEW,
+            moon_up,
+            &mut sent,
+        );
+        assert_eq!(sent.last().unwrap(), "lease release exocortex transfer");
+        assert!(!keeper.held && keeper.deadline(false).is_none());
     }
 
     #[test]

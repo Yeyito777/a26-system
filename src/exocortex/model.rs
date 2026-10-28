@@ -255,8 +255,15 @@ impl Chat {
         self.start + self.entries.len() as u64
     }
 
-    /// The window the daemon sent replaces what it covers.
+    /// The window the daemon sent replaces what it covers. Messages sent
+    /// from here that it now holds are no longer echoes.
     fn splice(&mut self, window: proto::Window) {
+        self.echoes.retain(|echo| {
+            !window
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User { text, .. } if text.trim() == echo.text.trim()))
+        });
         let entries: Vec<Entry> = window
             .entries
             .into_iter()
@@ -753,13 +760,40 @@ impl Model {
                     loaded: true,
                     ..Chat::default()
                 };
-                self.chat.echoes.push(Echo { text, started_at });
+                // The daemon echoes no user_message for a conversation's
+                // first message: it is the conversation's first entry.
+                self.chat.entries.push(Entry::User {
+                    text,
+                    metadata: None,
+                });
                 self.chat.live = Some(Live {
                     started_at: started_at as f64,
                     ..Live::default()
                 });
                 vec![command]
             }
+        }
+    }
+
+    /// Whether an event can change what is on screen (a chat is not
+    /// redrawn for other conversations' sidebar traffic).
+    pub fn affects_view(&self, event: &Event) -> bool {
+        if self.page == Page::List || self.picker {
+            return true;
+        }
+        let open = self.chat.id.as_deref();
+        match event {
+            Event::ConversationUpdated { summary, .. }
+            | Event::ConversationRestored { summary } => Some(summary.id.as_str()) == open,
+            Event::ConversationsList { .. }
+            | Event::ConversationMoved { .. }
+            | Event::SidebarItemsReordered { .. }
+            | Event::SidebarStatePatched { .. }
+            | Event::ConversationPinned { .. }
+            | Event::ConnectivityStatus { .. }
+            | Event::Pong { .. } => false,
+            Event::ConversationDeleted { conv_id } => Some(conv_id.as_str()) == open,
+            _ => true,
         }
     }
 
@@ -1326,6 +1360,8 @@ mod tests {
         assert_eq!(commands[0]["effort"], "low");
         assert_eq!(commands[0]["folderId"], "f1");
         assert!(model.chat.id.is_some());
+        assert!(model.chat.echoes.is_empty());
+        assert!(matches!(&model.chat.entries[..], [Entry::User { text, .. }] if text == "Hi"));
         assert_eq!(model.shown_conversation(), model.chat.id.as_deref());
         // Leaving the chat unsubscribes.
         let back = model.handle(Action::Back);

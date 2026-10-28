@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministically generate 220x220 BGRX icon bytes from the source PNG."""
+"""Deterministically generate 220x220 BGRX icon bytes from the source PNGs."""
 
 from __future__ import annotations
 
@@ -11,21 +11,21 @@ from PIL import Image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SOURCE = PROJECT_ROOT / "assets" / "system-app.png"
-OUTPUT = PROJECT_ROOT / "assets" / "system-app.bgrx"
+# The System app's icon, and the Exocortex app's (scripts/draw-exocortex-icon.py).
+ICONS = ("system-app", "exocortex-app")
 SIZE = (220, 220)
 PINNED_PILLOW = "12.1.1"
 
 
-def generated_bytes() -> bytes:
+def generated_bytes(source: Path) -> bytes:
     """Return tightly packed B,G,R,0 pixels using a fixed resize operation."""
     if PIL.__version__ != PINNED_PILLOW:
         raise SystemExit(
             f"Pillow {PINNED_PILLOW} is required; found {PIL.__version__}"
         )
 
-    with Image.open(SOURCE) as source:
-        image = source.convert("RGB").resize(SIZE, Image.Resampling.LANCZOS)
+    with Image.open(source) as opened:
+        image = opened.convert("RGB").resize(SIZE, Image.Resampling.LANCZOS)
 
     rgb = image.tobytes()
     bgrx = bytearray(SIZE[0] * SIZE[1] * 4)
@@ -46,19 +46,21 @@ def main() -> None:
     )
     arguments = parser.parse_args()
 
-    expected = generated_bytes()
-    if arguments.check:
-        try:
-            actual = OUTPUT.read_bytes()
-        except FileNotFoundError as error:
-            raise SystemExit("generated BGRX asset is missing") from error
-        if actual != expected:
-            raise SystemExit("generated BGRX asset is stale")
-        print("BGRX asset is reproducible and current")
-        return
-
-    OUTPUT.write_bytes(expected)
-    print(f"wrote {len(expected)} bytes to {OUTPUT.relative_to(PROJECT_ROOT)}")
+    for name in ICONS:
+        source = PROJECT_ROOT / "assets" / f"{name}.png"
+        output = PROJECT_ROOT / "assets" / f"{name}.bgrx"
+        expected = generated_bytes(source)
+        if arguments.check:
+            try:
+                actual = output.read_bytes()
+            except FileNotFoundError as error:
+                raise SystemExit(f"generated BGRX asset is missing: {name}") from error
+            if actual != expected:
+                raise SystemExit(f"generated BGRX asset is stale: {name}")
+            print(f"BGRX asset {name} is reproducible and current")
+            continue
+        output.write_bytes(expected)
+        print(f"wrote {len(expected)} bytes to {output.relative_to(PROJECT_ROOT)}")
 
 
 if __name__ == "__main__":

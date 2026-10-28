@@ -34,6 +34,9 @@ pub struct Presenter {
     shadow: Vec<u32>,
     valid: bool,
     scratch: Vec<u32>,
+    /// Pixmap areas changed server-side (`scroll`) that the window still
+    /// has to get with the next present.
+    moved: Vec<Damage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,12 +70,55 @@ impl Presenter {
             shadow: vec![0; (width * height) as usize],
             valid: false,
             scratch: Vec::new(),
+            moved: Vec::new(),
         })
     }
 
     /// Forgets what the server holds, forcing the next frame to upload fully.
     pub fn invalidate(&mut self) {
         self.valid = false;
+    }
+
+    /// Moves rows `y0..y1` of the presented frame by `dy` inside the server's
+    /// pixmap (an added scrolling fast path for long lists, not in Moon's
+    /// copy): the next `present` then uploads only what the move did not
+    /// bring. One-way, like everything here.
+    pub fn scroll<C: Connection>(
+        &mut self,
+        conn: &C,
+        y0: i32,
+        y1: i32,
+        dy: i32,
+    ) -> Result<(), Box<dyn Error>> {
+        let (y0, y1) = (y0.max(0), y1.min(self.height));
+        let rows = y1 - y0 - dy.abs();
+        if !self.valid || dy == 0 || rows <= 0 {
+            return Ok(());
+        }
+        let (src, dst) = if dy > 0 { (y0, y0 + dy) } else { (y0 - dy, y0) };
+        conn.copy_area(
+            self.pixmap,
+            self.pixmap,
+            self.gc,
+            0,
+            src as i16,
+            0,
+            dst as i16,
+            self.width as u16,
+            rows as u16,
+        )?;
+        let width = self.width as usize;
+        self.shadow.copy_within(
+            src as usize * width..(src + rows) as usize * width,
+            dst as usize * width,
+        );
+        self.moved.push(Damage {
+            x0: 0,
+            y0: dst,
+            x1: self.width,
+            y1: dst + rows,
+        });
+        Ok(())
     }
 
     /// Uploads `canvas` and copies the damaged areas to the window, whose
@@ -160,6 +206,7 @@ impl Presenter {
             band_y = band_end;
         }
         closed.append(&mut open);
+        closed.append(&mut self.moved);
         self.valid = true;
         let mut bounds: Option<Damage> = None;
         for damage in &closed {

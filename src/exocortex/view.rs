@@ -167,6 +167,9 @@ fn font(style: Style, size: f32) -> (Weight, f32, Rgb) {
     }
 }
 
+/// How far a glued piece (punctuation after a code span) may overhang.
+const GLUE_OVERHANG: f32 = 40.0;
+
 /// Word-wraps styled text to `width`; a newline breaks the line. Words
 /// wider than a line are broken between characters.
 pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
@@ -201,18 +204,30 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
         }
         *x += w;
     };
+    // Whether a break may come before the next word: after a space, not
+    // between a code span and the comma that follows it.
+    let mut after_space = true;
     for span in spans {
         let (weight, fsize, _) = font(span.style, size);
         for (index, part) in span.text.split('\n').enumerate() {
             if index > 0 {
                 finish(&mut lines, &mut line, &mut x);
+                after_space = true;
             }
             for piece in pieces(part) {
                 let w = text::measure(piece, weight, fsize);
-                if piece.starts_with(' ') {
+                if piece.starts_with(' ') || piece.starts_with('\t') {
                     if x > 0.0 && x + w <= width {
                         append(&mut line, &mut x, piece, w, span.style);
                     }
+                    after_space = true;
+                    continue;
+                }
+                let glued = !after_space && x > 0.0;
+                after_space = false;
+                if glued && x + w > width && w <= GLUE_OVERHANG {
+                    // Short punctuation stays with what it follows.
+                    append(&mut line, &mut x, piece, w, span.style);
                     continue;
                 }
                 if x > 0.0 && x + w > width {
@@ -1237,7 +1252,10 @@ fn sheet_content(model: &Model) -> Vec<(f32, SheetItem)> {
         items.push((y, SheetItem::Efforts(efforts)));
         y += CHIP_H + 40.0;
     }
-    for provider in model.usable_providers() {
+    // The conversation's own provider first.
+    let mut providers = model.usable_providers();
+    providers.sort_by_key(|p| p.id != selection.provider);
+    for provider in providers {
         items.push((y, SheetItem::Section(provider.label.clone())));
         y += SHEET_SECTION;
         for m in &provider.models {
@@ -1695,26 +1713,26 @@ fn draw_list(
     }
 }
 
-fn draw_chat(
+/// The transcript's items (and the working dots after them) that fall in
+/// rows `clip`, scrolled to `offset`.
+fn draw_transcript(
     canvas: &mut Canvas,
-    model: &mut Model,
-    view: &mut ViewState,
-    pressed: Option<&Hit>,
-    height: f32,
-    now: Instant,
+    model: &Model,
+    view: &ViewState,
+    pressed: Option<&Action>,
+    clip: (f32, f32),
+    offset: f32,
 ) {
-    view.layout(model);
-    let (top, bottom) = transcript_bounds(model, height, view.keyboard);
-    let offset = view.chat_scroll.value(now);
+    let (top, bottom) = clip;
+    let area_top = NAV_H;
     canvas.set_clip(0, top as i32, W as i32, bottom as i32);
-    let pressed_action = pressed_action(pressed).cloned();
     for item in &view.layout.items {
-        let y = top + item.y - offset;
+        let y = area_top + item.y - offset;
         if y + item.laid.h < top || y > bottom {
             continue;
         }
         for (rect, action) in &item.laid.hits {
-            if pressed_action.as_ref() == Some(action) {
+            if pressed == Some(action) {
                 canvas.fill_rect(
                     0,
                     (y + rect.y) as i32,
@@ -1727,7 +1745,123 @@ fn draw_chat(
         }
         draw_ops(canvas, &item.laid.ops, y);
     }
-    let content_bottom = top + view.layout.height - offset;
+    if model.streaming() {
+        // Three dots after the reply while the model works.
+        let cy = area_top + view.layout.height - offset - 34.0;
+        for index in 0..3 {
+            let lit = usize::from(view.dots % 3) == index;
+            canvas.fill_circle(
+                MARGIN + 16.0 + index as f32 * 34.0,
+                cy,
+                10.0,
+                SECONDARY,
+                if lit { 0.9 } else { 0.35 },
+            );
+        }
+    }
+    canvas.reset_clip();
+}
+
+/// Everything a chat frame shows except where its transcript is scrolled:
+/// equal keys and a new offset make a frame `scroll_chat` can shift.
+pub fn chat_frame_key(
+    model: &Model,
+    view: &mut ViewState,
+    pressed: Option<&Hit>,
+    height: f32,
+) -> Option<u64> {
+    if model.page != Page::Chat
+        || model.picker
+        || !model.connected
+        || model.notice.is_some()
+        || !model.chat.loaded
+        || model.chat.id.is_none()
+    {
+        return None;
+    }
+    view.layout(model);
+    let mut hasher = DefaultHasher::new();
+    view.layout.key.hash(&mut hasher);
+    format!("{pressed:?}").hash(&mut hasher);
+    model.composer.hash(&mut hasher);
+    (view.keyboard, view.dots, model.streaming(), height as i32).hash(&mut hasher);
+    let selection = model.selection();
+    (selection.provider, selection.model, selection.effort).hash(&mut hasher);
+    model
+        .open_summary()
+        .map(|s| s.display_title().to_owned())
+        .hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// The frame on `canvas` scrolled from `from` to `to` (whole pixels): the
+/// transcript's rows are moved and only the uncovered strip is drawn.
+/// Returns the moved rows and by how much (for the presenter), or None when
+/// a full redraw is better.
+pub fn scroll_chat(
+    canvas: &mut Canvas,
+    model: &Model,
+    view: &ViewState,
+    pressed: Option<&Hit>,
+    height: f32,
+    from: f32,
+    to: f32,
+) -> Option<(i32, i32, i32)> {
+    let (top, bottom) = transcript_bounds(model, height, view.keyboard);
+    let (top, bottom) = (top as i32, bottom as i32);
+    let shift = (to - from) as i32;
+    if shift == 0 || shift.abs() > (bottom - top) / 2 {
+        return None;
+    }
+    let width = canvas.width as usize;
+    let (strip, moved) = if shift > 0 {
+        canvas.pixels.copy_within(
+            (top + shift) as usize * width..bottom as usize * width,
+            top as usize * width,
+        );
+        ((bottom - shift, bottom), -shift)
+    } else {
+        canvas.pixels.copy_within(
+            top as usize * width..(bottom + shift) as usize * width,
+            (top - shift) as usize * width,
+        );
+        ((top, top - shift), -shift)
+    };
+    canvas.fill_rect(0, strip.0, W as i32, strip.1 - strip.0, BG, 1.0);
+    let pressed = pressed_action(pressed);
+    draw_transcript(
+        canvas,
+        model,
+        view,
+        pressed,
+        (strip.0 as f32, strip.1 as f32),
+        to,
+    );
+    Some((top, bottom, moved))
+}
+
+fn draw_chat(
+    canvas: &mut Canvas,
+    model: &mut Model,
+    view: &mut ViewState,
+    pressed: Option<&Hit>,
+    height: f32,
+    now: Instant,
+) {
+    view.layout(model);
+    let (top, bottom) = transcript_bounds(model, height, view.keyboard);
+    // Whole pixels, so a scrolled frame equals a shifted one (scroll_chat).
+    let offset = view.chat_scroll.value(now).round();
+    let pressed_action = pressed_action(pressed).cloned();
+    draw_transcript(
+        canvas,
+        model,
+        view,
+        pressed_action.as_ref(),
+        (top, bottom),
+        offset,
+    );
+    canvas.set_clip(0, top as i32, W as i32, bottom as i32);
     if !model.chat.loaded && model.chat.id.is_some() {
         text::draw_centered(
             canvas,
@@ -1768,20 +1902,6 @@ fn draw_chat(
             SECONDARY,
             SECONDARY_ALPHA,
         );
-    }
-    if model.streaming() {
-        // Three dots after the reply while the model works.
-        let cy = (content_bottom - 34.0).min(bottom - 30.0);
-        for index in 0..3 {
-            let lit = usize::from(view.dots % 3) == index;
-            canvas.fill_circle(
-                MARGIN + 16.0 + index as f32 * 34.0,
-                cy,
-                10.0,
-                SECONDARY,
-                if lit { 0.9 } else { 0.35 },
-            );
-        }
     }
     canvas.reset_clip();
 
@@ -2424,6 +2544,32 @@ mod tests {
         let mut canvas = Canvas::new(1080, height as i32);
         draw(&mut canvas, &mut model, &mut view, None, now);
         assert!(canvas.pixels.contains(&BLUE));
+    }
+
+    #[test]
+    fn a_shifted_frame_equals_a_redrawn_one() {
+        let now = Instant::now();
+        let mut model = chat_model();
+        model.handle(Action::ToggleExpanded("group:t0".into()));
+        let mut view = ViewState::new();
+        let height = 900.0;
+        let max = view.chat_max(&model, height);
+        assert!(max > 200.0, "the transcript must scroll: {max}");
+        let mut shifted = Canvas::new(1080, height as i32);
+        view.chat_scroll.offset = 40.0;
+        shifted.clear(BG);
+        draw(&mut shifted, &mut model, &mut view, None, now);
+        let key = chat_frame_key(&model, &mut view, None, height);
+        for to in [97.0, 60.0, 180.0] {
+            let from = view.chat_scroll.offset;
+            view.chat_scroll.offset = to;
+            assert_eq!(chat_frame_key(&model, &mut view, None, height), key);
+            assert!(scroll_chat(&mut shifted, &model, &view, None, height, from, to).is_some());
+            let mut full = Canvas::new(1080, height as i32);
+            full.clear(BG);
+            draw(&mut full, &mut model, &mut view, None, now);
+            assert!(full.pixels == shifted.pixels, "frame at {to} differs");
+        }
     }
 
     #[test]
