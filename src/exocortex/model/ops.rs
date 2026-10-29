@@ -284,6 +284,8 @@ pub enum Act {
     Export,
     /// Settings → Local storage: forget the kept conversations.
     ClearCache,
+    /// Settings → Text size: a step of `TEXT_SIZES`.
+    TextSize(usize),
     /// The panels' own actions.
     Goal(sheets::goal::Act),
     Activity(sheets::activity::Act),
@@ -377,6 +379,26 @@ pub fn speeds(providers: &[Provider], provider: &str, model: &str, current: Spee
         .into_iter()
         .filter(|&s| s == current || supports_speed(providers, provider, model, s))
         .collect()
+}
+
+/// Text size steps (PAR-360; the iPhone's `TEXT_SIZES` up to XXL: larger
+/// ones need layouts this phone's fixed rows do not have).
+pub const TEXT_SIZES: [(&str, f32); 6] = [
+    ("Extra small", 0.82),
+    ("Small", 0.9),
+    ("Default", 1.0),
+    ("Large", 1.12),
+    ("Extra large", 1.24),
+    ("XXL", 1.36),
+];
+
+/// The step nearest a scale.
+pub fn text_step(scale: f32) -> usize {
+    TEXT_SIZES
+        .iter()
+        .enumerate()
+        .min_by(|a, b| (a.1.1 - scale).abs().total_cmp(&(b.1.1 - scale).abs()))
+        .map_or(2, |(index, _)| index)
 }
 
 /// "1.0k", "12k", "1.2M" (the iPhone's `formatTokens`).
@@ -904,6 +926,17 @@ impl Model {
                         text
                     },
                 }));
+                Vec::new()
+            }
+            Act::TextSize(step) => {
+                let step = step.min(TEXT_SIZES.len() - 1);
+                let scale = TEXT_SIZES[step].1;
+                if text_step(self.persist.settings().text_scale) != step {
+                    self.persist.update_settings(|s| s.text_scale = scale);
+                    theme::set_text_scale(scale);
+                    self.chat.touch();
+                    self.ui.haptic(Haptic::Selection);
+                }
                 Vec::new()
             }
             Act::ClearCache => {

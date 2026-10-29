@@ -505,6 +505,13 @@ impl Type {
         self
     }
 
+    /// The token at another size, its line height in proportion.
+    pub const fn sized(mut self, size: f32) -> Self {
+        self.line = self.line * size / self.size;
+        self.size = size;
+        self
+    }
+
     /// The font size in px, at the current text size.
     pub fn px(&self) -> f32 {
         (self.size * text_scale()).round()

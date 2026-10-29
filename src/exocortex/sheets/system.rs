@@ -12,7 +12,7 @@ use super::super::proto::{self, Entry, Event};
 use super::super::requests::{self, Owner};
 use super::super::theme;
 use super::super::ui::menu::Confirm;
-use super::super::ui::sheet::{Prompt, prompt_sheet};
+use super::super::ui::textarea::{self, TextArea};
 use super::panel::{self, Btn, Built, Kind, Row, Style, Tap};
 
 /// What the daemon said, and what is on its way.
@@ -109,13 +109,16 @@ impl Model {
                     return Vec::new();
                 };
                 let current = self.conversation_instructions(&conv).unwrap_or_default();
-                self.ui.open(Box::new(prompt_sheet(Prompt::new(
-                    "Instructions",
-                    "This conversation's own instructions (replaces them)",
-                    current,
-                    "Save",
-                    Box::new(|text| act(Act::Save(text))),
-                ))));
+                self.ui.open(Box::new(textarea::sheet(
+                    TextArea::new(
+                        "Instructions",
+                        "This conversation's own instructions: they replace what it had",
+                        current,
+                        "Save",
+                        Box::new(|text| act(Act::Save(text))),
+                    )
+                    .allow_empty(),
+                )));
                 Vec::new()
             }
             Act::Save(text) => self.save_instructions(conv.as_deref(), &text),

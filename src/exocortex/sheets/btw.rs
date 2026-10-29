@@ -13,7 +13,7 @@ use super::super::model::{Action, Model, now_ms, ops};
 use super::super::proto::{self, Block, Btw, Event};
 use super::super::theme;
 use super::super::ui::menu::Confirm;
-use super::super::ui::sheet::{Prompt, prompt_sheet};
+use super::super::ui::textarea::{self, TextArea};
 use super::panel::{self, Btn, Built, Kind, Row, Style, Tap};
 
 pub const BUSY: &str = "Wait for the current /btw answer before asking a follow-up.";
@@ -143,7 +143,7 @@ impl Model {
                     return Vec::new();
                 }
                 let follow = self.aside(&conv).is_some();
-                self.ui.open(Box::new(prompt_sheet(Prompt::new(
+                self.ui.open(Box::new(textarea::sheet(TextArea::new(
                     if follow { "Follow up" } else { "Ask aside" },
                     "Answered from this chat's context; it never enters the transcript",
                     "",
