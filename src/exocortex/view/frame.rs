@@ -44,6 +44,8 @@ pub enum PageFrame {
 #[derive(Clone)]
 pub struct Frame {
     size: (i32, i32),
+    /// The theme generation it was drawn in.
+    generation: u64,
     page: Page,
     page_frame: PageFrame,
     modal: Vec<(u64, Body)>,
@@ -89,6 +91,7 @@ pub fn record(
     view.overlays = overlays;
     Frame {
         size,
+        generation: theme::generation(),
         page: model.page,
         page_frame,
         modal,
@@ -247,7 +250,8 @@ pub fn update(
     new: &Frame,
     now: Instant,
 ) -> Option<FrameDamage> {
-    if old.size != new.size || old.page != new.page {
+    // Another size, page, theme or text size: everything.
+    if old.size != new.size || old.page != new.page || old.generation != new.generation {
         return None;
     }
     let ids = |bodies: &[(u64, Body)]| bodies.iter().map(|(id, _)| *id).collect::<Vec<_>>();
@@ -591,6 +595,20 @@ mod tests {
         assert!(overlays.sweep(t0 + Duration::from_millis(600)));
         assert!(overlays.is_empty());
         view.overlays = overlays;
+    }
+
+    #[test]
+    fn a_theme_change_draws_everything() {
+        let (mut model, mut view) = list_model(false);
+        let t0 = Instant::now();
+        let old = record(&mut model, &mut view, None, SIZE, t0);
+        let mut canvas = full(&mut model, &mut view, t0);
+        let same = record(&mut model, &mut view, None, SIZE, t0);
+        assert!(update(&mut canvas, &mut model, &mut view, None, &old, &same, t0).is_some());
+        theme::set_current(&theme::CERBERUS);
+        let new = record(&mut model, &mut view, None, SIZE, t0);
+        assert!(update(&mut canvas, &mut model, &mut view, None, &old, &new, t0).is_none());
+        theme::set_current(&theme::WHALE);
     }
 
     #[test]

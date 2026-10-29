@@ -9,14 +9,12 @@
 use crate::gfx::{RectF, Rgb};
 use crate::text::{self, Weight};
 
-#[cfg(test)]
-use super::super::markdown;
-use super::super::markdown::{MdBlock, Span, Style};
+use super::super::markdown::{self, MdBlock, Span, Style};
 use super::super::theme::{
     self, HAIRLINE, LIST_INDENT, MARKDOWN_GAP, MARKER_GAP, QUOTE_BAR, QUOTE_INDENT, T_BODY,
     T_CAPTION, T_CODE, T_H1, T_H2, T_H3, T_H4, T_INLINE_CODE,
 };
-use super::ops::{self, Op};
+use super::ops::{self, Laid, Op};
 
 // Text.
 pub(crate) const BODY: f32 = 40.0;
@@ -227,8 +225,25 @@ pub(crate) fn plain(text: &str) -> Vec<Span> {
     }]
 }
 
+/// How a piece of markdown is set: the transcript's body for now (C1 adds
+/// the reader's and tool outputs').
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MdStyle {
+    #[default]
+    Body,
+}
+
+/// Markdown laid out as one piece at `x`, `width` wide, from `top` (its
+/// height is the last block's bottom).
+#[allow(dead_code)] // The reader's and C2's.
+pub fn lay(source: &str, x: f32, width: f32, top: f32, style: MdStyle) -> Laid {
+    let MdStyle::Body = style;
+    let mut laid = Laid::default();
+    laid.h = lay_markdown(&mut laid.ops, source, x, width, top);
+    ops::quantized(laid)
+}
+
 /// Lays markdown out at `x`, `width` wide, from `top`; returns the bottom.
-#[cfg(test)]
 pub(crate) fn lay_markdown(ops: &mut Vec<Op>, source: &str, x: f32, width: f32, top: f32) -> f32 {
     let mut y = top;
     let blocks = markdown::parse(source);

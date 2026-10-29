@@ -760,6 +760,20 @@ mod tests {
     }
 
     #[test]
+    fn markdown_lays_out_as_one_piece() {
+        let laid = markdown_layout::lay(
+            "Hello **world**\n\n- a",
+            MARGIN,
+            900.0,
+            0.0,
+            markdown_layout::MdStyle::Body,
+        );
+        assert!(laid.h > 0.0);
+        assert!(laid.ops.len() >= 3);
+        assert!(laid.ink.0 <= 0.0 && laid.ink.1 >= laid.h);
+    }
+
+    #[test]
     fn markdown_lays_out_top_to_bottom() {
         let mut ops = Vec::new();
         let bottom = lay_markdown(
