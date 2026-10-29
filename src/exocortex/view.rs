@@ -119,6 +119,7 @@ fn snap(value: f32) -> f32 {
 }
 
 fn quantized(mut laid: Laid) -> Laid {
+    let mut ink = (0.0_f32, laid.h);
     for op in &mut laid.ops {
         match op {
             Op::Text { baseline, .. } => *baseline = snap(*baseline),
@@ -128,21 +129,27 @@ fn quantized(mut laid: Laid) -> Laid {
             }
             Op::Chevron { cy, .. } => *cy = snap(*cy),
         }
+        let (top, bottom) = op_rows(op);
+        ink = (ink.0.min(top), ink.1.max(bottom));
     }
     for (rect, _) in &mut laid.hits {
         rect.y = snap(rect.y);
         rect.h = snap(rect.h);
     }
     laid.h = snap(laid.h);
+    laid.ink = (ink.0.floor(), ink.1.max(laid.h).ceil());
     laid
 }
 
-/// One laid-out transcript piece: its height, drawing and tap targets.
+/// One laid-out transcript piece (a bubble, a markdown block, a tool or
+/// thinking row): its height, drawing and tap targets, relative to its top.
 #[derive(Debug, Default)]
 struct Laid {
     h: f32,
     ops: Vec<Op>,
     hits: Vec<(RectF, Action)>,
+    /// Rows its ops may touch (glyphs reach outside `0..h`).
+    ink: (f32, f32),
 }
 
 struct Placed {
@@ -157,6 +164,18 @@ struct ChatLayout {
     height: f32,
 }
 
+/// A cached piece and the layout pass that last used it.
+struct CachedPiece {
+    laid: Rc<Laid>,
+    used: u64,
+}
+
+/// An entry's plan and the layout pass that last used it.
+struct CachedPlan {
+    plan: Rc<Plan>,
+    used: u64,
+}
+
 /// The view's own state: scroll positions, focus and layout caches.
 #[derive(Default)]
 pub struct ViewState {
@@ -168,7 +187,13 @@ pub struct ViewState {
     /// The chat follows its newest message.
     pub follow: bool,
     layout: ChatLayout,
-    cache: HashMap<u64, Rc<Laid>>,
+    /// Pieces by what they show (`piece_key`): an entry that comes back
+    /// unchanged (a window resent, a reply committed, a chat reopened) is
+    /// not laid out again.
+    pieces: HashMap<u64, CachedPiece>,
+    /// Entries' plans by stamp.
+    plans: HashMap<u64, CachedPlan>,
+    pass: u64,
     /// Phase of the "working" dots.
     pub dots: u8,
 }
@@ -368,119 +393,130 @@ fn plain(text: &str) -> Vec<Span> {
 // ----- Markdown ------------------------------------------------------------
 
 /// Lays markdown out at `x`, `width` wide, from `top`; returns the bottom.
+#[cfg(test)]
 fn lay_markdown(ops: &mut Vec<Op>, source: &str, x: f32, width: f32, top: f32) -> f32 {
     let mut y = top;
     let blocks = markdown::parse(source);
     for (index, block) in blocks.iter().enumerate() {
         if index > 0 {
-            y += PARAGRAPH_GAP;
+            y += md_gap(&blocks[index - 1], block);
         }
-        match block {
-            MdBlock::Paragraph(spans) => {
-                let lines = wrap(spans, width, BODY);
-                y += push_lines(ops, &lines, x, y, BODY, BODY_LINE, None, 1.0);
-            }
-            MdBlock::Heading(level, spans) => {
-                let (size, line, weight_spans) = match level {
-                    1 => (58.0, 74.0, true),
-                    2 => (52.0, 68.0, true),
-                    3 => (47.0, 63.0, true),
-                    _ => (BODY, BODY_LINE, true),
-                };
-                if index > 0 {
-                    y += 12.0;
-                }
-                let spans: Vec<Span> = spans
-                    .iter()
-                    .map(|span| Span {
-                        text: span.text.clone(),
-                        style: if weight_spans && span.style == Style::Plain {
-                            Style::Bold
-                        } else {
-                            span.style
-                        },
-                    })
-                    .collect();
-                let lines = wrap(&spans, width, size);
-                y += push_lines(ops, &lines, x, y, size, line, None, 1.0);
-            }
-            MdBlock::Item(depth, marker, spans) => {
-                let indent = f32::from(*depth) * 48.0;
-                let marker_w = if marker.ends_with('.') {
-                    text::measure(marker, Weight::Regular, BODY).max(34.0) + 16.0
-                } else {
-                    48.0
-                };
-                let shown = if marker == "•" && *depth > 0 {
-                    "◦"
-                } else {
-                    marker
-                };
-                ops.push(Op::Text {
-                    x: x + indent + if marker.ends_with('.') { 0.0 } else { 6.0 },
-                    baseline: y + BODY_LINE * 0.72,
-                    text: shown.to_owned(),
-                    weight: Weight::Regular,
-                    size: BODY,
-                    color: if marker.ends_with('.') {
-                        WHITE
+        y = lay_md_block(ops, block, x, width, y);
+    }
+    y
+}
+
+/// The space between two markdown blocks: list items sit closer together
+/// than paragraphs, a heading has more room above it.
+fn md_gap(previous: &MdBlock, block: &MdBlock) -> f32 {
+    match (previous, block) {
+        (MdBlock::Item(..), MdBlock::Item(..)) => 8.0,
+        (_, MdBlock::Heading(..)) => PARAGRAPH_GAP + 12.0,
+        _ => PARAGRAPH_GAP,
+    }
+}
+
+/// Lays one markdown block out from `top`; returns its bottom.
+fn lay_md_block(ops: &mut Vec<Op>, block: &MdBlock, x: f32, width: f32, top: f32) -> f32 {
+    let mut y = top;
+    match block {
+        MdBlock::Paragraph(spans) => {
+            let lines = wrap(spans, width, BODY);
+            y += push_lines(ops, &lines, x, y, BODY, BODY_LINE, None, 1.0);
+        }
+        MdBlock::Heading(level, spans) => {
+            let (size, line, weight_spans) = match level {
+                1 => (58.0, 74.0, true),
+                2 => (52.0, 68.0, true),
+                3 => (47.0, 63.0, true),
+                _ => (BODY, BODY_LINE, true),
+            };
+            let spans: Vec<Span> = spans
+                .iter()
+                .map(|span| Span {
+                    text: span.text.clone(),
+                    style: if weight_spans && span.style == Style::Plain {
+                        Style::Bold
                     } else {
-                        SECONDARY
+                        span.style
                     },
-                    alpha: if marker.ends_with('.') {
-                        1.0
-                    } else {
-                        SECONDARY_ALPHA
-                    },
-                });
-                let lines = wrap(spans, width - indent - marker_w, BODY);
-                y += push_lines(
-                    ops,
-                    &lines,
-                    x + indent + marker_w,
-                    y,
-                    BODY,
-                    BODY_LINE,
-                    None,
-                    1.0,
-                );
-                // List items sit closer together than paragraphs.
-                if matches!(blocks.get(index + 1), Some(MdBlock::Item(..))) {
-                    y -= PARAGRAPH_GAP - 8.0;
-                }
-            }
-            MdBlock::Quote(spans) => {
-                let lines = wrap(spans, width - 36.0, BODY);
-                let h = push_lines(
-                    ops,
-                    &lines,
-                    x + 36.0,
-                    y,
-                    BODY,
-                    BODY_LINE,
-                    Some(SECONDARY),
-                    0.85,
-                );
-                ops.push(Op::Rect {
-                    rect: RectF::new(x + 4.0, y + 4.0, 7.0, h - 8.0),
-                    radius: 3.5,
-                    color: SECONDARY,
-                    alpha: TERTIARY_ALPHA,
-                });
-                y += h;
-            }
-            MdBlock::Code(lines) => {
-                y += lay_code(ops, lines, x, width, y, INLINE_CODE_BG_BLOCK, usize::MAX);
-            }
-            MdBlock::Rule => {
-                ops.push(Op::Rect {
-                    rect: RectF::new(x, y + 12.0, width, 2.0),
-                    radius: 0.0,
-                    color: SEPARATOR,
-                    alpha: 1.0,
-                });
-                y += 26.0;
-            }
+                })
+                .collect();
+            let lines = wrap(&spans, width, size);
+            y += push_lines(ops, &lines, x, y, size, line, None, 1.0);
+        }
+        MdBlock::Item(depth, marker, spans) => {
+            let indent = f32::from(*depth) * 48.0;
+            let marker_w = if marker.ends_with('.') {
+                text::measure(marker, Weight::Regular, BODY).max(34.0) + 16.0
+            } else {
+                48.0
+            };
+            let shown = if marker == "•" && *depth > 0 {
+                "◦"
+            } else {
+                marker
+            };
+            ops.push(Op::Text {
+                x: x + indent + if marker.ends_with('.') { 0.0 } else { 6.0 },
+                baseline: y + BODY_LINE * 0.72,
+                text: shown.to_owned(),
+                weight: Weight::Regular,
+                size: BODY,
+                color: if marker.ends_with('.') {
+                    WHITE
+                } else {
+                    SECONDARY
+                },
+                alpha: if marker.ends_with('.') {
+                    1.0
+                } else {
+                    SECONDARY_ALPHA
+                },
+            });
+            let lines = wrap(spans, width - indent - marker_w, BODY);
+            y += push_lines(
+                ops,
+                &lines,
+                x + indent + marker_w,
+                y,
+                BODY,
+                BODY_LINE,
+                None,
+                1.0,
+            );
+        }
+        MdBlock::Quote(spans) => {
+            let lines = wrap(spans, width - 36.0, BODY);
+            let h = push_lines(
+                ops,
+                &lines,
+                x + 36.0,
+                y,
+                BODY,
+                BODY_LINE,
+                Some(SECONDARY),
+                0.85,
+            );
+            ops.push(Op::Rect {
+                rect: RectF::new(x + 4.0, y + 4.0, 7.0, h - 8.0),
+                radius: 3.5,
+                color: SECONDARY,
+                alpha: TERTIARY_ALPHA,
+            });
+            y += h;
+        }
+        MdBlock::Code(lines) => {
+            y += lay_code(ops, lines, x, width, y, INLINE_CODE_BG_BLOCK, usize::MAX);
+        }
+        MdBlock::Rule => {
+            ops.push(Op::Rect {
+                rect: RectF::new(x, y + 12.0, width, 2.0),
+                radius: 0.0,
+                color: SEPARATOR,
+                alpha: 1.0,
+            });
+            y += 26.0;
         }
     }
     y
@@ -547,48 +583,13 @@ fn lay_code(
 struct Context<'a> {
     chat: &'a Chat,
     styles: &'a HashMap<String, ToolStyle>,
+    styles_version: u64,
 }
 
-fn hash_blocks(hasher: &mut DefaultHasher, blocks: &[Block], context: &Context) {
-    for block in blocks {
-        match block {
-            Block::Text { text } => (0_u8, text).hash(hasher),
-            Block::Thinking { text } => {
-                (1_u8, text.len()).hash(hasher);
-            }
-            Block::ToolCall {
-                tool_call_id,
-                tool_name,
-                summary,
-                ..
-            } => {
-                (2_u8, tool_call_id, tool_name, summary).hash(hasher);
-                context
-                    .chat
-                    .expanded
-                    .contains(&format!("tool:{tool_call_id}"))
-                    .hash(hasher);
-                context
-                    .chat
-                    .expanded
-                    .contains(&format!("group:{tool_call_id}"))
-                    .hash(hasher);
-                context.chat.outputs.contains_key(tool_call_id).hash(hasher);
-                context
-                    .chat
-                    .outputs_requested
-                    .contains(tool_call_id)
-                    .hash(hasher);
-            }
-            Block::ToolResult {
-                tool_call_id,
-                output,
-                is_error,
-                ..
-            } => (3_u8, tool_call_id, output.len(), is_error).hash(hasher),
-            Block::Other => 4_u8.hash(hasher),
-        }
-    }
+fn hash_of(value: impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn thinking_key(blocks: &[Block], index: usize) -> String {
@@ -631,7 +632,21 @@ fn parse_color(color: &str) -> Option<Rgb> {
 /// What a tool call shows on its row: its summary, else the input's most
 /// telling field.
 fn tool_summary(summary: &str, input: &serde_json::Value) -> String {
-    let line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // One line, and no longer than a row can show (a summary may be a whole
+    // script).
+    let line = |text: &str| {
+        let mut out = String::new();
+        for word in text.split_whitespace() {
+            if out.len() >= 240 {
+                break;
+            }
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(word);
+        }
+        out
+    };
     if !summary.trim().is_empty() {
         return line(summary);
     }
@@ -684,35 +699,189 @@ fn tool_run(blocks: &[Block], from: usize) -> (usize, Vec<usize>) {
     (end, calls)
 }
 
-fn result_of<'a>(blocks: &'a [Block], id: &str) -> Option<(&'a str, bool)> {
-    blocks.iter().find_map(|block| match block {
-        Block::ToolResult {
-            tool_call_id,
-            output,
-            is_error,
-            ..
-        } if tool_call_id == id => Some((output.as_str(), *is_error)),
-        _ => None,
-    })
+/// What an entry is drawn as, worked out once per entry (by its stamp; a
+/// live reply's on every pass): its pieces, a hash of what each shows (the
+/// piece cache's key, so the same content is laid out once) and the space
+/// above each.
+#[derive(Default)]
+struct Plan {
+    segments: Vec<Segment>,
 }
 
-fn lay_tool(laid: &mut Laid, blocks: &[Block], index: usize, indent: f32, context: &Context) {
+enum Segment {
+    /// The whole entry as one piece: a bubble or a notice.
+    Whole { hash: u64 },
+    /// A block of a reply's markdown.
+    Markdown { block: MdBlock, hash: u64, gap: f32 },
+    /// A thinking row, which opens to the thinking.
+    Thinking {
+        index: usize,
+        key: String,
+        hash: u64,
+        gap: f32,
+    },
+    /// A run of tool calls: a row each, or one folded row (`group`: its
+    /// toggle key and what it shows) that opens to them.
+    Tools {
+        calls: Vec<ToolRef>,
+        group: Option<(String, u64)>,
+        gap: f32,
+    },
+}
+
+struct ToolRef {
+    call: usize,
+    /// Its result's block, if it has one yet.
+    result: Option<usize>,
+    key: String,
+    hash: u64,
+}
+
+fn plan_entry(entry: &Entry) -> Plan {
+    let whole = |hash: u64| Plan {
+        segments: vec![Segment::Whole { hash }],
+    };
+    match entry {
+        Entry::User { text, metadata } => {
+            let automated = metadata
+                .as_ref()
+                .is_some_and(|m| m.automation.is_some() || m.system);
+            whole(hash_of(("user", text, automated)))
+        }
+        Entry::Ai { blocks, .. } => plan_blocks(blocks),
+        Entry::System { text, color } => whole(hash_of(("system", text, color))),
+        _ => Plan::default(),
+    }
+}
+
+fn plan_blocks(blocks: &[Block]) -> Plan {
+    let results: HashMap<&str, usize> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            Block::ToolResult { tool_call_id, .. } => Some((tool_call_id.as_str(), index)),
+            _ => None,
+        })
+        .collect();
+    let mut segments = Vec::new();
+    let mut index = 0;
+    let mut previous_text = false;
+    while index < blocks.len() {
+        let first = segments.is_empty();
+        match &blocks[index] {
+            Block::Text { text } => {
+                if !text.trim().is_empty() {
+                    let gap = match (first, previous_text) {
+                        (true, _) => 0.0,
+                        (false, true) => PARAGRAPH_GAP,
+                        (false, false) => 18.0,
+                    };
+                    let parsed = markdown::parse(text);
+                    for (at, block) in parsed.iter().enumerate() {
+                        segments.push(Segment::Markdown {
+                            block: block.clone(),
+                            hash: hash_of(("md", block)),
+                            gap: if at == 0 {
+                                gap
+                            } else {
+                                md_gap(&parsed[at - 1], block)
+                            },
+                        });
+                    }
+                    previous_text = true;
+                }
+                index += 1;
+            }
+            Block::Thinking { text } => {
+                if !text.trim().is_empty() {
+                    let key = thinking_key(blocks, index);
+                    segments.push(Segment::Thinking {
+                        index,
+                        hash: hash_of(("think", &key, text)),
+                        key,
+                        gap: if first { 0.0 } else { 10.0 },
+                    });
+                    previous_text = false;
+                }
+                index += 1;
+            }
+            Block::ToolCall { tool_call_id, .. } => {
+                let (end, calls) = tool_run(blocks, index);
+                let calls: Vec<ToolRef> = calls
+                    .into_iter()
+                    .filter_map(|call| {
+                        let Block::ToolCall {
+                            tool_call_id,
+                            tool_name,
+                            input,
+                            summary,
+                        } = &blocks[call]
+                        else {
+                            return None;
+                        };
+                        let result = results.get(tool_call_id.as_str()).copied();
+                        let outcome = result.and_then(|at| match &blocks[at] {
+                            Block::ToolResult {
+                                output, is_error, ..
+                            } => Some((output, is_error)),
+                            _ => None,
+                        });
+                        Some(ToolRef {
+                            call,
+                            result,
+                            key: format!("tool:{tool_call_id}"),
+                            hash: hash_of((
+                                "tool",
+                                tool_call_id,
+                                tool_name,
+                                summary,
+                                input.to_string(),
+                                outcome,
+                            )),
+                        })
+                    })
+                    .collect();
+                let group = (calls.len() >= GROUP_MIN).then(|| {
+                    let key = format!("group:{tool_call_id}");
+                    let shown: Vec<u64> = calls.iter().map(|tool| tool.hash).collect();
+                    let hash = hash_of(("group", &key, shown));
+                    (key, hash)
+                });
+                segments.push(Segment::Tools {
+                    calls,
+                    group,
+                    gap: if first { 0.0 } else { 10.0 },
+                });
+                previous_text = false;
+                index = end.max(index + 1);
+            }
+            _ => index += 1,
+        }
+    }
+    Plan { segments }
+}
+
+/// One tool call's row (and, opened, its input and output), from its top.
+fn lay_tool(blocks: &[Block], tool: &ToolRef, indent: f32, open: bool, context: &Context) -> Laid {
+    let mut laid = Laid::default();
     let Block::ToolCall {
         tool_call_id,
         tool_name,
         input,
         summary,
-    } = &blocks[index]
+    } = &blocks[tool.call]
     else {
-        return;
+        return laid;
     };
-    let key = format!("tool:{tool_call_id}");
-    let open = context.chat.expanded.contains(&key);
-    let top = laid.h;
     let x = MARGIN + indent;
     let (label, color) = tool_label(tool_name, context.styles);
-    let result = result_of(blocks, tool_call_id);
-    let base = top + TOOL_ROW / 2.0 + 12.0;
+    let result = tool.result.and_then(|at| match &blocks[at] {
+        Block::ToolResult {
+            output, is_error, ..
+        } => Some((output.as_str(), *is_error)),
+        _ => None,
+    });
+    let base = TOOL_ROW / 2.0 + 12.0;
     let label_w = text::measure(&label, Weight::SemiBold, SMALL);
     laid.ops.push(Op::Text {
         x,
@@ -763,14 +932,14 @@ fn lay_tool(laid: &mut Laid, blocks: &[Block], index: usize, indent: f32, contex
     }
     laid.ops.push(Op::Chevron {
         x: W - MARGIN - 14.0,
-        cy: top + TOOL_ROW / 2.0,
+        cy: TOOL_ROW / 2.0,
         open,
     });
     laid.hits.push((
-        RectF::new(0.0, top, W, TOOL_ROW),
-        Action::ToggleExpanded(key),
+        RectF::new(0.0, 0.0, W, TOOL_ROW),
+        Action::ToggleExpanded(tool.key.clone()),
     ));
-    laid.h += TOOL_ROW;
+    laid.h = TOOL_ROW;
     if open {
         let width = W - MARGIN - x;
         let mut lines = tool_input_text(tool_name, input);
@@ -809,166 +978,130 @@ fn lay_tool(laid: &mut Laid, blocks: &[Block], index: usize, indent: f32, contex
         }
         laid.h += h + 18.0;
     }
+    laid
 }
 
-fn lay_blocks(blocks: &[Block], context: &Context) -> Laid {
+/// The folded row of a run of tool calls: how many, which tools, failures.
+fn lay_group(
+    blocks: &[Block],
+    calls: &[ToolRef],
+    key: &str,
+    open: bool,
+    context: &Context,
+) -> Laid {
     let mut laid = Laid::default();
-    let width = W - 2.0 * MARGIN;
-    let mut index = 0;
-    let mut previous_text = false;
-    while index < blocks.len() {
-        match &blocks[index] {
-            Block::Text { text } => {
-                if !text.trim().is_empty() {
-                    if laid.h > 0.0 {
-                        laid.h += if previous_text { PARAGRAPH_GAP } else { 18.0 };
-                    }
-                    let mut ops = Vec::new();
-                    let bottom = lay_markdown(&mut ops, text, MARGIN, width, laid.h);
-                    laid.ops.extend(ops);
-                    laid.h = bottom;
-                    previous_text = true;
-                }
-                index += 1;
+    let mut names: Vec<String> = Vec::new();
+    for tool in calls {
+        if let Block::ToolCall { tool_name, .. } = &blocks[tool.call] {
+            let (label, _) = tool_label(tool_name, context.styles);
+            if !names.contains(&label) {
+                names.push(label);
             }
-            Block::Thinking { text } => {
-                if !text.trim().is_empty() {
-                    if laid.h > 0.0 {
-                        laid.h += 10.0;
-                    }
-                    let key = thinking_key(blocks, index);
-                    let open = context.chat.expanded.contains(&key);
-                    let top = laid.h;
-                    laid.ops.push(Op::Text {
-                        x: MARGIN,
-                        baseline: top + TOOL_ROW / 2.0 + 12.0,
-                        text: "Thinking".into(),
-                        weight: Weight::Italic,
-                        size: SMALL,
-                        color: SECONDARY,
-                        alpha: SECONDARY_ALPHA,
-                    });
-                    laid.ops.push(Op::Chevron {
-                        x: W - MARGIN - 14.0,
-                        cy: top + TOOL_ROW / 2.0,
-                        open,
-                    });
-                    laid.hits.push((
-                        RectF::new(0.0, top, W, TOOL_ROW),
-                        Action::ToggleExpanded(key),
-                    ));
-                    laid.h += TOOL_ROW;
-                    if open {
-                        let spans = vec![Span {
-                            text: text.trim().to_owned(),
-                            style: Style::Italic,
-                        }];
-                        let lines = wrap(&spans, width - 30.0, SMALL + 2.0);
-                        let h = push_lines(
-                            &mut laid.ops,
-                            &lines,
-                            MARGIN + 30.0,
-                            laid.h,
-                            SMALL + 2.0,
-                            SMALL_LINE + 4.0,
-                            Some(SECONDARY),
-                            SECONDARY_ALPHA,
-                        );
-                        laid.ops.push(Op::Rect {
-                            rect: RectF::new(MARGIN + 4.0, laid.h, 6.0, h),
-                            radius: 3.0,
-                            color: SECONDARY,
-                            alpha: 0.2,
-                        });
-                        laid.h += h + 12.0;
-                    }
-                    previous_text = false;
-                }
-                index += 1;
-            }
-            Block::ToolCall { tool_call_id, .. } => {
-                if laid.h > 0.0 {
-                    laid.h += 10.0;
-                }
-                let (end, calls) = tool_run(blocks, index);
-                if calls.len() >= GROUP_MIN {
-                    let key = format!("group:{tool_call_id}");
-                    let open = context.chat.expanded.contains(&key);
-                    let top = laid.h;
-                    let mut names: Vec<String> = Vec::new();
-                    for call in &calls {
-                        if let Block::ToolCall { tool_name, .. } = &blocks[*call] {
-                            let (label, _) = tool_label(tool_name, context.styles);
-                            if !names.contains(&label) {
-                                names.push(label);
-                            }
-                        }
-                    }
-                    let failed = calls
-                        .iter()
-                        .filter(|call| match &blocks[**call] {
-                            Block::ToolCall { tool_call_id, .. } => {
-                                result_of(blocks, tool_call_id).is_some_and(|(_, error)| error)
-                            }
-                            _ => false,
-                        })
-                        .count();
-                    let title = format!("{} tool calls", calls.len());
-                    let title_w = text::measure(&title, Weight::SemiBold, SMALL);
-                    laid.ops.push(Op::Text {
-                        x: MARGIN,
-                        baseline: top + TOOL_ROW / 2.0 + 12.0,
-                        text: title,
-                        weight: Weight::SemiBold,
-                        size: SMALL,
-                        color: WHITE,
-                        alpha: 0.85,
-                    });
-                    let mut detail = names.join(", ");
-                    if failed > 0 {
-                        detail = format!("{detail} · {failed} failed");
-                    }
-                    let detail = text::fit(
-                        &detail,
-                        Weight::Regular,
-                        SMALL,
-                        W - 2.0 * MARGIN - title_w - 90.0,
-                    );
-                    laid.ops.push(Op::Text {
-                        x: MARGIN + title_w + 18.0,
-                        baseline: top + TOOL_ROW / 2.0 + 12.0,
-                        text: detail,
-                        weight: Weight::Regular,
-                        size: SMALL,
-                        color: if failed > 0 { RED } else { SECONDARY },
-                        alpha: if failed > 0 { 0.9 } else { SECONDARY_ALPHA },
-                    });
-                    laid.ops.push(Op::Chevron {
-                        x: W - MARGIN - 14.0,
-                        cy: top + TOOL_ROW / 2.0,
-                        open,
-                    });
-                    laid.hits.push((
-                        RectF::new(0.0, top, W, TOOL_ROW),
-                        Action::ToggleExpanded(key),
-                    ));
-                    laid.h += TOOL_ROW;
-                    if open {
-                        for call in calls {
-                            lay_tool(&mut laid, blocks, call, 34.0, context);
-                        }
-                    }
-                } else {
-                    for call in calls {
-                        lay_tool(&mut laid, blocks, call, 0.0, context);
-                    }
-                }
-                previous_text = false;
-                index = end.max(index + 1);
-            }
-            _ => index += 1,
         }
     }
+    let failed = calls
+        .iter()
+        .filter(|tool| {
+            tool.result
+                .is_some_and(|at| matches!(&blocks[at], Block::ToolResult { is_error: true, .. }))
+        })
+        .count();
+    let title = format!("{} tool calls", calls.len());
+    let title_w = text::measure(&title, Weight::SemiBold, SMALL);
+    laid.ops.push(Op::Text {
+        x: MARGIN,
+        baseline: TOOL_ROW / 2.0 + 12.0,
+        text: title,
+        weight: Weight::SemiBold,
+        size: SMALL,
+        color: WHITE,
+        alpha: 0.85,
+    });
+    let mut detail = names.join(", ");
+    if failed > 0 {
+        detail = format!("{detail} · {failed} failed");
+    }
+    let detail = text::fit(
+        &detail,
+        Weight::Regular,
+        SMALL,
+        W - 2.0 * MARGIN - title_w - 90.0,
+    );
+    laid.ops.push(Op::Text {
+        x: MARGIN + title_w + 18.0,
+        baseline: TOOL_ROW / 2.0 + 12.0,
+        text: detail,
+        weight: Weight::Regular,
+        size: SMALL,
+        color: if failed > 0 { RED } else { SECONDARY },
+        alpha: if failed > 0 { 0.9 } else { SECONDARY_ALPHA },
+    });
+    laid.ops.push(Op::Chevron {
+        x: W - MARGIN - 14.0,
+        cy: TOOL_ROW / 2.0,
+        open,
+    });
+    laid.hits.push((
+        RectF::new(0.0, 0.0, W, TOOL_ROW),
+        Action::ToggleExpanded(key.to_owned()),
+    ));
+    laid.h = TOOL_ROW;
+    laid
+}
+
+/// A thinking row and, opened, the thinking.
+fn lay_thinking(text: &str, key: &str, open: bool) -> Laid {
+    let mut laid = Laid::default();
+    let width = W - 2.0 * MARGIN;
+    laid.ops.push(Op::Text {
+        x: MARGIN,
+        baseline: TOOL_ROW / 2.0 + 12.0,
+        text: "Thinking".into(),
+        weight: Weight::Italic,
+        size: SMALL,
+        color: SECONDARY,
+        alpha: SECONDARY_ALPHA,
+    });
+    laid.ops.push(Op::Chevron {
+        x: W - MARGIN - 14.0,
+        cy: TOOL_ROW / 2.0,
+        open,
+    });
+    laid.hits.push((
+        RectF::new(0.0, 0.0, W, TOOL_ROW),
+        Action::ToggleExpanded(key.to_owned()),
+    ));
+    laid.h = TOOL_ROW;
+    if open {
+        let spans = vec![Span {
+            text: text.trim().to_owned(),
+            style: Style::Italic,
+        }];
+        let lines = wrap(&spans, width - 30.0, SMALL + 2.0);
+        let h = push_lines(
+            &mut laid.ops,
+            &lines,
+            MARGIN + 30.0,
+            laid.h,
+            SMALL + 2.0,
+            SMALL_LINE + 4.0,
+            Some(SECONDARY),
+            SECONDARY_ALPHA,
+        );
+        laid.ops.push(Op::Rect {
+            rect: RectF::new(MARGIN + 4.0, laid.h, 6.0, h),
+            radius: 3.0,
+            color: SECONDARY,
+            alpha: 0.2,
+        });
+        laid.h += h + 12.0;
+    }
+    laid
+}
+
+fn lay_md_piece(block: &MdBlock) -> Laid {
+    let mut laid = Laid::default();
+    laid.h = lay_md_block(&mut laid.ops, block, MARGIN, W - 2.0 * MARGIN, 0.0);
     laid
 }
 
@@ -1061,28 +1194,8 @@ fn notice_color(color: Option<&str>) -> Rgb {
     }
 }
 
-fn entry_key(entry: &Entry, context: &Context) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    match entry {
-        Entry::User { text, metadata } => (
-            0_u8,
-            text,
-            metadata
-                .as_ref()
-                .map(|m| m.automation.is_some() || m.system),
-        )
-            .hash(&mut hasher),
-        Entry::Ai { blocks, .. } => {
-            1_u8.hash(&mut hasher);
-            hash_blocks(&mut hasher, blocks, context);
-        }
-        Entry::System { text, color } => (2_u8, text, color).hash(&mut hasher),
-        _ => 3_u8.hash(&mut hasher),
-    }
-    hasher.finish()
-}
-
-fn lay_entry(entry: &Entry, context: &Context) -> Laid {
+/// An entry drawn whole: a bubble, or a gray or colored notice.
+fn lay_whole(entry: &Entry) -> Laid {
     match entry {
         Entry::User { text, metadata } => {
             let automated = metadata
@@ -1095,11 +1208,14 @@ fn lay_entry(entry: &Entry, context: &Context) -> Laid {
                 lay_user(text, 1.0, None)
             }
         }
-        Entry::Ai { blocks, .. } => lay_blocks(blocks, context),
         Entry::System { text, color } => lay_notice(text, notice_color(color.as_deref()), 4),
         _ => Laid::default(),
     }
 }
+
+/// More pieces and plans than this are kept, the least recently used go.
+const PIECES_KEPT: usize = 6000;
+const PLANS_KEPT: usize = 1500;
 
 impl ViewState {
     pub fn new() -> Self {
@@ -1109,81 +1225,214 @@ impl ViewState {
         }
     }
 
-    fn cached(&mut self, key: u64, make: impl FnOnce() -> Laid) -> Rc<Laid> {
-        self.cache
-            .entry(key)
-            .or_insert_with(|| Rc::new(quantized(make())))
-            .clone()
+    /// The piece that shows `key`, laid out by `make` if none does yet.
+    fn piece(&mut self, key: u64, make: impl FnOnce() -> Laid) -> Rc<Laid> {
+        let pass = self.pass;
+        let cached = self.pieces.entry(key).or_insert_with(|| CachedPiece {
+            laid: Rc::new(quantized(make())),
+            used: pass,
+        });
+        cached.used = pass;
+        cached.laid.clone()
     }
 
-    /// Lays the open chat out if it changed since the last frame.
+    fn plan(&mut self, stamp: u64, entry: &Entry) -> Rc<Plan> {
+        let pass = self.pass;
+        let cached = self.plans.entry(stamp).or_insert_with(|| CachedPlan {
+            plan: Rc::new(plan_entry(entry)),
+            used: pass,
+        });
+        cached.used = pass;
+        cached.plan.clone()
+    }
+
+    /// Places a planned entry's pieces from `y`; returns where the next
+    /// entry goes.
+    fn place(
+        &mut self,
+        items: &mut Vec<Placed>,
+        y: f32,
+        plan: &Plan,
+        entry: Option<&Entry>,
+        blocks: &[Block],
+        context: &Context,
+    ) -> f32 {
+        let mut h = 0.0;
+        let push = |items: &mut Vec<Placed>, h: &mut f32, laid: Rc<Laid>| {
+            if laid.h > 0.0 {
+                items.push(Placed {
+                    y: y + *h,
+                    laid: laid.clone(),
+                });
+                *h += laid.h;
+            }
+        };
+        let expanded = &context.chat.expanded;
+        for segment in &plan.segments {
+            match segment {
+                Segment::Whole { hash } => {
+                    let Some(entry) = entry else { continue };
+                    let laid = self.piece(*hash, || lay_whole(entry));
+                    push(items, &mut h, laid);
+                }
+                Segment::Markdown { block, hash, gap } => {
+                    h += gap;
+                    let laid = self.piece(*hash, || lay_md_piece(block));
+                    push(items, &mut h, laid);
+                }
+                Segment::Thinking {
+                    index,
+                    key,
+                    hash,
+                    gap,
+                } => {
+                    h += gap;
+                    let open = expanded.contains(key);
+                    let text = match &blocks[*index] {
+                        Block::Thinking { text } => text.as_str(),
+                        _ => "",
+                    };
+                    let laid = self.piece(hash_of((hash, open)), || lay_thinking(text, key, open));
+                    push(items, &mut h, laid);
+                }
+                Segment::Tools { calls, group, gap } => {
+                    h += gap;
+                    let indent = match group {
+                        Some((key, hash)) => {
+                            let open = expanded.contains(key);
+                            let laid = self
+                                .piece(hash_of((hash, open, context.styles_version)), || {
+                                    lay_group(blocks, calls, key, open, context)
+                                });
+                            push(items, &mut h, laid);
+                            if !open {
+                                continue;
+                            }
+                            34.0
+                        }
+                        None => 0.0,
+                    };
+                    for tool in calls {
+                        let open = expanded.contains(&tool.key);
+                        let id = tool.key.trim_start_matches("tool:");
+                        // Opened, it shows the output fetched for it.
+                        let fetched = open.then(|| {
+                            (
+                                context.chat.outputs.get(id),
+                                context.chat.outputs_requested.contains(id),
+                            )
+                        });
+                        let key = hash_of((
+                            tool.hash,
+                            open,
+                            indent as i32,
+                            context.styles_version,
+                            fetched,
+                        ));
+                        let laid =
+                            self.piece(key, || lay_tool(blocks, tool, indent, open, context));
+                        push(items, &mut h, laid);
+                    }
+                }
+            }
+        }
+        if h > 0.0 { y + h + 30.0 } else { y }
+    }
+
+    /// Lays the open chat out if it changed since the last frame: every
+    /// entry's pieces, from the cache unless what they show is new.
     fn layout(&mut self, model: &Model) {
         let chat = &model.chat;
         let queued = model.queued_here();
-        let mut key = DefaultHasher::new();
-        (chat.version, chat.id.as_deref(), queued.len(), chat.loaded).hash(&mut key);
-        let key = key.finish();
+        let key = hash_of((
+            chat.version,
+            chat.id.as_deref(),
+            queued.len(),
+            chat.loaded,
+            model.styles_version,
+        ));
         if self.layout.key == key && !self.layout.items.is_empty() {
             return;
         }
+        self.pass += 1;
         let context = Context {
             chat,
             styles: &model.tool_styles,
+            styles_version: model.styles_version,
         };
-        let mut pieces: Vec<(u64, Rc<Laid>)> = Vec::new();
+        let mut items = Vec::new();
+        let mut y = 24.0;
+        let single = |view: &mut Self,
+                      items: &mut Vec<Placed>,
+                      y: f32,
+                      key: u64,
+                      make: &dyn Fn() -> Laid| {
+            let laid = view.piece(key, make);
+            if laid.h <= 0.0 {
+                return y;
+            }
+            let next = y + laid.h + 30.0;
+            items.push(Placed { y, laid });
+            next
+        };
         if chat.older_request.is_some() {
-            pieces.push((1, self.cached(1, || lay_notice("Loading…", SECONDARY, 1))));
+            y = single(self, &mut items, y, 1, &|| {
+                lay_notice("Loading…", SECONDARY, 1)
+            });
         }
-        for entry in &chat.entries {
-            let key = entry_key(entry, &context);
-            pieces.push((key, self.cached(key, || lay_entry(entry, &context))));
+        debug_assert_eq!(chat.entries.len(), chat.stamps.len());
+        for (entry, stamp) in chat.entries.iter().zip(&chat.stamps) {
+            let plan = self.plan(*stamp, entry);
+            let blocks = match entry {
+                Entry::Ai { blocks, .. } => blocks.as_slice(),
+                _ => &[],
+            };
+            y = self.place(&mut items, y, &plan, Some(entry), blocks, &context);
         }
         for echo in &chat.echoes {
-            let mut hasher = DefaultHasher::new();
-            ("echo", &echo.text).hash(&mut hasher);
-            let key = hasher.finish();
-            pieces.push((key, self.cached(key, || lay_user(&echo.text, 0.75, None))));
+            let key = hash_of(("echo", &echo.text));
+            y = single(self, &mut items, y, key, &|| {
+                lay_user(&echo.text, 0.75, None)
+            });
         }
         if let Some(live) = &chat.live {
-            let mut hasher = DefaultHasher::new();
-            "live".hash(&mut hasher);
-            hash_blocks(&mut hasher, &live.blocks, &context);
-            let key = hasher.finish();
-            pieces.push((key, self.cached(key, || lay_blocks(&live.blocks, &context))));
+            let plan = plan_blocks(&live.blocks);
+            y = self.place(&mut items, y, &plan, None, &live.blocks, &context);
         }
         for queued in queued {
-            let mut hasher = DefaultHasher::new();
-            ("queued", &queued.text).hash(&mut hasher);
-            let key = hasher.finish();
-            pieces.push((
-                key,
-                self.cached(key, || lay_user(&queued.text, 0.45, Some("Queued"))),
-            ));
+            let key = hash_of(("queued", &queued.text));
+            y = single(self, &mut items, y, key, &|| {
+                lay_user(&queued.text, 0.45, Some("Queued"))
+            });
         }
         if let Some(error) = &chat.error {
-            pieces.push((2, Rc::new(quantized(lay_notice(error, RED, 3)))));
+            let key = hash_of(("error", error));
+            y = single(self, &mut items, y, key, &|| lay_notice(error, RED, 3));
         }
-        let mut items = Vec::new();
-        let mut used = HashMap::new();
-        let mut y = 24.0;
-        for (key, laid) in pieces {
-            if laid.h <= 0.0 {
-                continue;
-            }
-            items.push(Placed {
-                y,
-                laid: laid.clone(),
-            });
-            y += laid.h + 30.0;
-            used.insert(key, laid);
-        }
-        // Keep only what is on screen now: old live layouts go away.
-        self.cache = used;
+        self.prune();
         self.layout = ChatLayout {
             key,
             items,
             height: y + 40.0,
         };
+    }
+
+    /// Forgets the least recently used pieces and plans past the limits.
+    fn prune(&mut self) {
+        if self.pieces.len() > PIECES_KEPT {
+            let mut used: Vec<u64> = self.pieces.values().map(|p| p.used).collect();
+            used.sort_unstable();
+            let cut = used[self.pieces.len() - PIECES_KEPT / 2];
+            let pass = self.pass;
+            self.pieces.retain(|_, p| p.used >= cut || p.used == pass);
+        }
+        if self.plans.len() > PLANS_KEPT {
+            let mut used: Vec<u64> = self.plans.values().map(|p| p.used).collect();
+            used.sort_unstable();
+            let cut = used[self.plans.len() - PLANS_KEPT / 2];
+            let pass = self.pass;
+            self.plans.retain(|_, p| p.used >= cut || p.used == pass);
+        }
     }
 }
 
@@ -1222,7 +1471,7 @@ fn list_top(model: &Model) -> f32 {
     } else {
         NAV_H + 10.0
     };
-    if model.connected { base } else { base + 70.0 }
+    if model.offline { base + 70.0 } else { base }
 }
 
 fn list_bottom(height: f32) -> f32 {
@@ -1482,7 +1731,7 @@ fn pin_glyph(canvas: &mut Canvas, cx: f32, cy: f32) {
 }
 
 fn status_line(canvas: &mut Canvas, model: &Model, y: f32) {
-    if model.connected {
+    if !model.offline {
         return;
     }
     let message = if model.was_connected {
@@ -1679,14 +1928,19 @@ pub fn list_frame(
         return None;
     }
     let mut key = DefaultHasher::new();
+    // A pressed row is redrawn alone; the header's buttons are not rows.
+    let header = matches!(
+        pressed_action(pressed),
+        Some(Action::NewConversation | Action::Back)
+    );
     (
         model.sidebar.version,
         model.sidebar.loaded,
         &model.folders,
-        model.connected,
+        model.offline,
         model.was_connected,
         height as i32,
-        format!("{pressed:?}"),
+        header,
     )
         .hash(&mut key);
     Some(ListFrame {
@@ -1710,10 +1964,42 @@ pub fn draw_list_update(
     }
     let (top, bottom) = new.bounds;
     let shift = (new.offset - old.offset) as i32;
+    let folder = model.current_folder().map(str::to_owned);
+    let rows: Vec<Row> = model.sidebar.rows(folder.as_deref()).to_vec();
     if shift == 0 {
-        return Some(FrameDamage::default());
+        if old.pressed == new.pressed {
+            return Some(FrameDamage::default());
+        }
+        // A row pressed or let go: only its rows.
+        let list_top = list_top(model);
+        let mut damage = FrameDamage::default();
+        for action in old.pressed.iter().chain(&new.pressed) {
+            let Some(index) = rows.iter().position(|row| match (row, action) {
+                (Row::Folder { id, .. }, Action::OpenFolder(open)) => id == open,
+                (Row::Conversation(id), Action::OpenConversation(open)) => id == open,
+                _ => false,
+            }) else {
+                continue;
+            };
+            let y = list_top + index as f32 * ROW_H - new.offset;
+            let strip = ((y as i32).max(top), ((y + ROW_H) as i32 + 1).min(bottom));
+            if strip.0 >= strip.1 {
+                continue;
+            }
+            canvas.fill_rect(0, strip.0, W as i32, strip.1 - strip.0, BG, 1.0);
+            draw_list_rows(
+                canvas,
+                model,
+                &rows,
+                new.pressed.as_ref(),
+                (strip.0 as f32, strip.1 as f32),
+                new.offset,
+            );
+            damage.rows.push(strip);
+        }
+        return Some(damage);
     }
-    if shift.abs() > (bottom - top) / 2 {
+    if shift.abs() > (bottom - top) / 2 || old.pressed != new.pressed {
         return None;
     }
     let width = canvas.width as usize;
@@ -1731,8 +2017,6 @@ pub fn draw_list_update(
         (top, top - shift)
     };
     canvas.fill_rect(0, strip.0, W as i32, strip.1 - strip.0, BG, 1.0);
-    let folder = model.current_folder().map(str::to_owned);
-    let rows: Vec<Row> = model.sidebar.rows(folder.as_deref()).to_vec();
     draw_list_rows(
         canvas,
         model,
@@ -1877,9 +2161,17 @@ fn draw_transcript(
     let (top, bottom) = clip;
     let area_top = NAV_H;
     canvas.set_clip(0, top as i32, W as i32, bottom as i32);
-    for item in &view.layout.items {
+    // Pieces are in order: skip to the first that may reach the clip (no
+    // glyph reaches a screen beyond its piece).
+    let items = &view.layout.items;
+    let first =
+        items.partition_point(|item| area_top + item.y + item.laid.h - offset < top - 400.0);
+    for item in &items[first..] {
         let y = area_top + item.y - offset;
-        if y + item.laid.h < top || y > bottom {
+        if y - 400.0 > bottom {
+            break;
+        }
+        if y + item.laid.ink.1 < top || y + item.laid.ink.0 > bottom {
             continue;
         }
         for (rect, action) in &item.laid.hits {
@@ -1949,7 +2241,7 @@ pub fn chat_frame(
 ) -> Option<ChatFrame> {
     if model.page != Page::Chat
         || model.picker
-        || !model.connected
+        || model.offline
         || model.notice.is_some()
         || !model.chat.loaded
         || model.chat.id.is_none()
@@ -2196,7 +2488,7 @@ fn draw_chat(
     }
     canvas.reset_clip();
     draw_nav(canvas, model, pressed_action.as_ref());
-    if !model.connected {
+    if model.offline {
         let message = if model.was_connected {
             "Reconnecting…"
         } else {
@@ -2814,11 +3106,21 @@ mod tests {
             hit_action,
             Some(Hit::Action(Action::ToggleExpanded("group:t0".into())))
         );
-        let before = view.layout.items[1].laid.h;
+        // The reply's pieces: the folded row, then the text.
+        assert_eq!(view.layout.items.len(), 3);
+        let before = view.layout.height;
+        let text = view.layout.items[2].laid.clone();
         model.handle(Action::ToggleExpanded("group:t0".into()));
         view.layout(&model);
-        assert_eq!(view.layout.items[1].laid.hits.len(), 5);
-        assert!(view.layout.items[1].laid.h > before + 3.0 * TOOL_ROW);
+        // Opened: the row, a row per call, and the same text piece below.
+        let hits: Vec<&Action> = view.layout.items[1..]
+            .iter()
+            .flat_map(|item| item.laid.hits.iter().map(|(_, action)| action))
+            .collect();
+        assert_eq!(hits.len(), 5);
+        assert_eq!(hits[1], &Action::ToggleExpanded("tool:t0".into()));
+        assert!(view.layout.height > before + 3.0 * TOOL_ROW);
+        assert!(Rc::ptr_eq(&view.layout.items[6].laid, &text));
         // The composer and send button are hit; the transcript elsewhere.
         let geometry = composer(&model, height, false);
         assert_eq!(
@@ -2847,6 +3149,41 @@ mod tests {
         let mut canvas = Canvas::new(1080, height as i32);
         draw(&mut canvas, &mut model, &mut view, None, now);
         assert!(canvas.pixels.contains(&BLUE));
+    }
+
+    #[test]
+    fn a_streaming_reply_lays_out_only_what_grew() {
+        let now = Instant::now();
+        let mut model = chat_model();
+        let mut view = ViewState::new();
+        for line in [
+            r#"{"type":"streaming_started","convId":"c","provider":"a","model":"m","startedAt":7}"#,
+            r#"{"type":"text_chunk","convId":"c","text":"First paragraph.\n\nSecond"}"#,
+        ] {
+            model.apply(parse_event(line), now);
+        }
+        view.layout(&model);
+        let before: Vec<Rc<Laid>> = view.layout.items.iter().map(|i| i.laid.clone()).collect();
+        model.apply(
+            parse_event(r#"{"type":"text_chunk","convId":"c","text":" grows"}"#),
+            now,
+        );
+        view.layout(&model);
+        let after: Vec<Rc<Laid>> = view.layout.items.iter().map(|i| i.laid.clone()).collect();
+        assert_eq!(before.len(), after.len());
+        let last = after.len() - 1;
+        // Everything but the growing paragraph is the same piece.
+        for (index, (old, new)) in before.iter().zip(&after).enumerate() {
+            assert_eq!(Rc::ptr_eq(old, new), index != last, "piece {index}");
+        }
+        // Committed, the reply is the same pieces: nothing is laid out again.
+        model.apply(
+            parse_event(r#"{"type":"message_complete","convId":"c","blocks":[{"type":"text","text":"First paragraph.\n\nSecond grows"}]}"#),
+            now,
+        );
+        view.layout(&model);
+        let committed: Vec<Rc<Laid>> = view.layout.items.iter().map(|i| i.laid.clone()).collect();
+        assert!(after.iter().zip(&committed).all(|(a, b)| Rc::ptr_eq(a, b)));
     }
 
     /// Draws the frame, applies `change`, updates the frame incrementally,
@@ -3033,6 +3370,20 @@ mod tests {
             full.clear(BG);
             draw(&mut full, &mut model, &mut view, None, now);
             assert!(full.pixels == canvas.pixels, "list frame at {to} differs");
+        }
+        // Pressing a row and letting go redraws that row alone.
+        let press = Hit::Action(Action::OpenConversation("c5".into()));
+        for (before, after) in [(None, Some(&press)), (Some(&press), None)] {
+            let old = list_frame(&model, &view, before, height, now).unwrap();
+            let new = list_frame(&model, &view, after, height, now).unwrap();
+            let damage =
+                draw_list_update(&mut canvas, &mut model, &old, &new).expect("incremental");
+            assert_eq!(damage.rows.len(), 1);
+            assert!(damage.rows[0].1 - damage.rows[0].0 <= ROW_H as i32 + 1);
+            let mut full = Canvas::new(1080, height as i32);
+            full.clear(BG);
+            draw(&mut full, &mut model, &mut view, after, now);
+            assert!(full.pixels == canvas.pixels, "pressed list frame differs");
         }
     }
 

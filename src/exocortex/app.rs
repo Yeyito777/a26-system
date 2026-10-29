@@ -32,9 +32,16 @@ const NOTICE_FOR: Duration = Duration::from_secs(4);
 /// this often.
 const SHELL_POLL: Duration = Duration::from_secs(1);
 /// Back from the background after this long: reconnect, so the daemon drops
-/// what it buffered for the frozen app and the list is current.
+/// what it buffered for the frozen app (Moon freezes it right after hiding
+/// it, so it cannot unsubscribe first) and the list is current. Quietly:
+/// what was on screen stays until the new connection has caught up.
 const STALE_AFTER: Duration = Duration::from_secs(20);
+const QUIET_RECONNECT: Duration = Duration::from_millis(1500);
 const DOTS_EVERY: Duration = Duration::from_millis(420);
+/// A conversation opened with nothing to show yet waits this long for its
+/// window before "Loading…" is drawn (Moon holds its page slide for the
+/// first frame up to 150 ms), so it usually slides in with its messages.
+const HOLD_FOR_WINDOW: Duration = Duration::from_millis(110);
 
 struct Renderer {
     window: Window,
@@ -138,6 +145,52 @@ impl ShellReader {
     }
 }
 
+/// How much of a fast core the UI thread is treated as needing while the
+/// app is in front (Linux utilization clamping, 0..=1024).
+const UI_BOOST: u32 = 1024;
+
+/// Asks the scheduler to treat the UI thread as busy (a minimum utilization
+/// clamp) while the app is in front, or not. Its work comes in short bursts
+/// after idling, which energy-aware scheduling starts on a slow core at a low
+/// clock: a full chat frame took 25-35 ms there and 4 ms on a fast core. An
+/// idle thread costs nothing either way. Best effort: a kernel without
+/// utilization clamping refuses it.
+fn boost_ui_thread(on: bool) {
+    #[repr(C)]
+    struct SchedAttr {
+        size: u32,
+        policy: u32,
+        flags: u64,
+        nice: i32,
+        priority: u32,
+        runtime: u64,
+        deadline: u64,
+        period: u64,
+        util_min: u32,
+        util_max: u32,
+    }
+    const KEEP_POLICY: u64 = 0x08;
+    const KEEP_PARAMS: u64 = 0x10;
+    const UTIL_CLAMP_MIN: u64 = 0x20;
+    let attr = SchedAttr {
+        size: std::mem::size_of::<SchedAttr>() as u32,
+        policy: 0,
+        flags: KEEP_POLICY | KEEP_PARAMS | UTIL_CLAMP_MIN,
+        nice: 0,
+        priority: 0,
+        runtime: 0,
+        deadline: 0,
+        period: 0,
+        util_min: if on { UI_BOOST } else { 0 },
+        util_max: 1024,
+    };
+    // SAFETY: sched_setattr reads a live, fully initialized sched_attr of
+    // the size it is told; pid 0 is the calling thread.
+    unsafe {
+        libc::syscall(libc::SYS_sched_setattr, 0, &attr as *const SchedAttr, 0);
+    }
+}
+
 fn withdraw_notification(conversation: String) {
     // Best effort: moon-notifyd may be absent (Android, a host).
     let _ = thread::Builder::new()
@@ -184,11 +237,26 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let mut keyboard_requested = false;
     let mut mapped = false;
     let mut unmapped_at: Option<Instant> = None;
+    // When the loop last went to sleep: a frozen app reads UnmapNotify only
+    // once thawed, so this is when it was hidden.
+    let mut slept_at = Instant::now();
+    // Events from a connection being dropped on purpose are stale.
+    let mut dropping = false;
+    let boost = std::env::var_os("EXOCORTEX_APP_NO_BOOST").is_none();
     let mut next_shell_poll = Instant::now();
     let mut next_dots = Instant::now();
     let mut running = true;
     let mut redraw = true;
     let mut was_flinging = false;
+    let started = Instant::now();
+    let mut list_shown = false;
+    // A conversation opened and when, until it is drawn (profiling).
+    let mut opening: Option<(String, Instant)> = None;
+    // Back in front: when, whether drawn, whether a reconnection is still
+    // to come (profiling).
+    let mut back: Option<(Instant, bool, bool)> = None;
+    // Until when the first frame of a conversation opened empty waits.
+    let mut hold_until: Option<Instant> = None;
 
     // The first frame is drawn before the window maps (as the System app).
     draw_frame(
@@ -219,14 +287,24 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         };
 
         // Daemon events.
-        for event in link.drain() {
+        let applying = Instant::now();
+        let events = link.drain();
+        let count = events.len();
+        for event in events {
             match event {
+                LinkEvent::Event(_) if dropping => continue,
                 LinkEvent::Connected => {
+                    if let Some(back) = &mut back {
+                        back.2 = false;
+                    }
                     for command in model.on_connected() {
                         link.send(command);
                     }
                 }
-                LinkEvent::Disconnected => model.on_disconnected(),
+                LinkEvent::Disconnected => {
+                    dropping = false;
+                    model.on_disconnected();
+                }
                 LinkEvent::Event(event) => {
                     redraw |= model.affects_view(&event);
                     for command in model.apply(*event, now) {
@@ -236,6 +314,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
             }
             redraw = true;
+        }
+        if env_flag("EXOCORTEX_APP_PROFILE") && applying.elapsed() > Duration::from_millis(2) {
+            eprintln!(
+                "exocortex: {count} events applied in {:.2} ms",
+                applying.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         // Moon's state: a tapped notification's target.
@@ -249,11 +333,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 // A target younger than 10 s is still wanted: a notification
                 // just started (or brought forward) the app for it.
                 if open.age_ms < 10_000 {
-                    if model.page == Page::List {
-                        control::transition(true);
-                    }
+                    let from_list = model.page == Page::List;
                     for command in model.open_target(&open.target) {
                         link.send(command);
+                    }
+                    if from_list {
+                        control::transition(true);
                     }
                     view.chat_scroll.reset();
                     view.follow = true;
@@ -281,11 +366,26 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::MapNotify(event) if event.window == window => {
                     mapped = true;
+                    if env_flag("EXOCORTEX_APP_PROFILE") {
+                        let hidden =
+                            unmapped_at.map_or(0.0, |at| now.duration_since(at).as_secs_f64());
+                        eprintln!("exocortex: back in front after {hidden:.1} s hidden");
+                        back = Some((now, false, false));
+                    }
+                    if boost {
+                        boost_ui_thread(true);
+                    }
                     if unmapped_at
                         .take()
                         .is_some_and(|at| now.duration_since(at) > STALE_AFTER)
+                        && model.connected
                     {
+                        model.reconnect_quietly(now, QUIET_RECONNECT);
+                        dropping = true;
                         link.reconnect();
+                        if let Some(back) = &mut back {
+                            back.2 = true;
+                        }
                     }
                     shell.ask();
                     next_shell_poll = now + SHELL_POLL;
@@ -293,7 +393,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::UnmapNotify(event) if event.window == window => {
                     mapped = false;
-                    unmapped_at = Some(now);
+                    if boost {
+                        boost_ui_thread(false);
+                    }
+                    unmapped_at = Some(slept_at.min(now));
                 }
                 XEvent::ButtonPress(event) if event.event == window && event.detail == 1 => {
                     tap = crate::TapTracker::new(
@@ -466,6 +569,20 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             redraw = true;
         }
 
+        if model.page == Page::Chat
+            && model.chat.id != before_start.0
+            && let Some(id) = &model.chat.id
+        {
+            opening = Some((id.clone(), now));
+            hold_until = (!model.chat.loaded).then_some(now + HOLD_FOR_WINDOW);
+        }
+        let holding = hold_until.is_some_and(|until| {
+            now < until && model.page == Page::Chat && model.connected && !model.chat.loaded
+        });
+        if !holding {
+            hold_until = None;
+        }
+
         // Tell the bridge what is shown; withdraw what the user now sees.
         let showing = model.shown_conversation().map(str::to_owned);
         if shown.as_ref() != Some(&showing) {
@@ -533,6 +650,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             model.notice = None;
             redraw = true;
         }
+        redraw |= model.tick(now);
         let animating = mapped && model.page == Page::Chat && model.streaming();
         if animating && now >= next_dots {
             view.dots = view.dots.wrapping_add(1);
@@ -546,7 +664,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
         // Hidden (in the background, perhaps leased awake), nothing is drawn:
         // MapNotify draws what changed meanwhile.
-        if (redraw || flinging) && running && mapped {
+        if (redraw || flinging) && running && mapped && !holding {
             draw_frame(
                 &conn,
                 &mut renderer,
@@ -559,6 +677,49 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 let _ = conn.get_input_focus().map(|cookie| cookie.reply());
             });
             redraw = false;
+            if env_flag("EXOCORTEX_APP_PROFILE") {
+                if !list_shown && model.sidebar.loaded {
+                    list_shown = true;
+                    eprintln!(
+                        "exocortex: list shown {:.1} ms after start",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                if let Some((at, drawn, reconnecting)) = &mut back {
+                    if !*drawn {
+                        *drawn = true;
+                        eprintln!(
+                            "exocortex: back: first frame in {:.1} ms",
+                            at.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    if !*reconnecting && model.connected && !model.chat_pending() {
+                        eprintln!(
+                            "exocortex: back: caught up in {:.1} ms",
+                            at.elapsed().as_secs_f64() * 1000.0
+                        );
+                        back = None;
+                    }
+                }
+                if let Some((id, at)) = &opening
+                    && model.chat.id.as_ref() == Some(id)
+                    && model.chat.loaded
+                {
+                    eprintln!(
+                        "exocortex: opened {id} in {:.1} ms ({} entries{})",
+                        at.elapsed().as_secs_f64() * 1000.0,
+                        model.chat.entries.len(),
+                        if model.chat_pending() {
+                            ", fresh window pending"
+                        } else {
+                            ""
+                        }
+                    );
+                    if !model.chat_pending() {
+                        opening = None;
+                    }
+                }
+            }
         }
 
         // Sleep until X input, a daemon event, Moon's answer or a deadline.
@@ -576,6 +737,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         if let Some((_, at)) = &model.notice {
             soonest(*at + NOTICE_FOR);
         }
+        if let Some(until) = hold_until {
+            soonest(until);
+        }
+        if let Some(until) = model.quiet_deadline() {
+            soonest(until);
+        }
         let timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
         conn.flush()?;
         let mut fds = [
@@ -583,6 +750,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             line::pollfd(link.fd(), libc::POLLIN),
             line::pollfd(shell.waker.fd(), libc::POLLIN),
         ];
+        slept_at = Instant::now();
         line::poll(&mut fds, timeout)?;
     }
 
@@ -615,14 +783,15 @@ fn perform(
         }
         _ => {}
     }
-    let commands = model.handle(action);
+    // The daemon is asked first: its answer is on the way while Moon
+    // snapshots the page.
+    for command in model.handle(action) {
+        link.send(command);
+    }
     let after = page_depth(model);
     if after != depth {
         // Before the new page is drawn: Moon slides it over the old one.
         control::transition(after > depth);
-    }
-    for command in commands {
-        link.send(command);
     }
 }
 
@@ -655,6 +824,7 @@ fn draw_frame(
     // Only what changed is drawn and presented when the last frame is known.
     let chat = view::chat_frame(model, view, pressed, height, now);
     let list = view::list_frame(model, view, pressed, height, now);
+    let laid = started.elapsed();
     let update = match (&renderer.chat_frame, &chat, &renderer.list_frame, &list) {
         (Some(old), Some(new), _, _) => {
             view::draw_chat_update(&mut renderer.canvas, model, view, old, new)
@@ -721,8 +891,9 @@ fn draw_frame(
     conn.flush()?;
     if env_flag("EXOCORTEX_APP_PROFILE") {
         eprintln!(
-            "exocortex: frame drawn in {:.2} ms, presented in {:.2} ms ({kind})",
+            "exocortex: frame drawn in {:.2} ms (layout {:.2}), presented in {:.2} ms ({kind})",
             drawn.as_secs_f64() * 1000.0,
+            laid.as_secs_f64() * 1000.0,
             (started.elapsed() - drawn).as_secs_f64() * 1000.0
         );
     }

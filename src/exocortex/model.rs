@@ -225,13 +225,25 @@ pub struct Live {
     pub offset: usize,
 }
 
-/// The open conversation: a window of its history (entry `start` onward,
-/// from block `start_block` of that entry) and what is streaming.
+/// A new entry identity (`Chat::stamps`): unique in the process, so layouts
+/// cached by stamp stay valid across conversations.
+fn next_stamp() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A conversation: a window of its history (entry `start` onward, from
+/// block `start_block` of that entry) and what is streaming.
 #[derive(Debug, Default)]
 pub struct Chat {
     /// None while composing a new conversation.
     pub id: Option<String>,
     pub entries: Vec<Entry>,
+    /// One per entry, changed exactly when that entry's content changes (a
+    /// window that resends an entry unchanged keeps its stamp): what the
+    /// view caches an entry's layout by.
+    pub stamps: Vec<u64>,
     pub start: u64,
     pub start_block: u64,
     pub has_older: bool,
@@ -244,7 +256,7 @@ pub struct Chat {
     /// Tool outputs fetched on demand (history leaves them out).
     pub outputs: HashMap<String, String>,
     pub outputs_requested: HashSet<String>,
-    /// Bumped on every change: the view's layout cache key.
+    /// Bumped on every change: whether the view lays the chat out again.
     pub version: u64,
     pub error: Option<String>,
 }
@@ -258,9 +270,43 @@ impl Chat {
         self.start + self.entries.len() as u64
     }
 
+    fn push(&mut self, entry: Entry) {
+        self.entries.push(entry);
+        self.stamps.push(next_stamp());
+    }
+
+    /// Replaces the entries (and where they start), keeping the stamp of
+    /// every entry that is the same as before at the same place.
+    fn set_entries(&mut self, entries: Vec<Entry>, start: u64, start_block: u64) {
+        let same_start_block = start_block == self.start_block;
+        let stamps = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let at = start + index as u64;
+                let old = at
+                    .checked_sub(self.start)
+                    .map(|i| i as usize)
+                    .filter(|i| *i < self.entries.len());
+                match old {
+                    // The first entry may begin at another block.
+                    Some(0) if !same_start_block => next_stamp(),
+                    Some(i) if self.entries[i] == *entry => self.stamps[i],
+                    _ => next_stamp(),
+                }
+            })
+            .collect();
+        self.entries = entries;
+        self.stamps = stamps;
+        self.start = start;
+        self.start_block = start_block;
+    }
+
     /// The window the daemon sent replaces what it covers. Messages sent
-    /// from here that it now holds are no longer echoes.
-    fn splice(&mut self, window: proto::Window) {
+    /// from here that it now holds are no longer echoes. `fresh`: a newly
+    /// loaded window (an open, a reconnection), which keeps the older
+    /// history already here only when the two agree where they meet.
+    fn splice(&mut self, window: proto::Window, fresh: bool) {
         self.echoes.retain(|echo| {
             !window
                 .entries
@@ -274,15 +320,38 @@ impl Chat {
             .collect();
         let start = window.history_start_index.unwrap_or(0);
         let start_block = window.history_start_block_index.unwrap_or(0);
-        let covers_all = window.reset_history_window
+        let mut covers_all = window.reset_history_window
             || !self.loaded
+            || window.history_start_index.is_none()
             || start < self.start
             || (start == self.start && start_block <= self.start_block)
             || start > self.end();
+        if fresh && !covers_all {
+            // Where the new window begins must be what is here: the history
+            // before it is then the same (an unwind only cuts the end).
+            let keep = (start - self.start) as usize;
+            let overlap = (self.entries.len() - keep).min(entries.len());
+            let agrees = overlap > 0
+                && (0..overlap).all(|at| {
+                    let (old, new) = (&self.entries[keep + at], &entries[at]);
+                    match (old, new) {
+                        // The newest here may have grown or settled since.
+                        _ if keep + at + 1 == self.entries.len() => true,
+                        // The window may begin inside an entry.
+                        (Entry::Ai { blocks: old, .. }, Entry::Ai { blocks: new, .. })
+                            if at == 0 =>
+                        {
+                            let own = if keep == 0 { self.start_block } else { 0 };
+                            let from = start_block.saturating_sub(own) as usize;
+                            old.get(from..) == Some(new.as_slice())
+                        }
+                        (old, new) => old == new,
+                    }
+                });
+            covers_all = !agrees;
+        }
         if covers_all {
-            self.entries = entries;
-            self.start = start;
-            self.start_block = start_block;
+            self.set_entries(entries, start, start_block);
             self.has_older = window
                 .has_older_history
                 .unwrap_or(start > 0 || start_block > 0);
@@ -299,10 +368,20 @@ impl Chat {
                 joined.append(new);
                 *new = joined;
             }
-            self.entries.truncate(keep);
-            self.entries.extend(incoming);
+            // The entries before the window stay as they are; those it
+            // resends unchanged keep their stamps.
+            let old = self.entries.split_off(keep);
+            let old_stamps = self.stamps.split_off(keep);
+            for (index, entry) in incoming.into_iter().enumerate() {
+                let stamp = match old.get(index) {
+                    Some(before) if *before == entry => old_stamps[index],
+                    _ => next_stamp(),
+                };
+                self.entries.push(entry);
+                self.stamps.push(stamp);
+            }
         }
-        if let Some(pending) = window.pending_ai {
+        if let Some(Some(pending)) = window.pending_ai {
             let live = self.live.get_or_insert_with(Live::default);
             live.blocks = pending.blocks;
             live.offset = pending.block_offset as usize;
@@ -323,15 +402,21 @@ impl Chat {
             .into_iter()
             .filter(|entry| !matches!(entry, Entry::SystemInstructions { .. }))
             .collect();
+        let mut stamps: Vec<u64> = entries.iter().map(|_| next_stamp()).collect();
+        let mut old_stamps = std::mem::take(&mut self.stamps);
         if end_block > 0
             && let Some(Entry::Ai { blocks: tail, .. }) = entries.last_mut()
             && let Some(Entry::Ai { blocks: head, .. }) = self.entries.first_mut()
         {
+            // The page ends inside the first entry here: one entry again.
             tail.append(head);
             self.entries.remove(0);
+            old_stamps.remove(0);
         }
         entries.append(&mut self.entries);
+        stamps.append(&mut old_stamps);
         self.entries = entries;
+        self.stamps = stamps;
         self.start = window.history_start_index.unwrap_or(0);
         self.start_block = window.history_start_block_index.unwrap_or(0);
         self.has_older = window
@@ -349,11 +434,22 @@ impl Chat {
         if let Some(live) = self.live.take()
             && !live.blocks.is_empty()
         {
-            self.entries.push(Entry::Ai {
+            self.push(Entry::Ai {
                 blocks: live.blocks,
                 metadata: None,
             });
         }
+    }
+
+    /// The chat as kept while another is open: its history, without what
+    /// only a live subscription keeps current.
+    fn shelved(mut self) -> Self {
+        self.live = None;
+        self.older_request = None;
+        self.outputs_requested.clear();
+        self.echoes.clear();
+        self.error = None;
+        self
     }
 }
 
@@ -381,6 +477,12 @@ pub enum Action {
 
 pub struct Model {
     pub connected: bool,
+    /// "Reconnecting…" shows: disconnected, and not for a quiet reconnection
+    /// that has not taken long yet.
+    pub offline: bool,
+    /// A reconnection the app asked for (back from the background) keeps
+    /// what is on screen until then, while the new connection catches up.
+    quiet_until: Option<Instant>,
     /// Ever connected: "Connecting…" is said differently the first time.
     pub was_connected: bool,
     pub sidebar: Sidebar,
@@ -402,6 +504,11 @@ pub struct Model {
     /// Requests whose answer opens the chat (load) or replaces it.
     load_request: Option<String>,
     refresh_request: Option<String>,
+    /// Conversations opened before, most recent last: reopening one shows
+    /// it at once while the daemon's fresh window is on its way.
+    shelf: Vec<Chat>,
+    /// Bumped when tool styles change (they label tool rows).
+    pub styles_version: u64,
     /// A conversation to open once connected (a notification's target).
     pub pending_open: Option<String>,
     pub notice: Option<(String, Instant)>,
@@ -423,6 +530,8 @@ impl Model {
     pub fn new() -> Self {
         Self {
             connected: false,
+            offline: true,
+            quiet_until: None,
             was_connected: false,
             sidebar: Sidebar::default(),
             page: Page::List,
@@ -440,6 +549,8 @@ impl Model {
             next_request: 0,
             load_request: None,
             refresh_request: None,
+            shelf: Vec::new(),
+            styles_version: 0,
             pending_open: None,
             notice: None,
         }
@@ -465,6 +576,12 @@ impl Model {
     /// queued turns).
     pub fn streaming(&self) -> bool {
         self.open_summary().is_some_and(|s| s.streaming) || self.chat.live.is_some()
+    }
+
+    /// The open conversation's window is still on its way (what shows is
+    /// what was kept from before).
+    pub fn chat_pending(&self) -> bool {
+        self.load_request.is_some()
     }
 
     /// The conversation shown in the chat, if any, for the bridge.
@@ -508,6 +625,8 @@ impl Model {
     /// The bootstrap, sent on every (re)connection.
     pub fn on_connected(&mut self) -> Vec<Value> {
         self.connected = true;
+        self.offline = false;
+        self.quiet_until = None;
         self.was_connected = true;
         let mut commands = vec![
             proto::client_capabilities(&proto::APP_CAPABILITIES, Some(24)),
@@ -526,12 +645,35 @@ impl Model {
 
     pub fn on_disconnected(&mut self) {
         self.connected = false;
+        self.offline = self.quiet_until.is_none();
         self.load_request = None;
         self.refresh_request = None;
         self.chat.older_request = None;
         self.chat.outputs_requested.clear();
-        // The live tail is unknown until the conversation is reloaded.
-        self.chat.live = None;
+        // The live tail is unknown until the conversation is reloaded (a
+        // quiet reconnection keeps showing it until then).
+        if self.quiet_until.is_none() {
+            self.chat.live = None;
+        }
+    }
+
+    /// The app is about to reconnect on purpose: what is on screen stays,
+    /// without "Reconnecting…", for up to `grace`.
+    pub fn reconnect_quietly(&mut self, now: Instant, grace: std::time::Duration) {
+        self.quiet_until = Some(now + grace);
+    }
+
+    /// When a quiet reconnection stops being quiet.
+    pub fn quiet_deadline(&self) -> Option<Instant> {
+        self.quiet_until.filter(|_| !self.connected)
+    }
+
+    /// Updates `offline` for the time; returns whether it changed.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        let offline = !self.connected && self.quiet_until.is_none_or(|until| now >= until);
+        let changed = offline != self.offline;
+        self.offline = offline;
+        changed
     }
 
     fn open(&mut self, id: String) -> Vec<Value> {
@@ -539,10 +681,12 @@ impl Model {
         let changed = self.chat.id.as_deref() != Some(id.as_str());
         let previous = self.chat.id.clone();
         if changed {
-            self.chat = Chat {
+            let chat = self.unshelve(&id).unwrap_or_else(|| Chat {
                 id: Some(id.clone()),
                 ..Chat::default()
-            };
+            });
+            let old = std::mem::replace(&mut self.chat, chat);
+            self.shelve(old);
             self.composer = self.drafts.get(&id).cloned().unwrap_or_default();
         }
         self.page = Page::Chat;
@@ -554,10 +698,32 @@ impl Model {
         if !self.connected {
             return commands;
         }
-        let request = self.request_id();
-        commands.push(proto::load_conversation(&request, &id));
-        self.load_request = Some(request);
+        commands.extend(self.reload());
         commands
+    }
+
+    /// Keeps a conversation that is no longer open, to show it at once
+    /// when it opens again.
+    fn shelve(&mut self, chat: Chat) {
+        const KEEP: usize = 8;
+        if chat.id.is_none() || !chat.loaded || chat.error.is_some() {
+            return;
+        }
+        self.shelf.retain(|kept| kept.id != chat.id);
+        self.shelf.push(chat.shelved());
+        if self.shelf.len() > KEEP {
+            self.shelf.remove(0);
+        }
+    }
+
+    fn unshelve(&mut self, id: &str) -> Option<Chat> {
+        let index = self
+            .shelf
+            .iter()
+            .position(|chat| chat.id.as_deref() == Some(id))?;
+        let mut chat = self.shelf.remove(index);
+        chat.touch();
+        Some(chat)
     }
 
     /// A tapped notification (or a conversation the app was asked to show).
@@ -566,10 +732,14 @@ impl Model {
             self.pending_open = Some(id.to_owned());
             self.save_draft();
             self.page = Page::Chat;
-            self.chat = Chat {
-                id: Some(id.to_owned()),
-                ..Chat::default()
-            };
+            if self.chat.id.as_deref() != Some(id) {
+                let chat = self.unshelve(id).unwrap_or_else(|| Chat {
+                    id: Some(id.to_owned()),
+                    ..Chat::default()
+                });
+                let old = std::mem::replace(&mut self.chat, chat);
+                self.shelve(old);
+            }
             return Vec::new();
         }
         self.open(id.to_owned())
@@ -597,9 +767,14 @@ impl Model {
             Action::OpenConversation(id) => self.open(id),
             Action::NewConversation => {
                 self.save_draft();
-                let previous = self.chat.id.take();
-                self.chat = Chat::default();
-                self.chat.loaded = true;
+                let previous = self.chat.id.clone();
+                let draft = Chat {
+                    loaded: true,
+                    ..Chat::default()
+                };
+                let old = std::mem::replace(&mut self.chat, draft);
+                self.shelve(old);
+                self.load_request = None;
                 self.draft_selection = None;
                 self.page = Page::Chat;
                 previous
@@ -613,8 +788,9 @@ impl Model {
                     Page::Chat => {
                         self.save_draft();
                         self.page = Page::List;
-                        let id = self.chat.id.take();
-                        self.chat = Chat::default();
+                        let id = self.chat.id.clone();
+                        let old = std::mem::take(&mut self.chat);
+                        self.shelve(old);
                         self.load_request = None;
                         // Not viewing it any more: the daemon may mark it unread.
                         id.filter(|_| self.connected)
@@ -765,7 +941,7 @@ impl Model {
                 };
                 // The daemon echoes no user_message for a conversation's
                 // first message: it is the conversation's first entry.
-                self.chat.entries.push(Entry::User {
+                self.chat.push(Entry::User {
                     text,
                     metadata: None,
                 });
@@ -810,10 +986,15 @@ impl Model {
                 auth_by_provider,
                 conversation_defaults,
             } => {
-                self.tool_styles = tools
+                let styles: HashMap<String, proto::ToolStyle> = tools
                     .into_iter()
                     .map(|tool| (tool.name.to_ascii_lowercase(), tool))
                     .collect();
+                if styles != self.tool_styles {
+                    self.tool_styles = styles;
+                    self.styles_version += 1;
+                    self.chat.touch();
+                }
                 self.providers = providers;
                 self.auth = auth_by_provider;
                 if let Some(snapshot) = conversation_defaults {
@@ -830,9 +1011,13 @@ impl Model {
                 self.chat.touch();
                 Vec::new()
             }
-            Event::ConversationDeleted { conv_id } if self.chat.id.as_deref() == Some(&conv_id) => {
-                self.page = Page::List;
-                self.chat = Chat::default();
+            Event::ConversationDeleted { conv_id } => {
+                self.shelf
+                    .retain(|chat| chat.id.as_deref() != Some(&conv_id));
+                if self.chat.id.as_deref() == Some(&conv_id) {
+                    self.page = Page::List;
+                    self.chat = Chat::default();
+                }
                 Vec::new()
             }
             Event::ConversationLoaded {
@@ -844,14 +1029,23 @@ impl Model {
                 if self.chat.id.as_deref() != Some(&conv_id) {
                     return Vec::new();
                 }
-                if req_id.is_some() && req_id == self.load_request {
+                let backfill = window.initial_backfill_req_id.clone();
+                let streaming = matches!(window.pending_ai, Some(Some(_)));
+                let fresh = req_id.is_some() && req_id == self.load_request;
+                if fresh {
                     self.load_request = None;
-                    self.chat.loaded = false;
                     self.chat.live = None;
                     self.chat.echoes.clear();
+                    self.chat.error = None;
                 }
-                let streaming = window.pending_ai.is_some();
-                self.chat.splice(window);
+                let before = (self.chat.start, self.chat.start_block);
+                self.chat.splice(window, fresh);
+                if fresh {
+                    // The older page follows, unless the history from before
+                    // was kept: it would not join on, so it is not waited for.
+                    let kept = (self.chat.start, self.chat.start_block) == before;
+                    self.chat.older_request = if kept { None } else { backfill };
+                }
                 if !streaming && !self.open_summary().is_some_and(|s| s.streaming) {
                     self.chat.live = None;
                 }
@@ -874,7 +1068,7 @@ impl Model {
                 } else if req_id.is_some() && req_id == self.refresh_request {
                     self.refresh_request = None;
                     let live = self.chat.live.take();
-                    self.chat.splice(window);
+                    self.chat.splice(window, false);
                     if self.open_summary().is_some_and(|s| s.streaming) {
                         self.chat.live = live;
                     }
@@ -884,18 +1078,27 @@ impl Model {
             Event::HistoryUpdated { conv_id, window } => {
                 if self.chat.id.as_deref() == Some(&conv_id) && self.chat.loaded {
                     let had_live = self.chat.live.is_some();
-                    let pending = window.pending_ai.is_some();
-                    self.chat.splice(window);
-                    if had_live && !pending && !self.open_summary().is_some_and(|s| s.streaming) {
-                        self.chat.live = None;
+                    let pending = window.pending_ai.clone();
+                    self.chat.splice(window, false);
+                    match pending {
+                        // The daemon says the turn is over.
+                        Some(None) => self.chat.live = None,
+                        None if had_live && !self.open_summary().is_some_and(|s| s.streaming) => {
+                            self.chat.live = None;
+                        }
+                        _ => {}
                     }
                 }
                 Vec::new()
             }
-            Event::ConversationUnwound { conv_id, .. }
-                if self.chat.id.as_deref() == Some(&conv_id) =>
-            {
-                self.reload()
+            Event::ConversationUnwound { conv_id, .. } => {
+                self.shelf
+                    .retain(|chat| chat.id.as_deref() != Some(&conv_id));
+                if self.chat.id.as_deref() == Some(&conv_id) {
+                    self.reload()
+                } else {
+                    Vec::new()
+                }
             }
             Event::ToolOutputsLoaded { conv_id, outputs } => {
                 if self.chat.id.as_deref() == Some(&conv_id) {
@@ -1062,7 +1265,7 @@ impl Model {
                 }
                 // A message that joins a running turn splits the reply.
                 chat.commit_live();
-                chat.entries.push(Entry::User {
+                chat.push(Entry::User {
                     text,
                     metadata: None,
                 });
@@ -1072,7 +1275,7 @@ impl Model {
                 }
             }
             Event::SystemMessage { text, color, .. } => {
-                chat.entries.push(Entry::System { text, color });
+                chat.push(Entry::System { text, color });
             }
             Event::StreamRetry {
                 attempt,
@@ -1080,7 +1283,7 @@ impl Model {
                 error_message,
                 ..
             } => {
-                chat.entries.push(Entry::System {
+                chat.push(Entry::System {
                     text: format!("Retrying ({attempt}/{max_attempts}): {error_message}"),
                     color: Some("warning".into()),
                 });
@@ -1090,12 +1293,16 @@ impl Model {
         Vec::new()
     }
 
+    /// Asks for the open conversation's newest window (which subscribes to
+    /// it and marks it read), and the older page after it.
     fn reload(&mut self) -> Vec<Value> {
         match self.chat.id.clone() {
             Some(id) if self.connected => {
                 let request = self.request_id();
+                let backfill = self.request_id();
                 self.load_request = Some(request.clone());
-                vec![proto::load_conversation(&request, &id)]
+                self.chat.older_request = Some(backfill.clone());
+                vec![proto::load_conversation(&request, &id, &backfill)]
             }
             _ => Vec::new(),
         }
@@ -1106,6 +1313,7 @@ impl Model {
         if !self.connected
             || !self.chat.has_older
             || self.chat.older_request.is_some()
+            || self.load_request.is_some()
             || !self.chat.loaded
         {
             return Vec::new();
@@ -1115,12 +1323,13 @@ impl Model {
         };
         let request = self.request_id();
         self.chat.older_request = Some(request.clone());
+        self.chat.touch();
         vec![proto::load_history(
             &request,
             &id,
             self.chat.start,
             self.chat.start_block,
-            8,
+            proto::OLDER_TURNS,
         )]
     }
 
@@ -1370,6 +1579,207 @@ mod tests {
         let back = model.handle(Action::Back);
         assert_eq!(back[0]["type"], "unsubscribe");
         assert_eq!(model.shown_conversation(), None);
+    }
+
+    /// A window of `count` user/ai pairs from entry `start`, the ai replies
+    /// saying `reply`.
+    fn window(
+        kind: &str,
+        request: &str,
+        start: u64,
+        count: u64,
+        reply: &str,
+        extra: &str,
+    ) -> String {
+        let entries: Vec<String> = (start..start + count)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!(r#"{{"type":"user","text":"q{i}"}}"#)
+                } else {
+                    format!(r#"{{"type":"ai","blocks":[{{"type":"text","text":"{reply} {i}"}}]}}"#)
+                }
+            })
+            .collect();
+        format!(
+            r#"{{"type":"{kind}","reqId":"{request}","convId":"c","entries":[{}],"historyStartIndex":{start},"historyEndIndex":{},"historyTotalEntries":{},"hasOlderHistory":{}{extra}}}"#,
+            entries.join(","),
+            start + count,
+            start + count,
+            start > 0
+        )
+    }
+
+    #[test]
+    fn an_open_pages_its_window_and_the_backfill_joins_on() {
+        let now = Instant::now();
+        let mut model = connected();
+        let commands = model.handle(Action::OpenConversation("c".into()));
+        let load = &commands[0];
+        assert_eq!(load["type"], "load_conversation");
+        // `turns` is what makes the daemon page at all (and page its
+        // history_updated): without it the whole history comes, every time.
+        assert!(load["turns"].is_u64());
+        let request = load["reqId"].as_str().unwrap().to_owned();
+        let backfill = load["initialBackfill"]["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        model.apply(
+            parse_event(&window(
+                "conversation_loaded",
+                &request,
+                20,
+                4,
+                "a",
+                &format!(r#","initialBackfillReqId":"{backfill}""#),
+            )),
+            now,
+        );
+        assert!(model.chat.loaded);
+        assert_eq!(model.chat.older_request.as_deref(), Some(backfill.as_str()));
+        assert!(model.load_older().is_empty(), "the backfill is that page");
+        model.apply(
+            parse_event(&window(
+                "conversation_history_loaded",
+                &backfill,
+                10,
+                10,
+                "a",
+                "",
+            )),
+            now,
+        );
+        assert_eq!((model.chat.start, model.chat.entries.len()), (10, 14));
+        assert_eq!(model.chat.stamps.len(), 14);
+        let older = model.load_older();
+        assert_eq!(older[0]["beforeEntryIndex"], 10);
+        assert_eq!(older[0]["turns"], proto::OLDER_TURNS);
+    }
+
+    #[test]
+    fn stamps_change_only_with_their_entries() {
+        let now = Instant::now();
+        let mut model = connected();
+        let request = open(&mut model, "c");
+        model.apply(
+            parse_event(&window("conversation_loaded", &request, 0, 6, "a", "")),
+            now,
+        );
+        let stamps = model.chat.stamps.clone();
+        assert_eq!(stamps.len(), 6);
+        // The daemon's newest window again, its last reply changed.
+        let mut updated = window("history_updated", "-", 2, 4, "a", "");
+        updated = updated.replace("a 5", "a 5, longer");
+        model.apply(parse_event(&updated), now);
+        assert_eq!(model.chat.entries.len(), 6);
+        assert_eq!(model.chat.stamps[..5], stamps[..5]);
+        assert_ne!(model.chat.stamps[5], stamps[5]);
+        // A message and a reply are new entries with new stamps.
+        model.apply(
+            parse_event(r#"{"type":"system_message","convId":"c","text":"note"}"#),
+            now,
+        );
+        assert_eq!(model.chat.stamps.len(), 7);
+        assert!(!stamps.contains(&model.chat.stamps[6]));
+    }
+
+    #[test]
+    fn a_reopened_conversation_shows_at_once_and_keeps_what_agrees() {
+        let now = Instant::now();
+        let mut model = connected();
+        let request = open(&mut model, "c");
+        model.apply(
+            parse_event(&window("conversation_loaded", &request, 10, 6, "a", "")),
+            now,
+        );
+        let stamps = model.chat.stamps.clone();
+        model.handle(Action::Back);
+        assert!(model.chat.id.is_none());
+        // Reopened: the kept history shows while the fresh window comes.
+        let request = open(&mut model, "c");
+        assert!(model.chat.loaded && model.chat_pending());
+        assert_eq!(model.chat.stamps, stamps);
+        // The fresh window starts inside what is kept and agrees there (its
+        // last reply grew): the older entries stay, with their stamps.
+        let fresh = window("conversation_loaded", &request, 14, 2, "a", "")
+            .replace("a 15", "a 15 and more");
+        model.apply(parse_event(&fresh), now);
+        assert!(!model.chat_pending());
+        assert_eq!((model.chat.start, model.chat.entries.len()), (10, 6));
+        assert_eq!(model.chat.stamps[..5], stamps[..5]);
+        assert!(model.chat.older_request.is_none());
+        // One that does not agree where it begins replaces everything.
+        model.handle(Action::Back);
+        let request = open(&mut model, "c");
+        let rewritten = window("conversation_loaded", &request, 12, 4, "rewritten", "");
+        model.apply(parse_event(&rewritten), now);
+        assert_eq!((model.chat.start, model.chat.entries.len()), (12, 4));
+    }
+
+    #[test]
+    fn a_null_live_tail_ends_the_reply() {
+        let now = Instant::now();
+        let mut model = connected();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_updated","summary":{}}}"#,
+                summary("c", false, 0.0, None)
+                    .replace(r#""streaming":false"#, r#""streaming":true"#)
+            )),
+            now,
+        );
+        let request = open(&mut model, "c");
+        model.apply(
+            parse_event(&window("conversation_loaded", &request, 0, 2, "a", "")),
+            now,
+        );
+        model.apply(
+            parse_event(r#"{"type":"text_chunk","convId":"c","text":"partial"}"#),
+            now,
+        );
+        assert!(model.chat.live.is_some());
+        // Absent: the live tail stays (an older daemon says nothing).
+        model.apply(
+            parse_event(&window("history_updated", "-", 0, 2, "a", "")),
+            now,
+        );
+        assert!(model.chat.live.is_some());
+        model.apply(
+            parse_event(&window(
+                "history_updated",
+                "-",
+                0,
+                2,
+                "a",
+                r#","pendingAI":null"#,
+            )),
+            now,
+        );
+        assert!(model.chat.live.is_none());
+    }
+
+    #[test]
+    fn a_quiet_reconnection_keeps_the_screen_for_a_while() {
+        let now = Instant::now();
+        let mut model = connected();
+        let request = open(&mut model, "c");
+        model.apply(
+            parse_event(&window("conversation_loaded", &request, 0, 2, "a", "")),
+            now,
+        );
+        model.apply(
+            parse_event(r#"{"type":"text_chunk","convId":"c","text":"partial"}"#),
+            now,
+        );
+        model.reconnect_quietly(now, std::time::Duration::from_secs(1));
+        model.on_disconnected();
+        assert!(!model.offline && model.chat.live.is_some());
+        assert!(!model.tick(now));
+        assert!(model.tick(now + std::time::Duration::from_secs(2)));
+        assert!(model.offline);
+        let commands = model.on_connected();
+        assert!(!model.offline);
+        assert!(commands.iter().any(|c| c["type"] == "load_conversation"));
     }
 
     #[test]

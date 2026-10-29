@@ -107,7 +107,11 @@ fn run(
             ui.wake();
             match outcome {
                 Outcome::Quit => return,
-                Outcome::Reconnect => attempt = 0,
+                // Asked for: connect again at once.
+                Outcome::Reconnect => {
+                    attempt = 0;
+                    continue;
+                }
                 Outcome::Lost if started.elapsed() > Duration::from_secs(5) => attempt = 0,
                 Outcome::Lost => {}
             }
