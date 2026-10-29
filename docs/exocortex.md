@@ -53,8 +53,10 @@ lands), and scrolling up asks for the older page again.
 
 The app has three pages, left to right as on the iPhone: Settings, the
 list, a conversation. Back (the top bar's chevron, Moon's Back, a swipe from
-the left edge) goes a page left, ending a search on the list first; the
-list's ⋯ menu opens
+the left edge, or a swipe to the right anywhere nothing on the page
+scrolls sideways) goes a page left, ending a search on the list first; a
+swipe to the left goes a page right: Settings to the list, the list to the
+conversation it last showed (PAR-001). The list's ⋯ menu opens
 Settings too. Everything is drawn in the Whale theme and JetBrains Mono
 (roadmap §3); sheets, menus, dialogs, toasts and the reader open over the
 pages.
@@ -249,8 +251,10 @@ All daemon I/O runs on the app's link thread (`src/exocortex/link.rs`), which
 also parses events, so a megabyte list never costs the UI a frame. It sleeps
 in `poll(2)` on the socket and an eventfd, and wakes the UI through another
 eventfd that the UI loop polls with X. When the daemon goes away the app says
-"Reconnecting…" and connects again (backoff 0.1 s to 4 s), then bootstraps
-from scratch. Moon's state (a tapped notification's target, the time zone) is
+so (`Model::link_status`, one wording for the chat's subtitle and the
+list's pill: "Daemon restarting…" after a `daemon_shutdown` for a restart,
+"Daemon stopped", else "Reconnecting…") and connects again (backoff 0.1 s
+to 4 s), then bootstraps from scratch. Moon's state (a tapped notification's target, the time zone) is
 read on its own thread too, once a second while the app is in front.
 
 Back in front after more than 20 s, the app reconnects: Moon froze it, so the
@@ -424,10 +428,18 @@ additions are the only shared edits.
   the theme or text size call `theme::set_current(theme::by_id(id))` /
   `theme::set_text_scale(s)`: the generation changes, every layout cache is
   dropped and the next frame is drawn whole. Text size (E, Settings) has
-  the iPhone's first six steps, `ops::TEXT_SIZES` (Extra small 0.82 to XXL
-  1.36; its Accessibility sizes are left out, the bars keep their
-  heights); the transcript's body text is `T_BODY` (`markdown_layout::body()`),
-  so it follows too.
+  the iPhone's nine steps, `ops::TEXT_SIZES` (Extra small 0.82 to XXL 1.36,
+  then Accessibility 1-3: 1.6, 1.9, 2.25); the transcript's body text is
+  `T_BODY` (`markdown_layout::body()`), so it follows too. What holds
+  text grows with it, as on the iPhone: top bars are `theme::top_bar()`
+  (122 up to 1.3x, then 44 pt x min(scale, 2.4) x 0.8; place a bar's
+  controls with `theme::in_bar(y)`, start content at `theme::below_bar()`
+  or `view::chat_top()`, damage the bar with `widgets::top_bar_rows()`),
+  and a row laid out for the default size takes
+  `theme::grown(base, text_px)`: its text part grows, its padding does
+  not, never below `base` (list rows are `theme::list_row()`, the
+  iPhone's `max(58, 39 x scale + 19)` pt). A new fixed height that holds
+  text should do the same.
 
 ### View: pages, frames and pieces
 
@@ -491,7 +503,9 @@ additions are the only shared edits.
   stops watching so). A floating overlay that belongs to the page
   (`page_level()`: E's chips) is hidden under a modal one and takes no
   touches then. E's panels are `sheets::panel`: rows (sections,
-  key/value, navigation, task rows, rail cards, bars, buttons) built from
+  key/value, navigation, task rows, rail cards, bars, buttons, rules,
+  leads, fields, plain actions, the connection card `Status`, the
+  accounts grid `GridHead` / `Account`, the token heatmap `Heat`) built from
   the model each frame (`Panel::{Goal, Activity, Chrono, Btw, SystemPrompt,
   Usage, Accounts, Connection, Tokens, Find}`), opened with
   `model.open_panel(..)`; Settings shows panel rows too.
@@ -507,13 +521,16 @@ additions are the only shared edits.
   (composites mixed from it), never literals; text from the type tokens
   (`T_ROW`, `T_TITLE`, `T_EYEBROW`, `T_BODY`, `T_CODE`, …: size, line,
   weight, tracking, uppercase, scaled by the text size); spacing from the
-  metrics (`S1`…`S5`, `TOP_BAR`, `TARGET`, `GESTURE_RESERVE`, …).
+  metrics (`S1`…`S5`, `TARGET`, `GESTURE_RESERVE`, …; `theme::top_bar()`
+  rather than `TOP_BAR`, which is the default size's).
 - **Gestures.** `gesture::Recognizer` turns pointer events into `Down`,
   `Lift` (150 ms held), `LongPress` (600 ms), `DragStart { axis, edge }`,
   `Drag`, `DragEnd { vx, vy }`, `Tap`, `Back` (a swipe from the left 60 px
   over 30% of the width, or a flick) and `Cancel`; a move past 32 px makes
   it a drag and cancels the press, and the axis is chosen once. The top
-  overlay gets gestures first.
+  overlay gets gestures first. A sideways drag that no inner scroller or
+  the composer's editor takes is a page swipe when it ends
+  (`gesture::page_swipe`, the edge swipe's thresholds).
 - **What runs where** (E, `model/ops.rs`). `model.resolve()` is what the
   open conversation (its list summary, else its window) or the draft runs
   with: provider, model, effort, speed, and whether a draft only inherits
