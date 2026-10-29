@@ -677,7 +677,13 @@ pub fn long_press(
 
 /// After a long press, the finger moving to (`x`, `y`): what that does
 /// (the composer's selection follows it), if anything.
-pub fn long_press_move(model: &Model, view: &ViewState, height: f32, x: f32, y: f32) -> Option<Action> {
+pub fn long_press_move(
+    model: &Model,
+    view: &ViewState,
+    height: f32,
+    x: f32,
+    y: f32,
+) -> Option<Action> {
     match model.page {
         Page::Chat => composer::long_press_move(model, height, view.keyboard, x, y),
         _ => None,

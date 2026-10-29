@@ -282,11 +282,17 @@ pub enum Act {
     /// The "+" button (attachments, P2).
     Attach,
     /// A tap in the editor at text `index`; `focused`: the keyboard was up.
-    Place { index: usize, focused: bool },
+    Place {
+        index: usize,
+        focused: bool,
+    },
     /// A long press at `index`: its word selected, the menu.
     SelectWord(usize),
     /// A finger moving an end of the selection (or the caret) to `index`.
-    MoveEnd { end: End, index: usize },
+    MoveEnd {
+        end: End,
+        index: usize,
+    },
     /// That finger let go: the menu for what is selected.
     EndSelect,
     /// The editor's text dragged to this scroll.
@@ -367,7 +373,12 @@ impl Model {
             return;
         }
         self.composer.drafts.load(&self.persist);
-        let text = self.composer.drafts.get(&key).unwrap_or_default().to_owned();
+        let text = self
+            .composer
+            .drafts
+            .get(&key)
+            .unwrap_or_default()
+            .to_owned();
         self.composer.set_text(text);
         self.composer.key = Some(key);
     }
@@ -552,7 +563,11 @@ impl Model {
                 Vec::new()
             }
             Act::Copy => {
-                let selected = self.composer.cursor().selected(&self.composer.text).to_owned();
+                let selected = self
+                    .composer
+                    .cursor()
+                    .selected(&self.composer.text)
+                    .to_owned();
                 if !selected.is_empty() {
                     self.ui.effect(Effect::Copy(selected));
                     self.ui.haptic(Haptic::Selection);
@@ -611,7 +626,9 @@ impl Model {
         let serial = self.composer.serial;
         self.composer.menu = Some(serial);
         self.ui
-            .open(Box::new(crate::exocortex::view::composer::EditMenu::new(serial)));
+            .open(Box::new(crate::exocortex::view::composer::EditMenu::new(
+                serial,
+            )));
     }
 
     /// "Deliver message" (PAR-183): the next turn (or Steer now), or the
@@ -646,15 +663,22 @@ impl Model {
         let Some(q) = self.composer.find_queued(id).cloned() else {
             return;
         };
-        let provider = self.sidebar.conversations.get(&q.conv_id).map(|s| s.provider.as_str());
+        let provider = self
+            .sidebar
+            .conversations
+            .get(&q.conv_id)
+            .map(|s| s.provider.as_str());
         let label = queue_label(&q, provider);
         let optimistic = self.composer.optimistic(id);
         let mut items = Vec::new();
         if !optimistic && q.command.is_none() && q.automation.is_none() {
             items.push(
-                ActionItem::new("Edit in composer", Action::Composer(Act::PullBack(id.to_owned())))
-                    .icon(super::super::ui::icons::Icon::Rewind)
-                    .detail("Remove from the queue and put it back in the draft"),
+                ActionItem::new(
+                    "Edit in composer",
+                    Action::Composer(Act::PullBack(id.to_owned())),
+                )
+                .icon(super::super::ui::icons::Icon::Rewind)
+                .detail("Remove from the queue and put it back in the draft"),
             );
         }
         items.push(
@@ -662,9 +686,12 @@ impl Model {
                 .icon(super::super::ui::icons::Icon::Copy),
         );
         items.push(
-            ActionItem::new("Remove from queue", Action::Composer(Act::Unqueue(id.to_owned())))
-                .icon(super::super::ui::icons::Icon::Trash)
-                .tone(Tone::Destructive),
+            ActionItem::new(
+                "Remove from queue",
+                Action::Composer(Act::Unqueue(id.to_owned())),
+            )
+            .icon(super::super::ui::icons::Icon::Trash)
+            .tone(Tone::Destructive),
         );
         let subtitle = format!(
             "Delivers {}{}",
@@ -687,7 +714,8 @@ impl Model {
             return Vec::new();
         }
         if self.composer.optimistic(id) {
-            self.ui.toast("Exocortex has not confirmed this message yet.");
+            self.ui
+                .toast("Exocortex has not confirmed this message yet.");
             return Vec::new();
         }
         let conv = self.composer.find_queued(id).map(|q| q.conv_id.clone());
@@ -733,7 +761,8 @@ impl Model {
             return Vec::new();
         }
         if self.composer.stopping.contains_key(&id) {
-            self.ui.toast("Exocortex is already stopping this response.");
+            self.ui
+                .toast("Exocortex is already stopping this response.");
             return Vec::new();
         }
         let started = self.chat.live.as_ref().map(|live| live.started_at);
@@ -788,7 +817,10 @@ impl Model {
                     requests::DEFAULT_WITHIN,
                     now,
                 );
-                let queue_id = format!("phone-{started_at}-{:06x}", started_at.wrapping_mul(2654435761) & 0xff_ffff);
+                let queue_id = format!(
+                    "phone-{started_at}-{:06x}",
+                    started_at.wrapping_mul(2654435761) & 0xff_ffff
+                );
                 self.composer.pending.push((
                     request.clone(),
                     Queued {
@@ -995,7 +1027,9 @@ impl Model {
                     self.unqueued(&id);
                     self.chat.touch();
                 }
-                self.composer.stopping.retain(|_, request| request != req_id);
+                self.composer
+                    .stopping
+                    .retain(|_, request| request != req_id);
             }
             Event::ConversationCreated {
                 req_id: Some(req_id),
@@ -1187,5 +1221,386 @@ impl Model {
             "unqueue" => self.composer_error(id, "Exocortex did not answer. Try again."),
             _ => self.generic_timeout(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exocortex::model::Nav;
+    use crate::exocortex::proto::parse_event;
+    use crate::exocortex::store::DRAFTS;
+
+    fn summary(id: &str, streaming: bool) -> String {
+        format!(
+            r#"{{"type":"conversation_updated","summary":{{"id":"{id}","provider":"anthropic","model":"m","effort":"low","title":"{id}","pinned":false,"sortOrder":0,"streaming":{streaming},"unread":false}}}}"#
+        )
+    }
+
+    /// Ready, with conversations `c` and `d` (`c` working when `streaming`),
+    /// `c` open.
+    fn ready(streaming: bool) -> Model {
+        let mut model = Model::new();
+        let bootstrap = model.on_connected();
+        let ping = bootstrap.last().unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let now = Instant::now();
+        model.apply(
+            parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
+            now,
+        );
+        model.apply(parse_event(&summary("c", streaming)), now);
+        model.apply(parse_event(&summary("d", false)), now);
+        open(&mut model, "c");
+        model
+    }
+
+    fn open(model: &mut Model, id: &str) {
+        let commands = model.handle(Action::Nav(Nav::OpenConversation(id.into())));
+        let load = commands
+            .iter()
+            .find(|c| c["type"] == "load_conversation")
+            .unwrap();
+        let request = load["reqId"].as_str().unwrap().to_owned();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_loaded","reqId":"{request}","convId":"{id}","entries":[{{"type":"user","text":"q"}},{{"type":"ai","blocks":[{{"type":"text","text":"a"}}]}}],"historyStartIndex":0}}"#
+            )),
+            Instant::now(),
+        );
+    }
+
+    fn type_text(model: &mut Model, text: &str) {
+        for character in text.chars() {
+            model.composer_key(if character == '\n' {
+                KeyInput::Enter
+            } else {
+                KeyInput::Character(character)
+            });
+        }
+    }
+
+    fn opened(model: &mut Model) -> Vec<String> {
+        model
+            .ui
+            .opening
+            .drain(..)
+            .map(|overlay| overlay.label())
+            .collect()
+    }
+
+    fn apply(model: &mut Model, line: &str) -> Vec<Value> {
+        model.apply(parse_event(line), Instant::now())
+    }
+
+    #[test]
+    fn typing_return_and_backspace_edit_at_the_caret() {
+        let mut model = ready(false);
+        type_text(&mut model, "helo\nworld");
+        assert_eq!(model.composer.text, "helo\nworld", "Return is a line break");
+        model.handle(Action::Composer(Act::Place {
+            index: 3,
+            focused: true,
+        }));
+        type_text(&mut model, "l");
+        assert_eq!(model.composer.text, "hello\nworld");
+        model.composer_key(KeyInput::Backspace);
+        model.composer_key(KeyInput::Backspace);
+        assert_eq!(model.composer.text, "heo\nworld");
+        // A second tap at the caret opens the edit menu; Select all, Cut.
+        let caret = model.composer.cursor().caret;
+        model.handle(Action::Composer(Act::Place {
+            index: caret,
+            focused: true,
+        }));
+        assert_eq!(opened(&mut model), vec!["edit menu: "]);
+        model.handle(Action::Composer(Act::SelectAll));
+        model.handle(Action::Composer(Act::Cut));
+        assert!(model.composer.text.is_empty());
+        assert!(
+            model
+                .ui
+                .effects
+                .contains(&Effect::Copy("heo\nworld".into()))
+        );
+        model.ui.effects.clear();
+        model.handle(Action::Composer(Act::Paste));
+        assert_eq!(model.ui.effects, vec![Effect::Paste]);
+        model.paste_text(Some("pasted\r\ntext".into()));
+        assert_eq!(model.composer.text, "pasted\ntext");
+        model.paste_text(None);
+        assert_eq!(
+            opened(&mut model).last().map(String::as_str),
+            Some("Nothing to paste.")
+        );
+    }
+
+    #[test]
+    fn a_send_is_confirmed_by_its_echo() {
+        let mut model = ready(false);
+        type_text(&mut model, "Hello");
+        let sent = model.handle(Action::Composer(Act::Send));
+        assert_eq!(sent[0]["type"], "send_message");
+        assert!(model.composer.text.is_empty() && model.submitting());
+        let started = sent[0]["startedAt"].as_u64().unwrap();
+        apply(
+            &mut model,
+            &format!(
+                r#"{{"type":"user_message","convId":"c","text":"Hello","startedAt":{started}}}"#
+            ),
+        );
+        assert!(!model.submitting());
+        assert!(model.requests.is_empty(), "nothing waited on");
+    }
+
+    #[test]
+    fn a_refused_send_goes_back_into_its_draft_after_navigating_away() {
+        let mut model = ready(false);
+        type_text(&mut model, "Hello");
+        let sent = model.handle(Action::Composer(Act::Send));
+        let request = sent[0]["reqId"].as_str().unwrap().to_owned();
+        assert_eq!(model.chat.echoes.len(), 1);
+        open(&mut model, "d");
+        type_text(&mut model, "other");
+        opened(&mut model);
+        apply(
+            &mut model,
+            &format!(
+                r#"{{"type":"error","reqId":"{request}","convId":"c","message":"Already streaming"}}"#
+            ),
+        );
+        // Said where the user is; the text waits in c's draft.
+        assert_eq!(opened(&mut model), vec!["Not sent: Already streaming"]);
+        assert_eq!(model.composer.text, "other");
+        open(&mut model, "c");
+        assert_eq!(model.composer.text, "Hello");
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some("Not sent: Already streaming")
+        );
+        assert!(model.chat.echoes.is_empty());
+        // Typing clears the error.
+        type_text(&mut model, "!");
+        assert!(model.composer_error_label().is_none());
+    }
+
+    #[test]
+    fn an_unconfirmed_send_is_restored_when_its_deadline_passes() {
+        let mut model = ready(false);
+        type_text(&mut model, "Hello");
+        model.handle(Action::Composer(Act::Send));
+        type_text(&mut model, "typed since");
+        model.expire(Instant::now() + requests::DEFAULT_WITHIN + Duration::from_secs(1));
+        assert_eq!(model.composer.text, "Hello\ntyped since");
+        assert!(
+            model
+                .composer_error_label()
+                .unwrap()
+                .text
+                .starts_with("Not sent:")
+        );
+    }
+
+    #[test]
+    fn a_failed_new_chat_comes_back_as_its_folders_draft() {
+        let mut model = ready(false);
+        model.sidebar.path.push("f1".into());
+        model.handle(Action::Nav(Nav::NewConversation));
+        assert_eq!(model.composer.key.as_deref(), Some("draft:f1"));
+        type_text(&mut model, "First message");
+        let sent = model.handle(Action::Composer(Act::Send));
+        assert_eq!(sent[0]["type"], "new_conversation");
+        assert_eq!(sent[0]["folderId"], "f1");
+        // A blank draft: the daemon's defaults (PAR-277).
+        for key in ["provider", "model", "effort"] {
+            assert!(sent[0].get(key).is_none(), "{key}");
+        }
+        let request = sent[0]["reqId"].as_str().unwrap().to_owned();
+        assert!(model.chat.id.is_some());
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"error","reqId":"{request}","message":"Not authenticated"}}"#),
+        );
+        assert!(model.chat.id.is_none(), "back to the new chat");
+        assert_eq!(model.composer.text, "First message");
+        assert_eq!(model.composer.key.as_deref(), Some("draft:f1"));
+        assert!(model.composer_error_label().is_some());
+    }
+
+    #[test]
+    fn deliver_message_queues_at_the_chosen_timing_or_sends_once_the_turn_ended() {
+        let mut model = ready(true);
+        type_text(&mut model, "steer");
+        assert!(model.handle(Action::Composer(Act::Send)).is_empty());
+        assert_eq!(opened(&mut model), vec!["Deliver message"]);
+        let queued = model.handle(Action::Composer(Act::Deliver(Timing::NextTurn)));
+        assert_eq!(queued[0]["type"], "queue_message");
+        assert_eq!(queued[0]["timing"], "next-turn");
+        let id = queued[0]["queueId"].as_str().unwrap().to_owned();
+        // Shown at once, confirmed by the daemon's queue.
+        let shown = model.queued_here();
+        assert_eq!(shown.len(), 1);
+        assert!(model.composer.optimistic(&id));
+        assert_eq!(model.queued_caption(shown[0]), "queued: next turn");
+        apply(
+            &mut model,
+            &format!(
+                r#"{{"type":"queue_updated","messages":[{{"id":"{id}","convId":"c","text":"steer","timing":"next-turn","source":"daemon"}}],"settledQueueIds":["{id}"]}}"#
+            ),
+        );
+        assert!(!model.composer.optimistic(&id));
+        assert_eq!(model.queued_here().len(), 1);
+        // Message end.
+        type_text(&mut model, "later");
+        model.handle(Action::Composer(Act::Send));
+        let queued = model.handle(Action::Composer(Act::Deliver(Timing::MessageEnd)));
+        assert_eq!(queued[0]["timing"], "message-end");
+        // One message of a draft at a time: the next waits for the ack.
+        type_text(&mut model, "more");
+        assert!(
+            model
+                .handle(Action::Composer(Act::Deliver(Timing::MessageEnd)))
+                .is_empty()
+        );
+        let request = queued[0]["reqId"].as_str().unwrap();
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"ack","reqId":"{request}"}}"#),
+        );
+        model.composer.text.clear();
+        // The turn ends while the choice is open: sent at once (PAR-257).
+        type_text(&mut model, "after");
+        model.handle(Action::Composer(Act::Send));
+        apply(&mut model, &summary("c", false));
+        let sent = model.handle(Action::Composer(Act::Deliver(Timing::NextTurn)));
+        assert_eq!(sent[0]["type"], "send_message");
+    }
+
+    #[test]
+    fn a_refused_queue_entry_goes_back_into_the_draft() {
+        let mut model = ready(true);
+        type_text(&mut model, "later");
+        model.handle(Action::Composer(Act::Send));
+        let queued = model.handle(Action::Composer(Act::Deliver(Timing::MessageEnd)));
+        let request = queued[0]["reqId"].as_str().unwrap().to_owned();
+        apply(
+            &mut model,
+            &format!(
+                r#"{{"type":"error","reqId":"{request}","convId":"c","message":"Invalid queue timing"}}"#
+            ),
+        );
+        assert!(model.queued_here().is_empty());
+        assert_eq!(model.composer.text, "later");
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some("Not queued: Invalid queue timing")
+        );
+    }
+
+    #[test]
+    fn a_removed_queue_entry_stays_until_the_daemon_says_so() {
+        let mut model = ready(true);
+        let entry = r#"{"id":"q1","convId":"c","text":"queued text","timing":"message-end","source":"daemon"}"#;
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"queue_updated","messages":[{entry}]}}"#),
+        );
+        model.handle(Action::Composer(Act::Queued("q1".into())));
+        assert_eq!(opened(&mut model), vec!["Queued message"]);
+        let remove = model.handle(Action::Composer(Act::Unqueue("q1".into())));
+        assert_eq!(remove[0]["type"], "unqueue_message");
+        assert_eq!(remove[0]["queueId"], "q1");
+        assert_eq!(model.queued_caption(model.queued_here()[0]), "Removing…");
+        assert!(
+            model
+                .handle(Action::Composer(Act::Unqueue("q1".into())))
+                .is_empty(),
+            "once"
+        );
+        apply(
+            &mut model,
+            r#"{"type":"queue_updated","messages":[],"settledQueueIds":["q1"]}"#,
+        );
+        assert!(model.queued_here().is_empty());
+        // Refused: it stays, saying why.
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"queue_updated","messages":[{entry}]}}"#),
+        );
+        let remove = model.handle(Action::Composer(Act::Unqueue("q1".into())));
+        let request = remove[0]["reqId"].as_str().unwrap().to_owned();
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"error","reqId":"{request}","message":"Queue locked"}}"#),
+        );
+        assert_eq!(model.queued_caption(model.queued_here()[0]), "Queue locked");
+        // Pulled back: the text returns to the conversation's draft.
+        let pull = model.handle(Action::Composer(Act::PullBack("q1".into())));
+        let request = pull[0]["reqId"].as_str().unwrap().to_owned();
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"ack","reqId":"{request}"}}"#),
+        );
+        assert!(model.queued_here().is_empty());
+        assert_eq!(model.composer.text, "queued text");
+    }
+
+    #[test]
+    fn stop_goes_once_and_works_before_the_daemon_is_ready() {
+        let mut model = ready(true);
+        let stop = model.handle(Action::Composer(Act::Abort));
+        assert_eq!(stop[0]["type"], "abort");
+        assert!(model.stopping());
+        opened(&mut model);
+        assert!(model.handle(Action::Composer(Act::Abort)).is_empty());
+        assert_eq!(
+            opened(&mut model),
+            vec!["Exocortex is already stopping this response."]
+        );
+        apply(&mut model, r#"{"type":"streaming_stopped","convId":"c"}"#);
+        assert!(!model.stopping());
+        model.ready = false;
+        assert_eq!(
+            model.handle(Action::Composer(Act::Abort))[0]["type"],
+            "abort"
+        );
+    }
+
+    #[test]
+    fn drafts_follow_their_conversations_and_are_kept() {
+        let mut model = ready(false);
+        type_text(&mut model, "for c");
+        open(&mut model, "d");
+        assert!(model.composer.text.is_empty());
+        type_text(&mut model, "for d");
+        model.handle(Action::Nav(Nav::Back));
+        model.handle(Action::Nav(Nav::NewConversation));
+        assert!(model.composer.text.is_empty(), "a new chat's own draft");
+        open(&mut model, "c");
+        assert_eq!(model.composer.text, "for c");
+        open(&mut model, "d");
+        assert_eq!(model.composer.text, "for d");
+        // Written into drafts.json once typing pauses.
+        type_text(&mut model, "!");
+        let due = model.answer_deadline().unwrap();
+        model.tick(due);
+        let kept: serde_json::Map<String, Value> = model.persist.section(DRAFTS, "drafts");
+        assert_eq!(kept["c"]["text"], "for c");
+        assert_eq!(kept["d"]["text"], "for d!");
+        // Sent: gone from the kept drafts.
+        model.handle(Action::Composer(Act::Send));
+        let kept: serde_json::Map<String, Value> = model.persist.section(DRAFTS, "drafts");
+        assert!(!kept.contains_key("d"));
+    }
+
+    #[test]
+    fn a_message_over_the_budget_is_not_sent() {
+        let mut model = ready(false);
+        model.composer.text = "x".repeat(BUDGET + 1);
+        assert!(model.handle(Action::Composer(Act::Send)).is_empty());
+        assert!(model.composer_error_label().unwrap().text.contains("12 MB"));
+        assert_eq!(model.composer.text.len(), BUDGET + 1, "nothing lost");
     }
 }

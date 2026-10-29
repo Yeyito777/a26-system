@@ -1077,7 +1077,11 @@ mod tests {
         );
         assert!(model.ready);
         // A running turn: Send asks when the message joins it.
-        assert!(model.handle(Action::Composer(composer::Act::Send)).is_empty());
+        assert!(
+            model
+                .handle(Action::Composer(composer::Act::Send))
+                .is_empty()
+        );
         assert_eq!(opened(&mut model), vec!["Deliver message"]);
         assert_eq!(
             model.handle(Action::Composer(composer::Act::Deliver(

@@ -161,12 +161,8 @@ impl Cursor {
 
     /// The selection, start before end, if there is one.
     pub fn selection(&self) -> Option<(usize, usize)> {
-        (self.caret != self.anchor).then(|| {
-            (
-                self.caret.min(self.anchor),
-                self.caret.max(self.anchor),
-            )
-        })
+        (self.caret != self.anchor)
+            .then(|| (self.caret.min(self.anchor), self.caret.max(self.anchor)))
     }
 
     /// Both ends on cluster boundaries inside `text`.
@@ -491,7 +487,11 @@ mod tests {
         assert_eq!(cursor.cut(&mut text).as_deref(), Some("hello"));
         assert_eq!(text, "\nworld    ");
         cursor = Cursor::word(&text, 6);
-        assert_eq!(cursor.selected(&text), "world", "at a word's end: that word");
+        assert_eq!(
+            cursor.selected(&text),
+            "world",
+            "at a word's end: that word"
+        );
         cursor.insert(&mut text, "earth");
         assert_eq!(text, "\nearth    ");
         cursor = Cursor::select_all(&text);
@@ -546,7 +546,11 @@ mod tests {
         // "one two ", "three ", "four"
         assert_eq!(lines.len(), 3);
         let second = lines[1];
-        assert_eq!(line_of(&lines, second.start), 1, "a soft break: the next line");
+        assert_eq!(
+            line_of(&lines, second.start),
+            1,
+            "a soft break: the next line"
+        );
         assert_eq!(index_at(text, &second, cell * 2.4, &m), second.start + 2);
         assert_eq!(index_at(text, &second, cell * 2.6, &m), second.start + 3);
         assert_eq!(index_at(text, &second, 9999.0, &m), second.end);
@@ -568,7 +572,11 @@ mod tests {
         let text = "Can you also check the logs from yesterday?";
         for line in wrap(text, 700.0, &m) {
             let drawn = text::measure(&text[line.start..line.end], m.weight, m.size);
-            assert!((drawn - line.width).abs() < 0.01, "{drawn} vs {}", line.width);
+            assert!(
+                (drawn - line.width).abs() < 0.01,
+                "{drawn} vs {}",
+                line.width
+            );
         }
     }
 }

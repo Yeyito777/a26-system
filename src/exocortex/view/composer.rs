@@ -21,6 +21,8 @@ use crate::gfx::{Canvas, RectF};
 use super::super::anim::{self, Animator, Tween};
 use super::super::editor::{self, Line, Metrics};
 use super::super::gesture::Gesture;
+#[cfg(test)]
+use super::super::model::composer;
 use super::super::model::composer::{Act, End};
 use super::super::model::{Action, Model, Page};
 use super::super::theme::{
@@ -48,16 +50,34 @@ const CARET_W: f32 = 5.0;
 const CARET_H: f32 = 52.0;
 /// The handles' dots.
 const HANDLE_R: f32 = 13.0;
-/// The spinner in a button's face.
+/// The spinner in a button's face, and how often it is drawn a step on
+/// (20 steps a turn).
 const SPINNER: f32 = 39.0;
+const SPINNER_STEP_MS: u64 = 35;
+
+/// The time a spinner is drawn at: `now` back to the start of its step, so
+/// every frame within a step draws the same pixels (the frame key names the
+/// step).
+fn spinner_time(now: Instant) -> Instant {
+    let into = (anim::phase(now, SPINNER_STEP_MS) * SPINNER_STEP_MS as f32).round() as u64;
+    now.checked_sub(Duration::from_millis(into)).unwrap_or(now)
+}
+
+fn spinner_step(now: Instant) -> u32 {
+    (anim::phase(spinner_time(now), 700) * 20.0).round() as u32
+}
 
 /// The button left of Stop (or rightmost).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Primary {
     None,
-    Send { enabled: bool },
+    Send {
+        enabled: bool,
+    },
     /// A turn is running: Send asks when the message joins it.
-    Queue { enabled: bool },
+    Queue {
+        enabled: bool,
+    },
     /// A message from this draft is on its way.
     Busy,
 }
@@ -189,10 +209,13 @@ fn metrics() -> Metrics {
 
 /// The composer's text wrapped, kept until it changes: the island's height
 /// (and so the transcript's bounds) is asked for many times a frame.
+/// The last text wrapped: the text, the width, the theme generation, its
+/// lines.
+type Wrapped = (String, f32, u64, Option<Rc<Vec<Line>>>);
+
 fn wrapped(text: &str, width: f32) -> Rc<Vec<Line>> {
     thread_local! {
-        static LAST: RefCell<(String, f32, u64, Option<Rc<Vec<Line>>>)> =
-            const { RefCell::new((String::new(), 0.0, 0, None)) };
+        static LAST: RefCell<Wrapped> = const { RefCell::new((String::new(), 0.0, 0, None)) };
     }
     let generation = theme::generation();
     LAST.with(|last| {
@@ -279,7 +302,11 @@ pub fn geometry(model: &Model, height: f32, keyboard: bool) -> ComposerGeometry 
     };
     // The editor's scroll: kept inside the text, and moved (as little as
     // it takes) to show the caret after it moved or the text changed.
-    let mut scroll = model.composer.scroll.get().clamp(0.0, geometry.max_scroll());
+    let mut scroll = model
+        .composer
+        .scroll
+        .get()
+        .clamp(0.0, geometry.max_scroll());
     if model.composer.reveal.get() {
         let caret = model.composer.cursor().caret;
         let top = editor::line_of(&geometry.lines, caret) as f32 * line;
@@ -330,7 +357,7 @@ pub fn frame_key(model: &Model, keyboard: bool, pressed: Option<&Action>, now: I
         t,
         error,
         caret_shows(model, keyboard, now),
-        busy.then(|| (anim::phase(now, 700) * 60.0) as u32),
+        busy.then(|| spinner_step(now)),
         super::action_key(pressed.filter(|action| owns(action))),
         theme::generation(),
     )
@@ -406,9 +433,11 @@ pub fn long_press(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) ->
     if !geometry.island.contains(x, y) || buttons.iter().flatten().any(|b| near(*b, x, y)) {
         return None;
     }
-    Some(Action::Composer(Act::SelectWord(
-        geometry.index_at(&model.composer.text, x, y),
-    )))
+    Some(Action::Composer(Act::SelectWord(geometry.index_at(
+        &model.composer.text,
+        x,
+        y,
+    ))))
 }
 
 /// After a long press in the editor, the finger moving: the selection
@@ -452,7 +481,9 @@ pub fn drag_start(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) ->
     if keyboard {
         let cursor = model.composer.cursor();
         let ends = match cursor.selection() {
-            Some((a, _)) if a == cursor.caret => [(End::Caret, cursor.caret), (End::Anchor, cursor.anchor)],
+            Some((a, _)) if a == cursor.caret => {
+                [(End::Caret, cursor.caret), (End::Anchor, cursor.anchor)]
+            }
             Some(_) => [(End::Anchor, cursor.anchor), (End::Caret, cursor.caret)],
             None => [(End::Caret, cursor.caret), (End::Caret, cursor.caret)],
         };
@@ -632,9 +663,12 @@ fn draw_editor(
     let cursor = model.composer.cursor();
     let lines = &geometry.lines;
     let viewport = geometry.viewport;
-    let first = ((viewport.y - editor.y + geometry.scroll) / line).floor().max(0.0) as usize;
-    let last = (((viewport.y + viewport.h - editor.y + geometry.scroll) / line).ceil().max(0.0)
-        as usize)
+    let first = ((viewport.y - editor.y + geometry.scroll) / line)
+        .floor()
+        .max(0.0) as usize;
+    let last = (((viewport.y + viewport.h - editor.y + geometry.scroll) / line)
+        .ceil()
+        .max(0.0) as usize)
         .min(lines.len());
     let top_of = |row: usize| editor.y + row as f32 * line - geometry.scroll;
     widgets::clipped(canvas, viewport, |canvas| {
@@ -765,14 +799,30 @@ fn draw_trailing(
         }
         Primary::Busy => {
             canvas.fill_circle(sx, sy, face(false), c.send_disabled_face, 1.0);
-            widgets::spinner(canvas, sx, sy, SPINNER, p.accent, c.send_disabled_face, now);
+            widgets::spinner(
+                canvas,
+                sx,
+                sy,
+                SPINNER,
+                p.accent,
+                c.send_disabled_face,
+                spinner_time(now),
+            );
         }
     }
     if let (Some((x, y)), Some(stopping)) = (geometry.stop, geometry.trailing.stop) {
         let down = !stopping && pressed == Some(&Action::Composer(Act::Abort));
         canvas.fill_circle(x, y, face(down), c.stop_face, 1.0);
         if stopping {
-            widgets::spinner(canvas, x, y, SPINNER, p.error, c.stop_face, now);
+            widgets::spinner(
+                canvas,
+                x,
+                y,
+                SPINNER,
+                p.error,
+                c.stop_face,
+                spinner_time(now),
+            );
         } else {
             let side = if down { 26.0 } else { 30.0 };
             canvas.fill_rrect(
@@ -792,6 +842,7 @@ const MENU_OUT: Duration = Duration::from_millis(100);
 const MENU_H: f32 = 110.0;
 const MENU_PAD: f32 = 34.0;
 const MENU_SHADOW: f32 = 44.0;
+const MENU_SHADOW_DY: f32 = 11.0;
 
 /// The edit menu over the editor's caret or selection: a row of Cut,
 /// Copy, Paste, Select, Select all. Floating: touches elsewhere go on to
@@ -896,7 +947,10 @@ impl Overlay for EditMenu {
         let geometry = geometry(model, cx.height, cx.keyboard);
         let at = selection.map_or(cursor.caret, |(a, _)| a);
         let (x, top) = geometry.locate(text, at);
-        let line_top = top.clamp(geometry.viewport.y, geometry.viewport.y + geometry.viewport.h);
+        let line_top = top.clamp(
+            geometry.viewport.y,
+            geometry.viewport.y + geometry.viewport.h,
+        );
         let y = (line_top - S2 - HANDLE_R * 2.0 - MENU_H).max(CHAT_TOP + S1);
         let left = (x - w / 2.0).clamp(S2, W - S2 - w).round();
         self.rect = RectF::new(left, y.round(), w, MENU_H);
@@ -915,7 +969,10 @@ impl Overlay for EditMenu {
         let mut key = DefaultHasher::new();
         (
             self.serial,
-            self.items.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            self.items
+                .iter()
+                .map(|(label, _)| *label)
+                .collect::<Vec<_>>(),
             self.rect.x.to_bits(),
             self.rect.y.to_bits(),
             self.rect.w.to_bits(),
@@ -927,7 +984,7 @@ impl Overlay for EditMenu {
         Body {
             rows: (
                 (self.rect.y - MENU_SHADOW).floor() as i32,
-                (self.rect.y + self.rect.h + MENU_SHADOW).ceil() as i32,
+                (self.rect.y + self.rect.h + MENU_SHADOW + MENU_SHADOW_DY).ceil() as i32 + 1,
             ),
             solid: None,
             scroller: None,
@@ -943,7 +1000,7 @@ impl Overlay for EditMenu {
         let p = theme::p();
         let c = theme::c();
         let r = self.rect;
-        widgets::shadow(canvas, r, MENU_SHADOW, 11.0, 0.4 * alpha);
+        widgets::shadow(canvas, r, MENU_SHADOW, MENU_SHADOW_DY, 0.4 * alpha);
         canvas.fill_rect(
             r.x as i32,
             r.y as i32,
@@ -1048,6 +1105,316 @@ impl Overlay for EditMenu {
             (_, Some(closed)) => animator.follow(&Tween::new(closed, MENU_OUT, 0.0, 1.0), cx.now),
             (Some(opened), None) => animator.follow(&Tween::new(opened, MENU_IN, 0.0, 1.0), cx.now),
             (None, None) => animator.frame(cx.now),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exocortex::model::Nav;
+    use crate::exocortex::proto::parse_event;
+    use crate::exocortex::view::{Frame, FrameDamage, ViewState, frame};
+    use crate::keys::KeyInput;
+
+    const SIZE: (i32, i32) = (1080, 2216);
+
+    /// Ready, conversation `c` open with an exchange in it.
+    fn chat(streaming: bool) -> Model {
+        let mut model = Model::new();
+        let bootstrap = model.on_connected();
+        let ping = bootstrap.last().unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let now = Instant::now();
+        model.apply(
+            parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
+            now,
+        );
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_updated","summary":{{"id":"c","provider":"anthropic","model":"m","effort":"low","title":"c","pinned":false,"sortOrder":0,"streaming":{streaming},"unread":false}}}}"#
+            )),
+            now,
+        );
+        let commands = model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        let request = commands[0]["reqId"].as_str().unwrap().to_owned();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_loaded","reqId":"{request}","convId":"c","entries":[{{"type":"user","text":"Hello"}},{{"type":"ai","blocks":[{{"type":"text","text":"Hi there."}}]}}],"historyStartIndex":0}}"#
+            )),
+            now,
+        );
+        model
+    }
+
+    fn type_text(model: &mut Model, text: &str) {
+        for character in text.chars() {
+            model.composer_key(if character == '\n' {
+                KeyInput::Enter
+            } else {
+                KeyInput::Character(character)
+            });
+        }
+    }
+
+    fn full(model: &mut Model, view: &mut ViewState, now: Instant) -> Canvas {
+        let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+        frame::clear(&mut canvas);
+        frame::draw_full(&mut canvas, model, view, None, now);
+        canvas
+    }
+
+    /// The next frame drawn from `old` (incrementally when the pipeline
+    /// can): it equals a full redraw.
+    fn step(
+        canvas: &mut Canvas,
+        model: &mut Model,
+        view: &mut ViewState,
+        old: &Frame,
+        now: Instant,
+    ) -> (Frame, Option<FrameDamage>) {
+        view.take_ui(model, now);
+        let new = frame::record(model, view, None, SIZE, now);
+        let damage = frame::update(canvas, model, view, None, old, &new, now);
+        let whole = full(model, view, now);
+        if damage.is_none() {
+            *canvas = whole;
+            return (new, None);
+        }
+        let width = SIZE.0 as usize;
+        let differing: Vec<usize> = (0..SIZE.1 as usize)
+            .filter(|y| {
+                whole.pixels[y * width..(y + 1) * width]
+                    != canvas.pixels[y * width..(y + 1) * width]
+            })
+            .collect();
+        assert!(
+            differing.is_empty(),
+            "frame differs from a full redraw in rows {:?}..{:?}: {damage:?}",
+            differing.first(),
+            differing.last()
+        );
+        (new, damage)
+    }
+
+    #[test]
+    fn sixteen_numbered_lines_keep_the_caret_in_view() {
+        let mut model = chat(false);
+        let lines: Vec<String> = (1..=16).map(|i| format!("{i}. item number {i}")).collect();
+        type_text(&mut model, &lines.join("\n"));
+        let height = SIZE.1 as f32 - 900.0;
+        for _ in 0..2 {
+            let g = geometry(&model, height, true);
+            assert_eq!(g.lines.len(), 16);
+            assert_eq!(
+                g.editor.h,
+                EDITOR_LINES as f32 * T_COMPOSER.line(),
+                "six lines shown"
+            );
+            let (_, top) = g.locate(&model.composer.text, model.composer.cursor().caret);
+            assert!(
+                top >= g.editor.y && top + T_COMPOSER.line() <= g.editor.y + g.editor.h,
+                "the caret's line shows"
+            );
+        }
+        // Scrolled up by hand, it stays there until the caret moves.
+        model.handle(Action::Composer(Act::Scroll(0.0)));
+        assert_eq!(geometry(&model, height, true).scroll, 0.0);
+        assert_eq!(geometry(&model, height, true).scroll, 0.0);
+        type_text(&mut model, "!");
+        let g = geometry(&model, height, true);
+        assert_eq!(g.scroll, g.max_scroll());
+        // A drag in the text scrolls it.
+        let drag = drag_start(&model, height, false, 500.0, g.editor.y + 100.0).unwrap();
+        assert!(matches!(drag, EditDrag::Scroll { .. }));
+        let action = super::drag(&model, height, false, drag, 500.0, g.editor.y + 300.0).unwrap();
+        assert_eq!(
+            action,
+            Action::Composer(Act::Scroll(g.max_scroll() - 200.0))
+        );
+    }
+
+    #[test]
+    fn a_tap_places_the_caret_at_the_glyph_under_it() {
+        let mut model = chat(false);
+        type_text(
+            &mut model,
+            "a😀b é\nwrapping words go on and on and on and on until the line ends",
+        );
+        let height = SIZE.1 as f32;
+        let g = geometry(&model, height, true);
+        let text = model.composer.text.clone();
+        assert!(g.lines.len() >= 3, "it wraps");
+        let mut index = 0;
+        loop {
+            let (x, top) = g.locate(&text, index);
+            let hit = hit(&model, height, true, x + 2.0, top + 20.0);
+            let row = editor::line_of(&g.lines, index);
+            // The end of a soft-wrapped line is the next line's start.
+            let soft = !text[index..].starts_with('\n');
+            let expected = if soft && index == g.lines[row].end && row + 1 < g.lines.len() {
+                g.lines[row + 1].start
+            } else {
+                index
+            };
+            assert_eq!(
+                hit,
+                Some(Hit::Action(Action::Composer(Act::Place {
+                    index: expected,
+                    focused: true
+                }))),
+                "at {index}"
+            );
+            if index == text.len() {
+                break;
+            }
+            index = editor::cluster_end(&text, index);
+        }
+        // A long press selects the word under the finger.
+        let (x, top) = g.locate(&text, text.find("words").unwrap() + 2);
+        let action = long_press(&model, height, true, x, top + 20.0).unwrap();
+        model.handle(action);
+        assert_eq!(
+            model.composer.cursor().selected(&model.composer.text),
+            "words"
+        );
+        // Its handles are grabbed by a drag near them.
+        let cursor = model.composer.cursor();
+        let (hx, htop) = g.locate(&text, cursor.caret.max(cursor.anchor));
+        let drag = drag_start(&model, height, true, hx + 10.0, htop + 40.0);
+        assert!(matches!(drag, Some(EditDrag::End { .. })));
+    }
+
+    #[test]
+    fn the_send_queue_and_stop_buttons_follow_the_turn() {
+        let mut model = chat(true);
+        assert_eq!(
+            trailing(&model),
+            Trailing {
+                primary: Primary::None,
+                stop: Some(false)
+            }
+        );
+        type_text(&mut model, "x");
+        assert_eq!(trailing(&model).primary, Primary::Queue { enabled: true });
+        let g = geometry(&model, 2216.0, false);
+        assert_eq!(
+            hit(&model, 2216.0, false, g.send.0, g.send.1),
+            Some(Hit::Action(Action::Composer(Act::Send)))
+        );
+        let stop = g.stop.unwrap();
+        assert_eq!(
+            hit(&model, 2216.0, false, stop.0, stop.1),
+            Some(Hit::Action(Action::Composer(Act::Abort)))
+        );
+        model.handle(Action::Composer(Act::Abort));
+        assert_eq!(trailing(&model).stop, Some(true));
+        model.ready = false;
+        assert_eq!(trailing(&model).primary, Primary::Queue { enabled: false });
+    }
+
+    #[test]
+    fn editing_frames_equal_full_redraws() {
+        let mut model = chat(true);
+        let mut view = ViewState::new();
+        view.keyboard = true;
+        let t0 = Instant::now();
+        view.take_ui(&mut model, t0);
+        let mut old = frame::record(&mut model, &mut view, None, SIZE, t0);
+        let mut canvas = full(&mut model, &mut view, t0);
+        let mut at = t0;
+        let mut frames = |model: &mut Model,
+                          view: &mut ViewState,
+                          change: &dyn Fn(&mut Model),
+                          ms: u64|
+         -> Option<FrameDamage> {
+            change(model);
+            at += Duration::from_millis(ms);
+            let (new, damage) = step(&mut canvas, model, view, &old, at);
+            old = new;
+            damage
+        };
+        // Typing redraws the composer's rows only.
+        for character in "Hello there".chars() {
+            let damage = frames(
+                &mut model,
+                &mut view,
+                &|model| {
+                    model.composer_key(KeyInput::Character(character));
+                },
+                30,
+            )
+            .expect("typing is incremental");
+            // (The header's working dot pulses meanwhile.)
+            let rows: i32 = damage
+                .rows
+                .iter()
+                .filter(|rows| **rows != widgets::TOP_BAR_ROWS)
+                .map(|(a, b)| b - a)
+                .sum();
+            assert!(rows < 300, "only the island: {damage:?}");
+        }
+        // The caret blinks; it moves; a word is selected, with the menu
+        // fading in over its own rows.
+        frames(&mut model, &mut view, &|_| {}, 600);
+        frames(&mut model, &mut view, &|_| {}, 530);
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                model.handle(Action::Composer(Act::Place {
+                    index: 2,
+                    focused: true,
+                }));
+            },
+            10,
+        );
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                model.handle(Action::Composer(Act::SelectWord(1)));
+                model.handle(Action::Composer(Act::EndSelect));
+            },
+            10,
+        );
+        for _ in 0..20 {
+            frames(&mut model, &mut view, &|_| {}, 8);
+        }
+        assert!(view.overlays.len() == 1);
+        // Stop pressed: its spinner turns.
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                model.handle(Action::Composer(Act::Abort));
+            },
+            10,
+        );
+        for _ in 0..5 {
+            frames(&mut model, &mut view, &|_| {}, 33);
+        }
+        // An error label rises over the island (the transcript's bottom
+        // moves: drawn whole), then fades in over its own rows.
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                let key = model.composer.key.clone().unwrap();
+                model.composer.errors.insert(
+                    key,
+                    composer::ComposerError {
+                        text: "Not sent: something went wrong".into(),
+                        since: Instant::now(),
+                    },
+                );
+            },
+            0,
+        );
+        for _ in 0..30 {
+            frames(&mut model, &mut view, &|_| {}, 8);
         }
     }
 }

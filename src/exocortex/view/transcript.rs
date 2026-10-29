@@ -468,7 +468,8 @@ impl ViewState {
             y = single(self, &mut items, y, key, &|| {
                 let mut laid = lay_user(&queued.text, 0.58, Some(&caption));
                 let action = Action::Composer(composer::Act::Queued(queued.id.clone()));
-                laid.hits.push((crate::gfx::RectF::new(0.0, 0.0, W, laid.h), action));
+                laid.hits
+                    .push((crate::gfx::RectF::new(0.0, 0.0, W, laid.h), action));
                 laid
             });
         }
