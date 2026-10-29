@@ -825,9 +825,9 @@ impl Model {
                         .open(Box::new(sheet::prompt_sheet(sheet::Prompt::new(
                             "Edit queued message",
                             if q.command.is_some() {
-                                "Runs its command when ready; edit its arguments."
+                                "Runs its command when ready."
                             } else {
-                                "Saved in the queue; it is delivered as before."
+                                "It stays in the queue, delivered as before."
                             },
                             q.text.clone(),
                             "Save",
