@@ -265,13 +265,20 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
     )
     .icon(Icon::Sparkle)
     .detail(label.clone());
+    // D's Discard draft (PAR-190), when there is one to discard.
+    let discard = (!model.composer.text.trim().is_empty() && !model.submitting()).then(|| {
+        ActionItem::new("Discard draft", Action::Composer(composer::Act::Discard))
+            .icon(Icon::Trash)
+            .tone(Tone::Destructive)
+    });
     let Some(id) = model.chat.id.clone() else {
-        let items = vec![
+        let mut items = vec![
             model_item,
             ActionItem::new("System prompt", Action::Ops(ops::Act::OpenSystemPrompt))
                 .icon(Icon::FileText)
                 .detail("Read the effective prompt"),
         ];
+        items.extend(discard);
         return action_sheet(ActionList::new("New chat", items).scoped());
     };
     let mut items = Vec::new();
@@ -376,6 +383,7 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
             .icon(Icon::Copy)
             .detail(id),
     );
+    items.extend(discard);
     let mut line = label;
     if let Some(tokens) = model.context_tokens() {
         line = format!("{line} · {} context tokens", ops::grouped(tokens));
