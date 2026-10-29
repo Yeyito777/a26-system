@@ -314,7 +314,8 @@ pub(crate) struct Context<'a> {
 /// An automated prompt (PAR-112, 402): how it is labelled.
 pub(crate) struct Automated {
     kind: String,
-    preview: String,
+    /// The conversation it came from.
+    source: Option<String>,
 }
 
 /// What an entry is drawn as, worked out once per entry (by its stamp; a
@@ -408,7 +409,7 @@ fn plan_user(text: &str, metadata: Option<&Metadata>) -> Vec<Segment> {
     vec![Segment::User {
         automated: Some(Automated {
             kind: field("kind").unwrap_or_default(),
-            preview: fold::notification_preview(text),
+            source: field("sourceId"),
         }),
         relay: None,
     }]
@@ -955,23 +956,35 @@ impl ViewState {
                         }
                         _ => None,
                     };
-                    let own = |id: &str| own_subagent(model, id);
-                    // A parent's delegation is this conversation's prompt.
-                    let Some(label) = fold::notification_label(text, automation, &own) else {
-                        let label =
-                            fold::bubble_label(text, automation, fold::label_of(&a.kind), &source);
-                        let piece = self.piece(hash_of(("auto", text, &label)), || {
-                            lay_bubble(text, Tone::Automated, Some(&label), true)
-                        });
-                        at.put(piece);
-                        continue;
+                    // Its label (`fold::notification_label`, the plan having
+                    // told it from the owner's words): a parent's delegation
+                    // is this conversation's prompt.
+                    let label = if a.kind == "exo_send" {
+                        a.source
+                            .as_deref()
+                            .filter(|id| own_subagent(model, id))
+                            .map(|_| fold::label_of("exo_send"))
+                    } else {
+                        Some(fold::label_of(&a.kind))
                     };
-                    let bubble = |view: &mut Self, at: &mut Placer| {
-                        let label = fold::bubble_label(text, automation, label, &source);
-                        let piece = view.piece(hash_of(("auto", text, &label)), || {
+                    // The automated bubble, its line laid out with it (the
+                    // sender's title is in its key).
+                    let bubble = |view: &mut Self, at: &mut Placer, label: &str| {
+                        let sender = a
+                            .source
+                            .as_deref()
+                            .and_then(|id| model.sidebar.conversations.get(id))
+                            .map(|s| s.title.as_str());
+                        let key = hash_of(("auto", text, label, sender));
+                        let piece = view.piece(key, || {
+                            let label = fold::bubble_label(text, automation, label, &source);
                             lay_bubble(text, Tone::Automated, Some(&label), true)
                         });
                         at.put(piece);
+                    };
+                    let Some(label) = label else {
+                        bubble(self, &mut at, fold::label_of(&a.kind));
+                        continue;
                     };
                     // Opened with its turn's work: the row it opened leads.
                     if let Some(merged) = shown.merged
@@ -986,7 +999,7 @@ impl ViewState {
                     }
                     // Shown in full (all work shown, or its fold open).
                     if !shown.folding || shown.merged.is_some_and(|m| m.open) {
-                        bubble(self, &mut at);
+                        bubble(self, &mut at, label);
                         continue;
                     }
                     let key = format!("u:{}", hash_of(text));
@@ -994,15 +1007,14 @@ impl ViewState {
                     if at.index == 0 {
                         at.lead();
                     }
-                    let piece = self
-                        .piece(hash_of(("note", &key, label, &a.preview, open)), || {
-                            lay_notification(label, &a.preview, &key, open)
-                        });
+                    let piece = self.piece(hash_of(("note", &key, label, open)), || {
+                        lay_notification(label, &fold::notification_preview(text), &key, open)
+                    });
                     at.put(piece);
                     tail_gap = ROW_GAP - NOTIFICATION_TRIM;
                     if open {
                         at.h -= NOTIFICATION_TRIM - 17.0;
-                        bubble(self, &mut at);
+                        bubble(self, &mut at, label);
                         tail_gap = ROW_GAP;
                     }
                 }
