@@ -365,6 +365,12 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
             "Every tool call and notification"
         }),
     );
+    // D's Edit… (PAR-268): queued and sent messages, instructions.
+    items.push(
+        ActionItem::new("Edit…", Action::Composer(composer::Act::EditPicker))
+            .icon(Icon::Pencil)
+            .detail("Rewind a sent message or edit the queue"),
+    );
     items.push(
         ActionItem::new("Copy conversation id", Action::Ui(UiAct::Copy(id.clone())))
             .icon(Icon::Copy)
@@ -615,6 +621,7 @@ mod tests {
                 "Usage limits",
                 "Reload conversation",
                 "Show all work",
+                "Edit…",
                 "Copy conversation id"
             ]
         );

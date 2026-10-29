@@ -25,6 +25,9 @@ pub struct Queued {
     pub wait_target: Option<Value>,
     pub folder_id: Option<String>,
     pub created_at: f64,
+    /// Its images (the daemon's copy has their bytes; one queued from here
+    /// shows them by id until the daemon's arrives).
+    pub images: Vec<super::ImageAttachment>,
 }
 
 /// `queue_updated`'s ids settled for this client.
@@ -47,6 +50,36 @@ pub struct QueueNotice {
 pub struct Transcription {
     pub req_id: Option<String>,
     pub text: String,
+}
+
+/// `path_directory_entries`: a directory on the daemon's host, for path
+/// completion (PAR-235).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PathEntries {
+    pub req_id: Option<String>,
+    pub listings: Vec<PathListing>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PathListing {
+    /// As the prompt spells it (`~/src/`).
+    pub directory: String,
+    /// Every entry starts with it.
+    pub prefix: String,
+    pub entries: Vec<PathEntry>,
+    /// A large directory, cut short.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PathEntry {
+    pub name: String,
+    /// `dir` or `file`.
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 /// `user_macros`: the daemon's user macros (the picker's to read).

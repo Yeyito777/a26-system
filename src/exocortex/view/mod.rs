@@ -17,6 +17,7 @@ pub mod chat_header;
 pub mod code;
 pub mod composer;
 pub mod draft;
+pub mod files;
 pub mod frame;
 pub mod list;
 pub mod markdown_layout;
@@ -295,7 +296,7 @@ pub fn chat_frame(
     let (top, bottom) = transcript_bounds(model, height, view.keyboard);
     let pressed = pressed_action(pressed).cloned();
     let offset = view.chat_scroll.value(now).round();
-    let transcript = transcript::frame(model, view, (top, bottom), offset, now);
+    let transcript = transcript::frame(model, view, (top, bottom), offset, pressed.as_ref(), now);
     Some(ChatFrame {
         bounds: (top as i32, bottom as i32),
         height: height as i32,
@@ -493,6 +494,28 @@ pub fn draw_chat_update(
         );
     }
     damage.rows = merged;
+    // Fold marks that changed in place: their column.
+    let marks =
+        transcript::gutter_damage(&old.transcript, &new.transcript, new.offset, (top, bottom));
+    for rows in frame::merge(marks) {
+        for rows in transcript::subtract_rows(rows, &damage.rows) {
+            let x1 = transcript::gutter_columns();
+            let outer = canvas.clip();
+            canvas.set_clip(0, outer.1, x1, outer.3);
+            transcript::draw_band(
+                canvas,
+                model,
+                view,
+                new.pressed.as_ref(),
+                rows,
+                0,
+                new.offset,
+                now,
+            );
+            canvas.set_clip(outer.0, outer.1, outer.2, outer.3);
+            damage.areas.push((0, rows.0, x1, rows.1));
+        }
+    }
     // The jump button floats: the rows under it in its columns.
     if let Some((y0, y1)) =
         transcript::jump_damage(&old.transcript, &new.transcript, shift, (top, bottom))
@@ -946,51 +969,42 @@ mod tests {
             )),
             Instant::now(),
         );
+        // Every row (C2's folding has its own tests).
+        model.persist.update_settings(|s| s.show_all_work = true);
         model
     }
 
     #[test]
-    fn tool_runs_fold_and_expand_on_tap() {
+    fn tool_rows_open_on_tap() {
         let now = Instant::now();
         let mut model = chat_model();
         let mut view = ViewState::default();
         view.layout(&model);
         let height = 2216.0;
-        // The history's edge, a bubble, then one folded row for four calls,
-        // then the text.
-        let group = view.layout.items[2].laid.hits.clone();
-        assert_eq!(group.len(), 1);
+        // The history's edge, a bubble, a row per call, then the text.
+        assert_eq!(view.layout.items.len(), 7);
+        let row = view.layout.items[2].laid.hits.clone();
+        assert_eq!(row.len(), 1);
         assert_eq!(
-            group[0].1,
-            Action::Chat(chat::Act::ToggleExpanded("group:t0".into()))
+            row[0].1,
+            Action::Chat(chat::Act::ToggleExpanded("tool:t0".into()))
         );
         let (top, _) = transcript_bounds(&model, height, false);
-        let y = top + view.layout.items[2].y + group[0].0.y + 10.0;
+        let y = top + view.layout.items[2].y + row[0].0.y + 10.0;
         let hit_action = hit(&mut model, &mut view, height, 300, y as i16, now);
         assert_eq!(
             hit_action,
             Some(Hit::Action(Action::Chat(chat::Act::ToggleExpanded(
-                "group:t0".into()
+                "tool:t0".into()
             ))))
         );
-        // The reply's pieces: the folded row, then the text.
-        assert_eq!(view.layout.items.len(), 4);
         let before = view.layout.height;
-        let text = view.layout.items[3].laid.clone();
-        model.handle(Action::Chat(chat::Act::ToggleExpanded("group:t0".into())));
+        let text = view.layout.items[6].laid.clone();
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("tool:t0".into())));
         view.layout(&model);
-        // Opened: the row, a row per call, and the same text piece below.
-        let hits: Vec<&Action> = view.layout.items[2..]
-            .iter()
-            .flat_map(|item| item.laid.hits.iter().map(|(_, action)| action))
-            .collect();
-        assert_eq!(hits.len(), 5);
-        assert_eq!(
-            hits[1],
-            &Action::Chat(chat::Act::ToggleExpanded("tool:t0".into()))
-        );
-        assert!(view.layout.height > before + 3.0 * TOOL_ROW);
-        assert!(Rc::ptr_eq(&view.layout.items[7].laid, &text));
+        // Opened: its output under it, the same text piece below.
+        assert!(view.layout.height > before + TOOL_ROW / 2.0);
+        assert!(Rc::ptr_eq(&view.layout.items[6].laid, &text));
         // The composer and send button are hit; the transcript elsewhere.
         let geometry = composer::geometry(&model, height, false);
         assert_eq!(

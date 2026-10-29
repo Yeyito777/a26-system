@@ -90,24 +90,46 @@ the `pong` was not made: it is taken back, the user told, and the list asked
 for again. An unanswered change goes after 10 s.
 
 The transcript is the iPhone's (roadmap §3.6.6–3.6.14, `fake-02…08`): the
-user's bubbles right-aligned with an accent rail (sent ones not yet echoed
-at 86 %, queued ones at 58 % with "queued: next turn"); automated prompts
-folded into a row ("CHRONO  Chrono wake: …") that opens to the automated
-bubble with "⚙ Chrono · from …" under it (a parent's delegation is shown as
-that bubble); replies as markdown (`src/exocortex/markdown.rs`); thinking
-boxes ("THINKING", OPEN for the reader; Settings' Expand thinking opens
-them); a tool row per call in its tool's colour (label and summary, three
-lines folded, ERR and ✗ when it failed, a spinner while it runs; opened,
-Read full output, Copy and a 6000-byte preview); a run of three or more
-calls folds into one row ("4 TOOL CALLS  $, Read"); system notices as
-coloured boxes (three lines, open to all of it and Copy), the compaction
-divider, `[Context:` text dim, model-only notices not at all; one metadata
-footer per run of replies (`OPUS-5.5 | 76.2 TOK/S | 2:03PM`, `footer.rs`,
-model names from `model_display.rs`), a tap on it or a long press on a
-message opens Copy message / Edit in composer / Read in full. The live
-reply shows WORKING until it shows something, the retry, compaction and
-connection-wait lines, and a footer whose duration ticks. A jump-to-latest
+System Instructions box at the top (the folder's and the conversation's;
+opens to the text, Copy and Open; C1's folder draft draws its inherited
+instructions through the same `blocks::lay_instructions`); the user's
+bubbles right-aligned with an accent rail (sent ones not yet echoed at 86 %,
+queued ones at 58 % with "queued: next turn"), documents sent with them as
+file chips (D's `attachments::split`; a tap reads "<name> · extracted text"),
+the owner's own words a notification relays as their bubble ("via
+Discord/…"); notifications as a row ("CHRONO  Chrono wake: …") opening to
+the automated bubble with "⚙ Chrono · from …" under it (a parent's
+delegation is shown as that bubble); replies as markdown
+(`src/exocortex/markdown.rs`); thinking boxes ("THINKING", OPEN for the
+reader; Settings' Expand thinking opens them); a tool row per call in its
+tool's colour, its lines as the TUI shows them (`toolcall.rs`: a bash
+command per segment, each in its tool's label and colour; an exo call's
+prompt), folded to three rows for a shell call and to eight of one longer
+than twelve, ERR and ✗ when it failed, a spinner while it runs, "Open
+subagent conversation" for the subagent an exo call started; opened, Read
+full output, Copy and a 6000-byte preview; system notices as coloured
+boxes (three lines, open to all of it and Copy), the compaction divider,
+`[Context:` text dim, model-only notices not at all; one metadata footer
+per run of replies (`OPUS-5.5 | 76.2 TOK/S | 2:03PM`, `footer.rs`, model
+names from `model_display.rs`), a tap on it or a long press on a message
+opens Copy message / Edit in composer / Read in full. The live reply shows
+WORKING until it shows something, the retry, compaction and
+connection-wait lines, and a footer whose duration ticks; notices that come
+while it streams wait after it (an error splits it). A jump-to-latest
 button shows more than 120 pt from the end once the transcript is still.
+
+Turns fold (`fold.rs`, the TUI's `turncollapse` as the iPhone ports it, in
+its gutter look) unless Settings' Show all work is on: a finished turn reads
+as the prompt, the final reply and its footer; thinking, tool calls,
+interim text, informational notices and notifications leave no row, and a
+thin mark at the left edge of the reply that follows (or a short line in
+the gap, when nothing answered) opens that stretch, its first row where the
+tapped one was. The live turn shows WORKING with what folded ("2 TOOL
+CALLS, 1 MESSAGE", a tap opens it) and its newest step. Flipping Show all
+work closes the folds opened one by one; a Find match inside a fold opens
+it. Disclosures toggled (the newest 1000) and where each of the last 20
+conversations was read are kept in `ui.json` ("chat"): a conversation
+reopens where it was read, an unread one at its latest response.
 
 The replies' markdown (`src/exocortex/markdown.rs`, GFM as the iPhone renders it): headings in
 the accent colours, paragraphs (a newline is a line break), bullet,
@@ -181,13 +203,41 @@ first and leave the text; macros (`macros.rs`, the TUI's catalog in
 `macros.json`, regenerated with `scripts/sync-exocortex-macros.ts`) expand
 with the daemon's paths. Command results show as notices in the transcript
 (long ones, `/help`, `/model`, in the reader; a new chat's as toasts).
+Valid commands, macros and their arguments are drawn in the command colour
+as they are typed. A path word at the caret (`~/`, `./`, `../`, `/a/`)
+completes from the daemon host's files (`list_path_directory`, through
+`commands/paths.rs`: one prefetch and one targeted request per folder,
+listings 15 s fresh and 5 min stale), never the phone's. The chat's ⋯ menu
+has Edit… (the TUI's Ctrl+W): the chat's queued messages back into the
+composer, its last sent messages to rewind and edit, its instructions as
+`/instructions …`.
+
+"+" opens Add attachment or voice: Browse files, Paste image, Record voice
+(`model/attach.rs`). The file browser (`view/files.rs`) is a sheet over the
+phone's own files, starting at home (Android's shared storage stays locked
+under Moon, so it is not there): Up, folders, files with size and date,
+dotfiles on request. Paste image (and the edit menu's Paste when the
+clipboard holds no text) takes the image Moon keeps (`clipboard get image`;
+X's CLIPBOARD on a host without Moon). Files are read, and the clipboard's
+image fetched, on threads (`files.rs`), into the draft they were chosen for;
+a tray of chips in the island (a PNG's thumbnail, else a glyph; name, size,
+✕) scrolls sideways. Images (PNG, JPEG, GIF, WebP up to 4 MB) go as `images`
+on `send_message`, `queue_message` and a new chat's `initialMessage`; other
+files as their text (UTF-8, else Latin-1 for known text types; up to
+120,000 characters, cut and marked) in the iPhone's `<exocortex_file …>`
+envelope after the message (`attachments.rs`). Six items and 12 MB with the
+text at most; no images to a model without vision; commands carry none. A
+send that does not arrive, a rewind and a queued message pulled back give
+them back (documents out of their envelopes, images whose bytes the daemon
+still has). A draft's attachments are kept in memory only.
 
 The mic shows when nothing is typed: it runs Moon's voice hook
 (`dictation.rs`), and a recording strip takes the editor's row (cancel, the
 red dot and the clock, the waveform of the hook's levels, finish). The words
 go in at the caret of the draft they were spoken for, wherever the user is
 by then; a recording ends with its chat and stops by itself before the
-capture's 120 s limit; transcription is given up on after 90 s.
+capture's 120 s limit; transcription is given up on after 90 s. While it
+records, Moon keeps the screen on (`awake on`, then `awake off`).
 
 Sending `turns` matters: without it the daemon does not page at all. It
 sends the whole history on every open (790 KB for a long conversation) and
@@ -244,7 +294,12 @@ are discarded.
   shimmer, the live footer's clock and rate, a status line's clock) is a
   mark (`blocks::Mark`): placed with its piece, keyed per frame
   (`transcript::TranscriptFrame`) and drawn again alone, so a second ticking
-  costs its own line of rows and no layout pass. The jump button is drawn
+  costs its own line of rows and no layout pass. Fold marks at the left
+  edge are the layout's `gutters`: one that scrolls into view costs nothing
+  more, a pressed or changed one its own column. The fold plan is made
+  again only when its inputs change (the entries' stamps, the live reply's
+  steps, the folds toggled, the marks setting), not on every streamed
+  chunk. The jump button is drawn
   over the transcript in its own columns; it steps aside while the
   transcript moves (a floating button over moving rows would cost its rows
   in every frame of a scroll) and fades back in once it is still.
@@ -303,8 +358,8 @@ the interfaces below. Every file's header says whose it is.
 | `proto/mod.rs`, `proto/fixtures.jsonl` | A | `Event`, `parse_event`, the bootstrap |
 | `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands (`list/actions.rs`), changes shown before the daemon answers (`list/pending.rs`), menus, prompts and pickers (`list/menus.rs`), the folder inspector (`list/sheets.rs`) |
 | `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `highlight.rs`, `math/`, `links.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks (highlighted), tables, math; links and the file sheet; images in the transcript, their cache and the viewer; the reader, selection and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
-| `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
-| `view/composer.rs`, `view/picker.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts, the mic, the command picker, commands and macros |
+| `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `fold.rs`, `toolcall.rs`, `footer.rs`, `model_display.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history; turn folding (`fold.rs`), tool-call lines (`toolcall.rs`), footers |
+| `view/composer.rs`, `view/picker.rs`, `view/files.rs`, `model/composer.rs`, `model/attach.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `attachments.rs`, `files.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu, the attachment tray), sending, the queue, kept drafts, the mic, attachments and the file browser, the command picker, commands, macros and path completion |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
 
 A package adds its new files (`list/*.rs`, `commands/*.rs`, `sheets/*.rs`
@@ -338,8 +393,10 @@ additions are the only shared edits.
 - **No I/O in the model.** It asks the interface through `model.ui`:
   `ui.open(Box<dyn Overlay>)`, `ui.toast(text)`, `ui.error_toast(text)`,
   `ui.haptic(Haptic)`, `ui.effect(Effect::{Copy, OpenUrl, ShowKeyboard,
-  HideKeyboard})`, and `close_all` / `close_top` / `close_scoped`. The event
-  loop takes them after every change; tests read them.
+  HideKeyboard, Paste, Dictate, Files, StatusBar})`, and `close_all` /
+  `close_top` / `close_scoped`. The event loop takes them after every
+  change; tests read them. What a thread of the loop's finds comes back
+  through the model (`dictation_line`, `files_done`).
 - **Requests.** Issue every request whose answer matters through
   `model.requests.issue(owner, kind, conv, within, now)` (or `track` an id
   you made) with your `Owner` and a deadline (`requests::DEFAULT_WITHIN`
@@ -479,10 +536,10 @@ additions are the only shared edits.
 
 ### Things to know
 
-- `exocortex-notify` builds `markdown.rs`, `line.rs`, `handoff.rs` and
-  `proto/` into itself by path: they may use only each other and outside
-  crates, and the bridge matches `MdBlock` exhaustively (a new block kind
-  needs a line there).
+- `exocortex-notify` builds `markdown.rs`, `line.rs`, `handoff.rs`,
+  `proto/` and `list/activity.rs` into itself by path: they may use only
+  each other and outside crates, and the bridge matches `MdBlock`
+  exhaustively (a new block kind needs a line there).
 - `proto/chat.rs` is shared by C1 (images, file links, display blocks) and
   C2; extend structs with defaulted fields, never rename.
 - JetBrains Mono NL in five cuts (Regular, Medium, SemiBold, Bold, Italic)
@@ -504,9 +561,10 @@ The bridge connects to the daemon with `sidebar-state-patch` and
 first page holding only the conversations showing activity (which is how it
 learns what streams), and the rest of the list, which it skips unparsed.
 After that it only hears the broadcasts every client gets, and looks at no
-event but `conversation_updated`, `conversation_deleted`, the list and its
-own replies. It never subscribes: the daemon marks a conversation unread
-only when no client is subscribed.
+event but `conversation_updated`, `conversation_deleted`,
+`conversation_restored`, `conversation_unwound`, `sidebar_state_patched`,
+`queue_updated`, the list and its own replies. It never subscribes: the
+daemon marks a conversation unread only when no client is subscribed.
 
 It posts to `moon-notifyd` (`MOON_NOTIFY_SOCKET`, else
 `/run/moon-notify/notify.sock`; OSS-Phone-V1 `docs/notifications-protocol.md`):
@@ -535,6 +593,25 @@ and starts over. It sleeps in `poll(2)` between events (no timer runs while
 nothing streams and nothing waits), so it costs nothing while idle, and
 across Moon's screen-off and deep suspend (a warm reboot) it simply starts
 again with the session.
+
+### The icon's badge
+
+The bridge keeps the unread count on the Exocortex icon (Moon's `badge
+exocortex N`, OSS-Phone-V1 `docs/app-services.md`; 0 removes it): the
+conversations the list shows with a green dot, as the iPhone's badge counts
+them (`list/activity.rs`, built into the bridge by path: unread, not muted
+by itself, a folder above or `notificationsMuted`, no model work, neither
+streaming nor waiting on its provider, a long sleep or the global-idle
+queue; subagents count like any conversation). The first page holds every
+folder and every unread conversation, and `unread` changes only with a
+whole summary, so it keeps just the unread summaries, the folders and the
+queue. It sets the count once the first page has come and whenever it
+changes (about 30 ms after the daemon's event, measured in a sandbox),
+including while the app is closed or frozen; while Moon is absent or
+refuses it tries again after 5 s, 15 s, 1 min, 5 min, then every 15 min.
+Moon keeps the badge across its restarts and reboots, and the bridge keeps
+it while the daemon is away. The app does not set it: one writer, always
+running.
 
 ### Keeping the phone awake for a turn
 
@@ -580,7 +657,7 @@ soon as it is.
 | --- | --- | --- |
 | `EXOCORTEX_SOCKET` | `/opt/exocortex/config/runtime/exocortexd.sock` | both |
 | `EXOCORTEX_APP_STATE` | `/run/exocortex-app/view.json` | both |
-| `A26_SHELL_SOCKET` | `/run/a26-shell/control.sock` | both (Moon's state, keyboard, transitions, leases) |
+| `A26_SHELL_SOCKET` | `/run/a26-shell/control.sock` | both (Moon's state, keyboard, transitions, leases, the icon's badge) |
 | `MOON_NOTIFY_SOCKET` | `/run/moon-notify/notify.sock` | both |
 | `MOON_FONTS` | `/opt/a26-shell/share/fonts` | the app (fallback glyphs) |
 | `EXOCORTEX_APP_PROFILE` | unset | the app: logs each frame's draw and present time, and whether it was full or partial; when the list first shows, how long an open took to draw, event batches over 2 ms, and coming back to the front |

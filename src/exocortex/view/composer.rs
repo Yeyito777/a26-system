@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use crate::gfx::{Canvas, RectF};
 
 use super::super::anim::{self, Animator, Tween};
+use super::super::attachments::{self, Attachment};
 use super::super::dictation;
 use super::super::editor::{self, Line, Metrics};
 use super::super::gesture::Gesture;
@@ -29,7 +30,7 @@ use super::super::model::{Action, Model, Page};
 use super::super::theme::{
     self, COMPOSER_BUTTON, COMPOSER_FACE, COMPOSER_GAP, COMPOSER_MARGIN, EDITOR_INSET,
     EDITOR_LINES, EDITOR_PAD_Y, GESTURE_RESERVE, HAIRLINE, ISLAND_MIN, ISLAND_PAD, ISLAND_RADIUS,
-    S1, S2, T_CAPTION, T_COMPOSER, T_MENU, T_NOTE, W,
+    S1, S2, T_CAPTION, T_COMPOSER, T_MENU, T_META, T_NOTE, W,
 };
 use super::super::ui::icons::{self, Icon, Style};
 use super::super::ui::overlay::{Body, Cx, Overlay, Response};
@@ -100,7 +101,7 @@ pub struct Trailing {
 }
 
 pub fn trailing(model: &Model) -> Trailing {
-    let typed = !model.composer.text.trim().is_empty();
+    let typed = model.has_draft();
     let streaming = model.chat.id.is_some() && model.streaming();
     let primary = if model.submitting() {
         Primary::Busy
@@ -164,6 +165,8 @@ pub struct ComposerGeometry {
     pub stop: Option<(f32, f32)>,
     pub trailing: Trailing,
     pub error: Option<ErrorLabel>,
+    /// The attachment tray, over the editor's row.
+    pub tray: Option<Tray>,
 }
 
 impl ComposerGeometry {
@@ -263,22 +266,36 @@ pub fn geometry(model: &Model, height: f32, keyboard: bool) -> ComposerGeometry 
         lines.len().clamp(1, EDITOR_LINES)
     };
     let line = T_COMPOSER.line();
+    let (items, importing) = model.shown_attachments();
+    let tray_h = if !model.composer.voice.active() && (!items.is_empty() || importing > 0) {
+        TRAY_H
+    } else {
+        0.0
+    };
     let h = (shown as f32 * line + 2.0 * EDITOR_PAD_Y + 2.0 * ISLAND_PAD).max(ISLAND_MIN);
-    let island = RectF::new(x0, (bottom - h).round(), x1 - x0, h.round());
+    let island = RectF::new(
+        x0,
+        (bottom - h - tray_h).round(),
+        x1 - x0,
+        h.round() + tray_h,
+    );
+    // The editor's row: the island under the tray.
+    let row = RectF::new(island.x, island.y + tray_h, island.w, island.h - tray_h);
     let row_cy = island.y + island.h - ISLAND_PAD - COMPOSER_BUTTON / 2.0;
     let editor_h = shown as f32 * line;
     let editor = RectF::new(
         editor_x,
-        (island.y + (island.h - editor_h) / 2.0).round(),
+        (row.y + (row.h - editor_h) / 2.0).round(),
         editor_right - editor_x,
         editor_h,
     );
     let viewport = RectF::new(
         editor_x - EDITOR_INSET / 2.0,
-        island.y + ISLAND_PAD,
+        row.y + ISLAND_PAD,
         editor_right - editor_x + EDITOR_INSET / 2.0,
-        island.h - 2.0 * ISLAND_PAD,
+        row.h - 2.0 * ISLAND_PAD,
     );
+    let tray = (tray_h > 0.0).then(|| tray(model, island, items, importing));
     let right = (x1 - ISLAND_PAD - COMPOSER_BUTTON / 2.0, row_cy);
     let (send, stop) = match trailing.stop {
         Some(_) => ((right.0 - COMPOSER_BUTTON, row_cy), Some(right)),
@@ -319,6 +336,7 @@ pub fn geometry(model: &Model, height: f32, keyboard: bool) -> ComposerGeometry 
         stop,
         trailing,
         error,
+        tray,
     };
     // The editor's scroll: kept inside the text, and moved (as little as
     // it takes) to show the caret after it moved or the text changed.
@@ -354,6 +372,7 @@ pub fn owns(action: &Action) -> bool {
                 | Act::Mic
                 | Act::MicDone
                 | Act::MicCancel
+                | Act::RemoveAttachment(_)
         )
     )
 }
@@ -387,6 +406,7 @@ pub fn frame_key(model: &Model, keyboard: bool, pressed: Option<&Action>, now: I
         caret_shows(model, keyboard, now),
         busy.then(|| spinner_step(now)),
         voice_key(model, now),
+        tray_key(model, now),
         super::action_key(pressed.filter(|action| owns(action))),
         theme::generation(),
     )
@@ -405,7 +425,11 @@ pub fn animate(model: &Model, keyboard: bool, now: Instant, animator: &mut Anima
         animator.request(since + half * (elapsed + 1));
     }
     let t = trailing(model);
-    if matches!(t.primary, Primary::Busy) || t.stop == Some(true) || model.composer.voice.active() {
+    if matches!(t.primary, Primary::Busy)
+        || t.stop == Some(true)
+        || model.composer.voice.active()
+        || model.shown_attachments().1 > 0
+    {
         animator.slow_frame(now);
     }
     if let Some(error) = model.composer_error_label()
@@ -441,6 +465,12 @@ pub fn hit(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) -> Option
     }
     if near(geometry.plus, x, y) {
         return Some(Hit::Action(Action::Composer(Act::Attach)));
+    }
+    if let Some((chip, close)) = geometry.tray.as_ref().and_then(|t| t.chip_at(x, y)) {
+        return Some(match (chip.id, close) {
+            (Some(id), true) => Hit::Action(Action::Composer(Act::RemoveAttachment(id))),
+            _ => Hit::Composer,
+        });
     }
     if let Some(stop) = geometry.stop
         && near(stop, x, y)
@@ -511,6 +541,9 @@ pub enum EditDrag {
     End { end: End, dy: f32 },
     /// The editor's text, scrolled from `from` as the finger moves from `y`.
     Scroll { from: f32, y: f32 },
+    /// The attachment tray, scrolled sideways from `from` as the finger
+    /// moves from `x`.
+    Tray { from: f32, x: f32 },
 }
 
 /// A drag starting at (`x`, `y`): the editor's, if it starts on a handle
@@ -522,6 +555,14 @@ pub fn drag_start(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) ->
     let geometry = geometry(model, height, keyboard);
     if !geometry.island.inset(-16.0).contains(x, y) {
         return None;
+    }
+    if let Some(tray) = &geometry.tray
+        && tray.clip.contains(x, y)
+    {
+        return (tray.max_scroll > 0.0).then_some(EditDrag::Tray {
+            from: tray.scroll,
+            x,
+        });
     }
     let text = &model.composer.text;
     let line = T_COMPOSER.line();
@@ -572,6 +613,11 @@ pub fn drag(
             let to = (from - (y - y0)).clamp(0.0, geometry.max_scroll()).round();
             (to != geometry.scroll).then_some(Action::Composer(Act::Scroll(to)))
         }
+        EditDrag::Tray { from, x: x0 } => {
+            let tray = geometry.tray.as_ref()?;
+            let to = (from - (x - x0)).clamp(0.0, tray.max_scroll).round();
+            (to != tray.scroll).then_some(Action::Composer(Act::TrayScroll(to)))
+        }
     }
 }
 
@@ -579,7 +625,7 @@ pub fn drag(
 pub fn drag_end(drag: EditDrag) -> Option<Action> {
     match drag {
         EditDrag::End { .. } => Some(Action::Composer(Act::EndSelect)),
-        EditDrag::Scroll { .. } => None,
+        EditDrag::Scroll { .. } | EditDrag::Tray { .. } => None,
     }
 }
 
@@ -645,6 +691,9 @@ pub fn draw(
             .stroke(5.0)
             .alpha(if plus_down { 0.5 } else { 1.0 }),
     );
+    if let Some(tray) = &geometry.tray {
+        draw_tray(canvas, model, tray, pressed, now);
+    }
     draw_editor(canvas, model, &geometry, keyboard, now);
     draw_trailing(canvas, &geometry, pressed, now);
 }
@@ -749,18 +798,38 @@ fn draw_editor(
                 }
             }
         }
+        let highlights = &model.composer.highlights;
         for (row, l) in lines.iter().enumerate().take(last).skip(first) {
-            if l.end > l.start {
+            if l.end <= l.start {
+                continue;
+            }
+            // The line in runs: plain text, and valid commands in their
+            // colour (PAR-210).
+            let mut at = l.start;
+            while at < l.end {
+                let span = highlights.iter().find(|(a, b)| *b > at && *a < l.end);
+                let (until, color) = match span {
+                    Some(&(a, b)) if a <= at => (b.min(l.end), p.command),
+                    Some(&(a, _)) => (a, p.text),
+                    None => (l.end, p.text),
+                };
+                // Spans end on word boundaries; never an empty run.
+                let until = if until > at && text.is_char_boundary(until) {
+                    until
+                } else {
+                    l.end
+                };
                 crate::text::draw(
                     canvas,
-                    &text[l.start..l.end],
-                    editor.x,
+                    &text[at..until],
+                    editor.x + editor::x_of(text, l, at, &geometry.metrics),
                     T_COMPOSER.baseline(top_of(row)),
                     geometry.metrics.weight,
                     geometry.metrics.size,
-                    p.text,
+                    color,
                     1.0,
                 );
+                at = until;
             }
         }
         if !keyboard {
@@ -930,6 +999,274 @@ fn draw_trailing(
             );
         }
     }
+}
+
+// ----- The attachment tray --------------------------------------------------------
+
+/// The tray (the iPhone's `.att-tray`, 6 pt above and 2 pt below its
+/// chips): a row of chips over the editor, scrolled sideways when it is
+/// wider than the island.
+const TRAY_TOP: f32 = 17.0;
+const CHIP_H: f32 = 120.0;
+const TRAY_H: f32 = TRAY_TOP + CHIP_H + 6.0;
+const CHIP_GAP: f32 = 19.0;
+/// Inside a chip: the thumbnail's inset, the gap after it, the text's
+/// widest, and the ✕'s zone at its right (its 44 pt target).
+const CHIP_PAD: f32 = 14.0;
+const CHIP_TEXT_GAP: f32 = 19.0;
+const CHIP_TEXT_MAX: f32 = 327.0;
+const CHIP_CLOSE: f32 = 70.0;
+/// Clear of the island's rounded corners.
+const TRAY_INSET: f32 = 22.0;
+
+/// A chip of the tray, on screen (scrolled).
+pub struct Chip {
+    pub rect: RectF,
+    /// Its attachment (None: "Preparing…").
+    pub id: Option<u64>,
+}
+
+pub struct Tray {
+    /// Where chips show (they scroll under its ends).
+    pub clip: RectF,
+    pub chips: Vec<Chip>,
+    pub scroll: f32,
+    pub max_scroll: f32,
+}
+
+impl Tray {
+    /// The chip at (`x`, `y`), and whether at its ✕.
+    fn chip_at(&self, x: f32, y: f32) -> Option<(&Chip, bool)> {
+        if !self.clip.contains(x, y) {
+            return None;
+        }
+        self.chips
+            .iter()
+            .find(|chip| chip.rect.inset(-CHIP_GAP / 2.0).contains(x, y))
+            .map(|chip| {
+                let close = chip.id.is_some() && x >= chip.rect.x + chip.rect.w - CHIP_CLOSE;
+                (chip, close)
+            })
+    }
+}
+
+/// A chip's width for its text.
+fn chip_width(text_w: f32) -> f32 {
+    (CHIP_PAD + attachments::THUMB as f32 + CHIP_TEXT_GAP + text_w.min(CHIP_TEXT_MAX) + CHIP_CLOSE)
+        .round()
+}
+
+const PREPARING: &str = "Preparing…";
+
+fn preparing_width() -> f32 {
+    (CHIP_PAD * 2.0 + SPINNER + CHIP_TEXT_GAP + widgets::measure(PREPARING, T_META) + CHIP_PAD)
+        .round()
+}
+
+/// The chips' widths, kept until the attachments (or the theme) change:
+/// the geometry is asked for many times a frame.
+fn chip_widths(items: &[Attachment]) -> Rc<Vec<f32>> {
+    thread_local! {
+        static LAST: RefCell<(u64, Rc<Vec<f32>>)> = RefCell::new((0, Rc::new(Vec::new())));
+    }
+    let mut hasher = DefaultHasher::new();
+    (
+        theme::generation(),
+        items.iter().map(|a| a.id).collect::<Vec<_>>(),
+    )
+        .hash(&mut hasher);
+    let key = hasher.finish();
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.0 != key || last.1.len() != items.len() {
+            let widths = items
+                .iter()
+                .map(|a| {
+                    chip_width(
+                        widgets::measure(&a.name, T_META)
+                            .max(widgets::measure(&a.detail(), T_META)),
+                    )
+                })
+                .collect();
+            *last = (key, Rc::new(widths));
+        }
+        last.1.clone()
+    })
+}
+
+fn tray(model: &Model, island: RectF, items: &[Attachment], importing: usize) -> Tray {
+    let clip = RectF::new(
+        island.x + TRAY_INSET,
+        island.y + ISLAND_PAD,
+        island.w - 2.0 * TRAY_INSET,
+        TRAY_H,
+    );
+    let widths = chip_widths(items);
+    let total: f32 = widths.iter().sum::<f32>()
+        + if importing > 0 {
+            preparing_width() + CHIP_GAP
+        } else {
+            0.0
+        }
+        + CHIP_GAP * items.len().saturating_sub(1) as f32;
+    let max_scroll = (total - clip.w).max(0.0).round();
+    let scroll = model
+        .composer
+        .tray_scroll
+        .get()
+        .clamp(0.0, max_scroll)
+        .round();
+    model.composer.tray_scroll.set(scroll);
+    let y = clip.y + TRAY_TOP;
+    let mut x = clip.x - scroll;
+    let mut chips = Vec::new();
+    for (item, w) in items.iter().zip(widths.iter()) {
+        chips.push(Chip {
+            rect: RectF::new(x, y, *w, CHIP_H),
+            id: Some(item.id),
+        });
+        x += w + CHIP_GAP;
+    }
+    if importing > 0 {
+        chips.push(Chip {
+            rect: RectF::new(x, y, preparing_width(), CHIP_H),
+            id: None,
+        });
+    }
+    Tray {
+        clip,
+        chips,
+        scroll,
+        max_scroll,
+    }
+}
+
+/// What the tray's pixels depend on.
+fn tray_key(model: &Model, now: Instant) -> Option<(Vec<u64>, usize, u32, u32)> {
+    let (items, importing) = model.shown_attachments();
+    (!items.is_empty() || importing > 0).then(|| {
+        (
+            items.iter().map(|a| a.id).collect(),
+            importing,
+            model.composer.tray_scroll.get().to_bits(),
+            if importing > 0 { spinner_step(now) } else { 0 },
+        )
+    })
+}
+
+fn draw_tray(
+    canvas: &mut Canvas,
+    model: &Model,
+    tray: &Tray,
+    pressed: Option<&Action>,
+    now: Instant,
+) {
+    let p = theme::p();
+    let fill = theme::mix(p.secondary_accent, 4, p.surface_background);
+    let edge = theme::mix(p.secondary_accent, 15, p.surface_background);
+    let (items, _) = model.shown_attachments();
+    widgets::clipped(canvas, tray.clip, |canvas| {
+        for chip in &tray.chips {
+            let r = chip.rect;
+            if r.x > tray.clip.x + tray.clip.w || r.x + r.w < tray.clip.x {
+                continue;
+            }
+            widgets::boxed(canvas, r, fill, edge);
+            let Some(item) = chip.id.and_then(|id| items.iter().find(|a| a.id == id)) else {
+                // Preparing.
+                let cx = r.x + CHIP_PAD * 2.0 + SPINNER / 2.0;
+                widgets::spinner(
+                    canvas,
+                    cx,
+                    r.y + r.h / 2.0,
+                    SPINNER,
+                    p.secondary_accent,
+                    fill,
+                    spinner_time(now),
+                );
+                widgets::text(
+                    canvas,
+                    PREPARING,
+                    cx + SPINNER / 2.0 + CHIP_TEXT_GAP,
+                    T_META.baseline(r.y + (r.h - T_META.line()) / 2.0),
+                    T_META,
+                    p.muted,
+                    1.0,
+                );
+                continue;
+            };
+            let side = attachments::THUMB as f32;
+            let thumb = RectF::new(
+                r.x + CHIP_PAD,
+                (r.y + (r.h - side) / 2.0).round(),
+                side,
+                side,
+            );
+            match &item.kind {
+                attachments::Kind::Image {
+                    thumb: Some(image), ..
+                } => canvas.draw_image(image, thumb.x as i32, thumb.y as i32, 1.0),
+                kind => {
+                    widgets::boxed(
+                        canvas,
+                        thumb,
+                        theme::mix(p.secondary_accent, 6, p.surface_background),
+                        theme::mix(p.secondary_accent, 34, p.surface_background),
+                    );
+                    icons::draw(
+                        canvas,
+                        if matches!(kind, attachments::Kind::Image { .. }) {
+                            Icon::Image
+                        } else {
+                            Icon::FileText
+                        },
+                        thumb.x + side / 2.0,
+                        thumb.y + side / 2.0,
+                        50.0,
+                        p.secondary_accent,
+                        1.0,
+                    );
+                }
+            }
+            let text_x = thumb.x + side + CHIP_TEXT_GAP;
+            let text_w = r.x + r.w - CHIP_CLOSE - text_x;
+            let top = r.y + (r.h - 2.0 * T_META.line()) / 2.0;
+            let name = T_META.weight(crate::text::Weight::MonoSemiBold);
+            widgets::text(
+                canvas,
+                &widgets::fit(&item.name, name, text_w),
+                text_x,
+                name.baseline(top),
+                name,
+                p.text,
+                1.0,
+            );
+            let truncated = matches!(
+                item.kind,
+                attachments::Kind::File {
+                    truncated: true,
+                    ..
+                }
+            );
+            widgets::text(
+                canvas,
+                &widgets::fit(&item.detail(), T_META, text_w),
+                text_x,
+                T_META.baseline(top + T_META.line()),
+                T_META,
+                if truncated { p.warning } else { p.muted },
+                1.0,
+            );
+            let down = pressed == Some(&Action::Composer(Act::RemoveAttachment(item.id)));
+            icons::draw_styled(
+                canvas,
+                Icon::X,
+                r.x + r.w - CHIP_CLOSE / 2.0,
+                r.y + r.h / 2.0,
+                Style::new(28.0, if down { p.text } else { p.muted }).stroke(5.0),
+            );
+        }
+    });
 }
 
 // ----- The recording strip ---------------------------------------------------------
@@ -1733,6 +2070,62 @@ mod tests {
         for _ in 0..30 {
             frames(&mut model, &mut view, &|_| {}, 8);
         }
+        // Attachments: a "Preparing…" chip turns (the island grows), then
+        // the chips; the tray scrolls sideways; a ✕ takes one away.
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                model.handle(Action::Composer(Act::DismissError));
+                model.handle(Action::Composer(Act::PasteImage));
+            },
+            0,
+        );
+        for _ in 0..8 {
+            frames(&mut model, &mut view, &|_| {}, 35);
+        }
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                let key = model.composer.key.clone().unwrap();
+                for (name, bytes) in [
+                    (
+                        "a-rather-long-screenshot-name.png",
+                        attachments::test_png(300, 200),
+                    ),
+                    ("notes.md", b"# notes".to_vec()),
+                    ("photo.jpg", vec![0xff, 0xd8, 0xff, 0xd9]),
+                ] {
+                    model.files_done(crate::exocortex::files::Done::Prepared {
+                        key: key.clone(),
+                        result: attachments::prepare(name, &bytes),
+                    });
+                }
+            },
+            0,
+        );
+        for _ in 0..4 {
+            frames(&mut model, &mut view, &|_| {}, 35);
+        }
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                model.handle(Action::Composer(Act::TrayScroll(180.0)));
+            },
+            16,
+        )
+        .expect("scrolling the tray is incremental");
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                let id = model.shown_attachments().0[0].id;
+                model.handle(Action::Composer(Act::RemoveAttachment(id)));
+            },
+            16,
+        );
     }
 }
 
@@ -1764,8 +2157,12 @@ mod render {
     fn shot(model: &mut Model, keyboard: bool, name: &str, now: Instant) {
         let mut view = ViewState::new();
         view.keyboard = keyboard;
-        view.take_ui(model, now);
         let height = if keyboard { 1300 } else { 2216 };
+        // A frame a second before: sheets opened then have slid in.
+        let before = now.checked_sub(Duration::from_secs(1)).unwrap_or(now);
+        view.take_ui(model, before);
+        let _ = frame::record(model, &mut view, None, (1080, height), before);
+        view.take_ui(model, now);
         let _ = frame::record(model, &mut view, None, (1080, height), now);
         let mut canvas = Canvas::new(1080, height);
         frame::clear(&mut canvas);
@@ -1815,5 +2212,44 @@ mod render {
         model.ready = false;
         model.composer.cursor = editor::Cursor::at(5);
         shot(&mut model, true, "07-not-ready", t0);
+        let mut model = chat(false);
+        let key = model.composer.key.clone().unwrap();
+        for (name, bytes) in [
+            ("screenshot.png", attachments::test_png(300, 200)),
+            ("notes.md", b"# notes".to_vec()),
+        ] {
+            model.files_done(crate::exocortex::files::Done::Prepared {
+                key: key.clone(),
+                result: attachments::prepare(name, &bytes),
+            });
+        }
+        model.handle(Action::Composer(Act::PasteImage));
+        type_text(&mut model, "What's in these?");
+        model.composer.tray_scroll.set(0.0);
+        shot(&mut model, true, "08-tray", t0);
+        let mut model = chat(false);
+        model.handle(Action::Composer(Act::Attach));
+        shot(&mut model, false, "09-plus", t0 + Duration::from_secs(1));
+        let mut model = chat(false);
+        model.handle(Action::Composer(Act::Browse(Some("/root/notes".into()))));
+        model.handle(Action::Composer(Act::Browse(None)));
+        let entry = |name: &str, dir: bool, size: u64| crate::exocortex::files::Entry {
+            name: name.into(),
+            dir,
+            size,
+            modified: 1_793_260_000,
+        };
+        model.files_done(crate::exocortex::files::Done::Listed {
+            dir: "/root/notes".into(),
+            result: Ok(vec![
+                entry(".cache", true, 0),
+                entry("drafts", true, 0),
+                entry("photos", true, 0),
+                entry("groceries.md", false, 812),
+                entry("screenshot-2026-10-29.png", false, 1_240_000),
+                entry("trip-plan.txt", false, 23_400),
+            ]),
+        });
+        shot(&mut model, false, "10-browser", t0 + Duration::from_secs(1));
     }
 }

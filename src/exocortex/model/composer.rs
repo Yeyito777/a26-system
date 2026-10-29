@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use super::super::attachments::{self, Attachment};
 use super::super::dictation::{self, Do, Line};
 use super::super::drafts::Drafts;
 use super::super::editor::{self, Cursor};
@@ -22,12 +23,14 @@ use super::super::proto::{self, Entry, Event, Queued};
 use super::super::requests::{self, Owner, Pending};
 use super::super::ui::Haptic;
 use super::super::ui::sheet::{self, ActionItem, ActionList, Tone};
+use super::attach::Browser;
 use super::{Action, Chat, Echo, Effect, Live, Model, Page, UiAct, now_ms};
 use crate::control::KeyboardPurpose;
 use crate::keys::KeyInput;
 
 /// A message and its attachments may not be larger (PAR-191).
-pub const BUDGET: usize = 12 << 20;
+#[cfg(test)]
+pub const BUDGET: usize = attachments::BUDGET;
 /// Typing is written into `drafts.json` this long after it pauses (the
 /// store then waits its own 500 ms).
 const SAVE_AFTER: Duration = Duration::from_millis(300);
@@ -119,6 +122,8 @@ struct Submission {
     text: String,
     started_at: u64,
     queue_id: Option<String>,
+    /// Its attachments (back into the draft with its text).
+    attachments: Vec<Attachment>,
 }
 
 /// The composer's state.
@@ -175,13 +180,28 @@ pub struct Composer {
     pub picker_dismissed: Option<String>,
     /// `/ping` asked (its reqId) and when.
     pub ping: Option<(String, Instant)>,
+    /// Listings of the daemon host's directories (path completion).
+    pub paths: super::super::commands::paths::Paths,
     /// What is typed is a command (the trailing button says Run).
     pub is_command: bool,
+    /// The text's valid commands, macros and arguments (byte ranges), drawn
+    /// in the command colour.
+    pub highlights: Vec<(usize, usize)>,
     /// User messages before each window start seen, by conversation: entry
     /// index → user message index (a rewind's `userMessageIndex`).
     user_index: HashMap<String, std::collections::BTreeMap<u64, u64>>,
     /// A rewind on its way: its request and conversation.
     rewinding: Option<(String, String)>,
+    /// Each draft's attachments (by draft key), kept in memory.
+    pub attachments: HashMap<String, Vec<Attachment>>,
+    /// Attachments being prepared, by draft key (the tray's "Preparing…").
+    pub importing: HashMap<String, usize>,
+    /// The last attachment's id.
+    pub attachment_serial: u64,
+    /// The file browser.
+    pub browser: Browser,
+    /// How far the tray is scrolled sideways (px; the view clamps it).
+    pub tray_scroll: Cell<f32>,
 }
 
 impl Composer {
@@ -348,8 +368,20 @@ pub enum Act {
         conv: Option<String>,
         text: String,
     },
-    /// The "+" button (attachments, P2).
+    /// The "+" button: attachments and voice.
     Attach,
+    /// The file browser at a folder (None: where it was last, or home).
+    Browse(Option<std::path::PathBuf>),
+    /// Dotfiles shown in it, or not.
+    BrowseHidden,
+    /// A file chosen in it.
+    AttachFile(std::path::PathBuf),
+    /// The clipboard's image attached.
+    PasteImage,
+    /// The tray's ✕ on an attachment.
+    RemoveAttachment(u64),
+    /// The tray dragged sideways to this scroll.
+    TrayScroll(f32),
     /// A tap in the editor at text `index`; `focused`: the keyboard was up.
     Place {
         index: usize,
@@ -407,12 +439,20 @@ pub enum Act {
     /// …confirmed: its text back into the draft, everything from it on
     /// removed from the conversation.
     RewindConfirmed(u64),
+    /// "Edit…" (PAR-268, the TUI's Ctrl+W; E's chat menu): queued
+    /// messages, recent sent messages, the system instructions.
+    EditPicker,
     /// Discard the shown draft (PAR-190; E's chat menu): asks first.
     Discard,
     DiscardConfirmed,
 }
 
 impl Model {
+    /// Something to send: text, or attachments.
+    pub fn has_draft(&self) -> bool {
+        !self.composer.text.trim().is_empty() || !self.shown_attachments().0.is_empty()
+    }
+
     /// The draft key of what the composer shows now: the open
     /// conversation's, or the new chat's (`draft_key`, E).
     pub fn shown_draft_key(&self) -> String {
@@ -482,7 +522,7 @@ impl Model {
         self.composer.set_text(text);
         self.composer.key = Some(key);
         self.composer.picker_dismissed = None;
-        self.composer_changed();
+        let _ = self.composer_changed();
     }
 
     /// Writes the drafts into the kept file now.
@@ -557,9 +597,9 @@ impl Model {
 
     /// A key from Moon's keyboard (`keyboard show multiline`: Return is a
     /// line break). Returns whether the composer changed.
-    pub fn composer_key(&mut self, input: KeyInput) -> bool {
+    pub fn composer_key(&mut self, input: KeyInput) -> Option<Vec<Value>> {
         if self.page != Page::Chat {
-            return false;
+            return None;
         }
         let now = Instant::now();
         let mut cursor = self.composer.cursor;
@@ -577,8 +617,7 @@ impl Model {
         } else {
             self.composer.touched(now);
         }
-        self.composer_changed();
-        true
+        Some(self.composer_changed())
     }
 
     /// Text from the clipboard, pasted at the caret (`Effect::Paste`'s
@@ -592,20 +631,51 @@ impl Model {
                     self.composer.edited(Instant::now());
                 }
             }
-            None => self.ui.toast("Nothing to paste."),
+            // No text: an image, if the clipboard holds one (PAR-242).
+            None => self.paste_image(true),
         }
-        self.composer_changed();
+        let _ = self.composer_changed();
     }
 
     pub(super) fn handle_composer(&mut self, act: Act) -> Vec<Value> {
-        let commands = self.handle_composer_act(act);
-        self.composer_changed();
+        let mut commands = self.handle_composer_act(act);
+        commands.extend(self.composer_changed());
         commands
     }
 
     /// The picker follows what is typed and where the caret is: open when it
-    /// has something to offer, closed when not.
-    pub(crate) fn composer_changed(&mut self) {
+    /// has something to offer, closed when not. A path at the caret asks the
+    /// daemon for its directory (the commands to send).
+    pub(crate) fn composer_changed(&mut self) -> Vec<Value> {
+        let mut commands = Vec::new();
+        let caret = self.composer.cursor();
+        if caret.selection().is_none()
+            && self.ready
+            && let Some(c) =
+                super::super::commands::syntax::completion(&self.composer.text, caret.caret)
+                    .filter(|c| c.path)
+            && let Some((directory, prefix)) = self.composer.paths.wanted(&c.query, Instant::now())
+        {
+            let request = self.requests.issue(
+                Owner::Composer,
+                "paths",
+                None,
+                super::super::commands::paths::INFLIGHT,
+                Instant::now(),
+            );
+            self.composer.paths.asked(
+                request.clone(),
+                directory.clone(),
+                prefix.clone(),
+                Instant::now(),
+            );
+            commands.push(serde_json::json!({
+                "type": "list_path_directory",
+                "reqId": request,
+                "directory": directory,
+                "prefix": prefix,
+            }));
+        }
         let state = self.picker();
         if state.is_none() {
             self.composer.picker_macros = false;
@@ -625,6 +695,12 @@ impl Model {
         }
         self.composer.picker_state = state;
         self.composer.is_command = self.is_command_text();
+        self.composer.highlights = if self.composer.text.contains('/') {
+            super::super::commands::env::SlashEnv::new(self).highlights(&self.composer.text)
+        } else {
+            Vec::new()
+        };
+        commands
     }
 
     /// Text put back into draft `key` after a command refused it.
@@ -637,7 +713,7 @@ impl Model {
         match act {
             Act::Send => {
                 // Disabled until the daemon is ready (PAR-184, PAR-197).
-                if !self.ready || self.composer.text.trim().is_empty() {
+                if !self.ready || !self.has_draft() {
                     Vec::new()
                 } else if self.chat.id.is_some() && self.streaming() && !self.is_command_text() {
                     self.deliver_menu();
@@ -668,7 +744,31 @@ impl Model {
                 Vec::new()
             }
             Act::Attach => {
-                self.ui.toast("Attachments are not available yet.");
+                self.attach_menu();
+                Vec::new()
+            }
+            Act::Browse(dir) => {
+                self.browse(dir);
+                Vec::new()
+            }
+            Act::BrowseHidden => {
+                self.browse_hidden();
+                Vec::new()
+            }
+            Act::AttachFile(path) => {
+                self.attach_file(path);
+                Vec::new()
+            }
+            Act::PasteImage => {
+                self.paste_image(false);
+                Vec::new()
+            }
+            Act::RemoveAttachment(id) => {
+                self.remove_attachment(id);
+                Vec::new()
+            }
+            Act::TrayScroll(to) => {
+                self.composer.tray_scroll.set(to);
                 Vec::new()
             }
             Act::Place { index, focused } => {
@@ -872,6 +972,10 @@ impl Model {
                 Vec::new()
             }
             Act::RewindConfirmed(stamp) => self.rewind(stamp),
+            Act::EditPicker => {
+                self.edit_picker();
+                Vec::new()
+            }
             Act::Discard => {
                 if !self.composer.text.trim().is_empty() && !self.submitting() {
                     self.ui.open(Box::new(super::super::ui::menu::Confirm::new(
@@ -1029,7 +1133,7 @@ impl Model {
             cursor.insert(&mut self.composer.text, &words);
             self.composer.cursor = cursor;
             self.composer.edited(Instant::now());
-            self.composer_changed();
+            let _ = self.composer_changed();
             if self.page == Page::Chat {
                 self.ui
                     .effect(Effect::ShowKeyboard(KeyboardPurpose::Multiline));
@@ -1236,8 +1340,8 @@ impl Model {
                 "Not synced with history yet. Reload the conversation, then try again.".into(),
             );
         }
-        if !images.is_empty() {
-            return Err("Messages with images can't be rewound on the phone yet.".into());
+        if images.iter().any(|image| image.base64.is_empty()) {
+            return Err("Original image bytes are unavailable; rewind was not performed.".into());
         }
         if self.streaming() {
             return Err("Stop the response before rewinding.".into());
@@ -1275,13 +1379,18 @@ impl Model {
             return Vec::new();
         };
         let at = self.chat.stamps.iter().position(|s| *s == stamp);
-        let Some(Entry::User { text, metadata, .. }) =
-            at.and_then(|at| self.chat.entries.get(at)).cloned()
+        let Some(Entry::User {
+            text,
+            images,
+            metadata,
+        }) = at.and_then(|at| self.chat.entries.get(at)).cloned()
         else {
             return Vec::new();
         };
         self.composer.key = Some(self.shown_draft_key());
+        let (text, attachments) = attachments::editable(&text, &images);
         self.restore_into(&id, &text);
+        self.restore_attachments(&id, attachments);
         self.composer.drafts.load(&self.persist);
         self.write_drafts();
         let request = self.requests.issue(
@@ -1303,6 +1412,115 @@ impl Model {
             command["expectedStartedAt"] = Value::from(started as u64);
         }
         vec![command]
+    }
+
+    /// "Edit…" (PAR-268): this conversation's queued messages (newest
+    /// first) back into the composer, its last sent messages to rewind, and
+    /// its instructions as an `/instructions` command to edit.
+    fn edit_picker(&mut self) {
+        use super::super::ui::icons::Icon;
+        let Some(conv) = self.chat.id.clone() else {
+            return;
+        };
+        let snippet = |text: &str| {
+            let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if line.chars().count() > 60 {
+                format!("{}…", line.chars().take(59).collect::<String>())
+            } else {
+                line
+            }
+        };
+        let mut items = Vec::new();
+        let provider = self
+            .sidebar
+            .conversations
+            .get(&conv)
+            .map(|s| s.provider.clone());
+        let mut queued: Vec<Queued> = self.queued_here().into_iter().cloned().collect();
+        queued.reverse();
+        for q in queued
+            .iter()
+            .filter(|q| q.command.is_none() && q.automation.is_none())
+        {
+            items.push(
+                ActionItem::new(
+                    snippet(&q.text),
+                    Action::Composer(Act::PullBack(q.id.clone())),
+                )
+                .icon(Icon::Pencil)
+                .detail(format!(
+                    "Queued · {} · back to the composer",
+                    queue_label(q, provider.as_deref()).trim_start_matches("queued: ")
+                )),
+            );
+        }
+        let sent: Vec<(u64, String, Option<f64>)> = self
+            .chat
+            .entries
+            .iter()
+            .zip(&self.chat.stamps)
+            .filter_map(|(entry, stamp)| match entry {
+                Entry::User { text, metadata, .. }
+                    if !metadata
+                        .as_ref()
+                        .is_some_and(|m| m.system || m.automation.is_some()) =>
+                {
+                    Some((
+                        *stamp,
+                        text.clone(),
+                        metadata.as_ref().map(|m| m.started_at),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        for (stamp, text, started) in sent.iter().rev().take(12) {
+            let (action, detail) = match self.can_rewind(*stamp) {
+                Ok(_) => (
+                    Action::Composer(Act::Rewind(*stamp)),
+                    format!(
+                        "Sent {} · rewind and edit",
+                        started
+                            .filter(|t| *t > 0.0)
+                            .map(|t| crate::clock::local_date_time_text((t / 1000.0) as i64))
+                            .unwrap_or_default()
+                    ),
+                ),
+                Err(why) => (Action::Ui(UiAct::Toast(why.clone())), why),
+            };
+            items.push(
+                ActionItem::new(snippet(text), action)
+                    .icon(Icon::Rewind)
+                    .detail(detail),
+            );
+        }
+        let instructions = self.chat.own_instructions().map(str::to_owned);
+        if let Some(text) = instructions {
+            let empty = self.composer.text.trim().is_empty();
+            let action = if empty {
+                Action::Composer(Act::Insert(format!("/instructions {text}")))
+            } else {
+                Action::Ui(UiAct::Toast(
+                    "Clear the draft first to edit the instructions.".into(),
+                ))
+            };
+            items.push(
+                ActionItem::new("System instructions", action)
+                    .icon(Icon::Pencil)
+                    .detail(if empty {
+                        snippet(&text)
+                    } else {
+                        "Clear the draft first to edit the instructions".into()
+                    }),
+            );
+        }
+        if items.is_empty() {
+            self.ui.toast("Nothing to edit in this chat yet.");
+            return;
+        }
+        self.ui.open(Box::new(sheet::action_sheet(
+            ActionList::new("Edit…", items).scoped(),
+        )));
     }
 
     /// `update_queued_message`: its text and timing (PAR-260).
@@ -1431,7 +1649,32 @@ impl Model {
                 started_at.wrapping_mul(2654435761) & 0xff_ffff
             )
         };
-        let text = body;
+        // The draft's attachments go along: documents as envelopes after
+        // the text, images beside it.
+        let attachments = self.take_attachments(&key);
+        let text = if attachments.iter().any(|a| !a.is_image()) {
+            attachments::resolve_text(&body, &attachments)
+        } else {
+            body
+        };
+        let images: Vec<Value> = attachments
+            .iter()
+            .filter_map(Attachment::wire_image)
+            .collect();
+        let shown: Vec<proto::ImageAttachment> = attachments
+            .iter()
+            .filter_map(Attachment::shown_image)
+            .collect();
+        let with_images = |mut command: Value, field: &[&str]| {
+            if !images.is_empty() {
+                let mut at = &mut command;
+                for name in field {
+                    at = &mut at[*name];
+                }
+                at["images"] = Value::from(images.clone());
+            }
+            command
+        };
         if let Some(wait) = idle {
             // The daemon's idle queue (PAR-262): a new chat is created with
             // its entry, with the draft's model choices.
@@ -1445,7 +1688,10 @@ impl Model {
                 now,
             );
             let queue_id = format!("phone-{}", fresh_id());
-            let mut command = proto::queue_message(&request, &queue_id, &id, &text, "message-end");
+            let mut command = with_images(
+                proto::queue_message(&request, &queue_id, &id, &text, "message-end"),
+                &[],
+            );
             command["source"] = Value::from("global-idle");
             command["waitTarget"] = wait.clone();
             if conv.is_none() {
@@ -1467,6 +1713,7 @@ impl Model {
                     source: "global-idle".into(),
                     wait_target: Some(wait),
                     created_at: started_at as f64,
+                    images: shown,
                     ..Queued::default()
                 },
             ));
@@ -1479,6 +1726,7 @@ impl Model {
                     text: original,
                     started_at,
                     queue_id: Some(queue_id),
+                    attachments,
                 },
             );
             self.chat.touch();
@@ -1504,6 +1752,7 @@ impl Model {
                         timing: timing.wire().into(),
                         source: "daemon".into(),
                         created_at: started_at as f64,
+                        images: shown,
                         ..Queued::default()
                     },
                 ));
@@ -1516,15 +1765,13 @@ impl Model {
                         text: original,
                         started_at,
                         queue_id: Some(queue_id.clone()),
+                        attachments,
                     },
                 );
                 self.chat.touch();
-                vec![proto::queue_message(
-                    &request,
-                    &queue_id,
-                    &id,
-                    &text,
-                    timing.wire(),
+                vec![with_images(
+                    proto::queue_message(&request, &queue_id, &id, &text, timing.wire()),
+                    &[],
                 )]
             }
             Some(id) => {
@@ -1549,9 +1796,13 @@ impl Model {
                         text: original,
                         started_at,
                         queue_id: None,
+                        attachments,
                     },
                 );
-                vec![proto::send_message(&request, &id, &text, started_at)]
+                vec![with_images(
+                    proto::send_message(&request, &id, &text, started_at),
+                    &[],
+                )]
             }
             None => {
                 let id = fresh_id();
@@ -1564,13 +1815,16 @@ impl Model {
                 );
                 // Only what the user chose for this draft: the daemon applies
                 // its defaults to the rest (E's overrides, PAR-277).
-                let mut command = proto::new_conversation(
-                    &request,
-                    &id,
-                    None,
-                    self.current_folder(),
-                    &text,
-                    started_at,
+                let mut command = with_images(
+                    proto::new_conversation(
+                        &request,
+                        &id,
+                        None,
+                        self.current_folder(),
+                        &text,
+                        started_at,
+                    ),
+                    &["initialMessage"],
                 );
                 self.new_conversation_fields(&mut command);
                 self.composer.inflight.insert(
@@ -1582,6 +1836,7 @@ impl Model {
                         text: original,
                         started_at,
                         queue_id: None,
+                        attachments,
                     },
                 );
                 self.chat = Chat {
@@ -1594,7 +1849,7 @@ impl Model {
                 // first message: it is the conversation's first entry.
                 self.chat.push(Entry::User {
                     text,
-                    images: Vec::new(),
+                    images: shown,
                     metadata: None,
                 });
                 self.chat.live = Some(Live {
@@ -1770,6 +2025,16 @@ impl Model {
                     );
                 }
             }
+            Event::PathDirectoryEntries(e) => {
+                if let Some(id) = &e.req_id
+                    && self.composer.paths.is_ours(id)
+                {
+                    self.composer
+                        .paths
+                        .answered(id, Some(e.listings.clone()), Instant::now());
+                    return self.composer_changed();
+                }
+            }
             Event::ToolsAvailable {
                 macro_environment: Some(env),
                 ..
@@ -1833,13 +2098,15 @@ impl Model {
         if let Some(q) = removed
             && pull_back
         {
-            self.restore_into(&q.conv_id, &q.text);
+            let (text, attachments) = attachments::editable(&q.text, &q.images);
+            self.restore_into(&q.conv_id, &text);
+            self.restore_attachments(&q.conv_id, attachments);
         }
     }
 
     /// A message did not arrive: its text back into the draft it came from,
     /// and why, there.
-    fn fail_send(&mut self, submission: Submission, why: &str) {
+    fn fail_send(&mut self, mut submission: Submission, why: &str) {
         let message = match submission.kind {
             Kind::Send => format!("Not sent: {why}"),
             Kind::Queue => format!("Not queued: {why}"),
@@ -1872,6 +2139,8 @@ impl Model {
             }
         }
         self.restore_into(&submission.key, &submission.text);
+        let attachments = std::mem::take(&mut submission.attachments);
+        self.restore_attachments(&submission.key, attachments);
         let shown = self.page == Page::Chat
             && self.composer.key.as_deref() == Some(submission.key.as_str());
         self.composer.errors.insert(
@@ -1903,6 +2172,13 @@ impl Model {
     /// An error answering one of the composer's requests; true when
     /// handled.
     pub(super) fn composer_error(&mut self, id: &str, message: &str) -> bool {
+        // An old daemon's "Unknown command": no listing, never the phone's
+        // own files.
+        if self.composer.paths.is_ours(id) {
+            self.composer.paths.answered(id, None, Instant::now());
+            let _ = self.composer_changed();
+            return true;
+        }
         if let Some(submission) = self.composer.inflight.remove(id) {
             self.fail_send(submission, message);
             return true;
@@ -1958,6 +2234,8 @@ impl Model {
                 true
             }
             "unqueue" | "unwind" => self.composer_error(id, "Exocortex did not answer. Try again."),
+            // A listing that did not come: the picker keeps what it had.
+            "paths" => false,
             _ => self.generic_timeout(),
         }
     }
@@ -1966,6 +2244,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exocortex::files::{Done, Job};
     use crate::exocortex::model::Nav;
     use crate::exocortex::proto::parse_event;
     use crate::exocortex::store::DRAFTS;
@@ -2069,11 +2348,26 @@ mod tests {
         assert_eq!(model.ui.effects, vec![Effect::Paste]);
         model.paste_text(Some("pasted\r\ntext".into()));
         assert_eq!(model.composer.text, "pasted\ntext");
+        // No text on the clipboard: its image, if any (PAR-242).
+        model.ui.effects.clear();
         model.paste_text(None);
         assert_eq!(
-            opened(&mut model).last().map(String::as_str),
-            Some("Nothing to paste.")
+            model.ui.effects,
+            vec![Effect::Files(Job::Paste {
+                key: "c".into(),
+                name: "Pasted image 1".into(),
+                menu: true,
+            })]
         );
+        model.files_done(Done::Prepared {
+            key: "c".into(),
+            result: Err(crate::exocortex::files::NO_IMAGE.into()),
+        });
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some(crate::exocortex::files::NO_IMAGE)
+        );
+        assert!(model.shown_attachments() == (&[][..], 0));
     }
 
     #[test]
@@ -2451,5 +2745,199 @@ mod tests {
         assert!(model.handle(Action::Composer(Act::Send)).is_empty());
         assert!(model.composer_error_label().unwrap().text.contains("12 MB"));
         assert_eq!(model.composer.text.len(), BUDGET + 1, "nothing lost");
+    }
+
+    const GIF: &[u8] = b"GIF89a\x02\x00\x01\x00\x00\x00\x00;";
+
+    /// Draft `key` gets a document and an image, as `files.rs` would.
+    fn attach_two(model: &mut Model, key: &str) {
+        for (name, bytes) in [("notes.md", &b"# hi"[..]), ("dot.gif", GIF)] {
+            model.files_done(Done::Prepared {
+                key: key.into(),
+                result: attachments::prepare(name, bytes),
+            });
+        }
+    }
+
+    #[test]
+    fn files_are_browsed_and_attached_to_the_draft_they_were_chosen_for() {
+        let mut model = ready(false);
+        model.handle(Action::Composer(Act::Attach));
+        assert_eq!(opened(&mut model), vec!["Add attachment or voice"]);
+        model.handle(Action::Composer(Act::Browse(None)));
+        assert_eq!(opened(&mut model), vec!["Browse files"]);
+        let Some(dir) = model.ui.effects.iter().find_map(|e| match e {
+            Effect::Files(Job::List { dir }) => Some(dir.clone()),
+            _ => None,
+        }) else {
+            panic!("a listing asked for");
+        };
+        assert!(model.ui.effects.contains(&Effect::HideKeyboard));
+        assert!(dir.is_absolute());
+        let entry = |name: &str, dir: bool| crate::exocortex::files::Entry {
+            name: name.into(),
+            dir,
+            size: 4,
+            modified: 0,
+        };
+        model.files_done(Done::Listed {
+            dir: dir.clone(),
+            result: Ok(vec![
+                entry("sub", true),
+                entry(".hidden", false),
+                entry("notes.md", false),
+            ]),
+        });
+        let (shown, hidden) = model.composer.browser.shown();
+        assert_eq!((shown.len(), hidden), (2, 1));
+        // Into a folder: listed afresh; a stale answer is ignored.
+        model.handle(Action::Composer(Act::Browse(Some(dir.join("sub")))));
+        model.files_done(Done::Listed {
+            dir: dir.clone(),
+            result: Ok(Vec::new()),
+        });
+        assert!(model.composer.browser.listing.is_none());
+        // A file chosen, then the user moves to another chat: it lands in c.
+        model.handle(Action::Composer(Act::AttachFile(dir.join("sub/notes.md"))));
+        assert_eq!(
+            model.ui.effects.last(),
+            Some(&Effect::Files(Job::Read {
+                key: "c".into(),
+                path: dir.join("sub/notes.md")
+            }))
+        );
+        open(&mut model, "d");
+        attach_two(&mut model, "c");
+        assert!(model.shown_attachments().0.is_empty());
+        open(&mut model, "c");
+        let (items, importing) = model.shown_attachments();
+        assert_eq!(importing, 0);
+        assert_eq!(
+            items.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["notes.md", "dot.gif"]
+        );
+        // The tray's ✕.
+        let id = items[0].id;
+        model.handle(Action::Composer(Act::RemoveAttachment(id)));
+        assert_eq!(model.shown_attachments().0.len(), 1);
+        // At most six.
+        for _ in 0..6 {
+            model.files_done(Done::Prepared {
+                key: "c".into(),
+                result: attachments::prepare("x.gif", GIF),
+            });
+        }
+        assert_eq!(model.shown_attachments().0.len(), attachments::MAX_ITEMS);
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some(attachments::TOO_MANY)
+        );
+    }
+
+    #[test]
+    fn attachments_go_with_the_message_and_come_back_if_it_does_not_arrive() {
+        let mut model = ready(false);
+        attach_two(&mut model, "c");
+        // Attachments alone can be sent.
+        assert!(matches!(
+            crate::exocortex::view::composer::trailing(&model).primary,
+            crate::exocortex::view::composer::Primary::Send { .. }
+        ));
+        // Not while one is still being prepared.
+        model.handle(Action::Composer(Act::PasteImage));
+        type_text(&mut model, "look");
+        assert!(model.handle(Action::Composer(Act::Send)).is_empty());
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some(attachments::PREPARING)
+        );
+        model.files_done(Done::Prepared {
+            key: "c".into(),
+            result: Err(crate::exocortex::files::NO_IMAGE.into()),
+        });
+        // Commands carry none.
+        model.composer.text = "/rename x".into();
+        assert!(model.handle(Action::Composer(Act::Send)).is_empty());
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some(attachments::COMMAND)
+        );
+        model.composer.text = "look".into();
+        let sent = model.handle(Action::Composer(Act::Send));
+        let send = sent.iter().find(|c| c["type"] == "send_message").unwrap();
+        let text = send["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("look\n\n<exocortex_file name_base64="),
+            "{text}"
+        );
+        assert!(text.contains("[Attached file: notes.md]\n# hi\n</exocortex_file>"));
+        assert_eq!(send["images"][0]["mediaType"], "image/gif");
+        assert_eq!(send["images"][0]["width"], 2);
+        assert!(model.shown_attachments().0.is_empty(), "they left with it");
+        // Refused: text and attachments back into the draft.
+        let request = send["reqId"].as_str().unwrap().to_owned();
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"error","reqId":"{request}","convId":"c","message":"No"}}"#),
+        );
+        assert_eq!(model.composer.text, "look");
+        assert_eq!(model.shown_attachments().0.len(), 2);
+        // A model without vision takes no images.
+        model.ops.providers = vec![crate::exocortex::proto::Provider {
+            id: "anthropic".into(),
+            models: vec![crate::exocortex::proto::Model {
+                id: "m".into(),
+                supports_images: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        assert!(model.handle(Action::Composer(Act::Send)).is_empty());
+        assert!(
+            model
+                .composer_error_label()
+                .unwrap()
+                .text
+                .starts_with("Image inputs are not supported by anthropic/m.")
+        );
+    }
+
+    #[test]
+    fn a_new_chat_carries_its_images_and_a_rewind_brings_them_back() {
+        let mut model = ready(false);
+        model.handle(Action::Nav(Nav::NewConversation));
+        let key = model.shown_draft_key();
+        attach_two(&mut model, &key);
+        let sent = model.handle(Action::Composer(Act::Send));
+        let new = sent
+            .iter()
+            .find(|c| c["type"] == "new_conversation")
+            .unwrap();
+        assert_eq!(new["initialMessage"]["images"][0]["mediaType"], "image/gif");
+        assert!(
+            new["initialMessage"]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("<exocortex_file")
+        );
+        // The transcript shows the image by its id until the daemon has it.
+        let Some(Entry::User { images, .. }) = model.chat.entries.last() else {
+            panic!("the first message shown");
+        };
+        assert!(images[0].base64.is_empty() && images[0].image_id.is_some());
+        // A sent message's documents and images back into a draft.
+        let image = proto::ImageAttachment {
+            media_type: "image/gif".into(),
+            base64: attachments::base64(GIF),
+            size_bytes: GIF.len() as u64,
+            ..Default::default()
+        };
+        let (text, back) =
+            attachments::editable(new["initialMessage"]["text"].as_str().unwrap(), &[image]);
+        assert_eq!(text, "");
+        assert_eq!(
+            back.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["notes.md", "Image 1"]
+        );
     }
 }

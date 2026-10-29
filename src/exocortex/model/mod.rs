@@ -13,6 +13,7 @@
 //! connection, the pages, the fan-out and requests, and what the model
 //! asks of the interface (`Ui`: overlays to open, effects such as haptics).
 
+pub mod attach;
 pub mod chat;
 pub mod composer;
 pub mod ops;
@@ -106,6 +107,10 @@ pub enum Effect {
     /// The composer's microphone (`dictation.rs`; lines come back through
     /// `Model::dictation_line`).
     Dictate(super::dictation::Do),
+    /// A folder listed, a file read or the clipboard's image asked for, for
+    /// the composer's attachments (`files.rs`; answers come back through
+    /// `Model::files_done`).
+    Files(super::files::Job),
     /// Moon's status bar takes the theme's background again (E: a theme
     /// change).
     StatusBar,

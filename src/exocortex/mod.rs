@@ -5,12 +5,15 @@
 
 pub mod anim;
 pub mod app;
+pub mod attachments;
 pub mod clipboard;
 pub mod commands;
 pub mod dictation;
 pub mod drafts;
 pub mod editor;
+pub mod files;
 pub mod find;
+pub mod fold;
 pub mod footer;
 pub mod gesture;
 pub mod handoff;
@@ -32,6 +35,7 @@ pub mod screens;
 pub mod sheets;
 pub mod store;
 pub mod theme;
+pub mod toolcall;
 pub mod ui;
 pub mod view;
 pub mod viewer;
