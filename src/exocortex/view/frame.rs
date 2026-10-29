@@ -26,9 +26,17 @@ use super::{ChatFrame, Hit, ListFrame, ViewState, chat_frame, draw_chat_update, 
 pub struct FrameDamage {
     pub moved: Option<(i32, i32, i32)>,
     pub rows: Vec<(i32, i32)>,
-    /// Rectangles drawn anew (`x0, y0, x1, y1`) in rows that otherwise only
-    /// moved: uploaded as they are (`Presenter::present_rows_and_boxes`).
-    pub boxes: Vec<(i32, i32, i32, i32)>,
+    /// Areas (`x0, y0, x1, y1`) drawn anew only in their columns, the rest
+    /// of their rows untouched (a floating button over moved rows; for
+    /// `Presenter::present_areas`).
+    pub areas: Vec<(i32, i32, i32, i32)>,
+}
+
+impl FrameDamage {
+    /// Whether the frame changed anything.
+    pub fn is_empty(&self) -> bool {
+        self.moved.is_none() && self.rows.is_empty() && self.areas.is_empty()
+    }
 }
 
 /// The page's part of a frame's record.
@@ -265,7 +273,7 @@ pub fn update(
     let mut damage = FrameDamage::default();
     let mut bands: Vec<(i32, i32)> = Vec::new();
     // Floating overlays redrawn in their own columns only (x0, y0, x1, y1).
-    let mut boxes: Vec<(i32, i32, i32, i32)> = Vec::new();
+    let mut areas: Vec<(i32, i32, i32, i32)> = Vec::new();
     if new.modal.is_empty() {
         // The page's own path.
         let page = match (&old.page_frame, &new.page_frame) {
@@ -289,11 +297,15 @@ pub fn update(
                     .rows
                     .iter()
                     .any(|(y0, y1)| rows.1 > *y0 && rows.0 < *y1)
+                || page
+                    .areas
+                    .iter()
+                    .any(|(_, y0, _, y1)| rows.1 > *y0 && rows.0 < *y1)
         };
         // Overlays that say which columns they draw in are redrawn there
         // only: the page drew the rest of their rows right.
         let mut redraw = |id: u64, rows: (i32, i32)| match view.overlays.columns(id) {
-            Some((x0, x1)) => boxes.push((x0, rows.0, x1, rows.1)),
+            Some((x0, x1)) => areas.push((x0, rows.0, x1, rows.1)),
             None => bands.push(rows),
         };
         for (id, body) in &new.floating {
@@ -357,6 +369,8 @@ pub fn update(
                 return None;
             }
             bands.extend(page.rows);
+            // Under a dim, what the page drew in columns is drawn again whole.
+            bands.extend(page.areas.iter().map(|&(_, y0, _, y1)| (y0, y1)));
         }
     }
     // Floating overlays that changed, came or went.
@@ -382,18 +396,54 @@ pub fn update(
     for &band in &bands {
         redraw_band(canvas, model, view, pressed, now, band);
     }
-    for (x0, y0, x1, y1) in boxes {
+    for (x0, y0, x1, y1) in areas {
         let (y0, y1) = (y0.clamp(0, height), y1.clamp(0, height));
         let (x0, x1) = (x0.clamp(0, canvas.width), x1.clamp(0, canvas.width));
         if y1 > y0 && x1 > x0 {
             canvas.set_clip(x0, y0, x1, y1);
             draw_full(canvas, model, view, pressed, now);
             canvas.reset_clip();
-            damage.boxes.push((x0, y0, x1, y1));
+            damage.areas.push((x0, y0, x1, y1));
         }
     }
     damage.rows = merge(damage.rows.into_iter().chain(bands).collect());
     Some(damage)
+}
+
+/// Tests: nothing changed outside a frame's damage (`before` moved as the
+/// damage says): rows outside its rows, and in its areas' rows the columns
+/// outside them.
+#[cfg(test)]
+pub(crate) fn assert_unchanged_outside(
+    before: &[u32],
+    after: &[u32],
+    width: usize,
+    damage: &FrameDamage,
+) {
+    let height = (after.len() / width) as i32;
+    for y in 0..height {
+        if damage.rows.iter().any(|(y0, y1)| (*y0..*y1).contains(&y)) {
+            continue;
+        }
+        let row = y as usize * width;
+        let mut columns: Vec<(i32, i32)> = damage
+            .areas
+            .iter()
+            .filter(|(_, y0, _, y1)| (*y0..*y1).contains(&y))
+            .map(|(x0, _, x1, _)| (*x0, *x1))
+            .collect();
+        columns.sort_unstable();
+        let mut x = 0;
+        for (x0, x1) in columns.into_iter().chain([(width as i32, width as i32)]) {
+            let x0 = x0.clamp(x, width as i32);
+            assert!(
+                before[row + x as usize..row + x0 as usize]
+                    == after[row + x as usize..row + x0 as usize],
+                "row {y} changed outside the damage ({damage:?})"
+            );
+            x = x.max(x1.min(width as i32));
+        }
+    }
 }
 
 /// Whether two page records draw the same pixels.
@@ -481,16 +531,7 @@ mod tests {
         if let Some((y0, y1, dy)) = damage.moved {
             move_rows_of(&mut shadow, width, (y0, y1), dy);
         }
-        for y in 0..SIZE.1 {
-            if damage.rows.iter().any(|(y0, y1)| (*y0..*y1).contains(&y)) {
-                continue;
-            }
-            let row = y as usize * width..(y as usize + 1) * width;
-            assert!(
-                shadow[row.clone()] == canvas.pixels[row],
-                "row {y} changed outside the damage"
-            );
-        }
+        assert_unchanged_outside(&shadow, &canvas.pixels, width, &damage);
         (new, damage)
     }
 

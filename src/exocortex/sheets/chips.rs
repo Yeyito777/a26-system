@@ -510,7 +510,7 @@ mod tests {
                 "differs from a full frame at {to}"
             );
             chips_drawn |= damage
-                .boxes
+                .areas
                 .iter()
                 .any(|(x0, y0, x1, y1)| *x0 > 600 && *x1 == 1080 && *y0 <= 200 && *y1 > 200);
             old = new;
