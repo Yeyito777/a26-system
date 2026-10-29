@@ -74,6 +74,10 @@ pub struct Live {
     pub meta: Metadata,
     /// Its identity (0: none yet): the entry it is committed into keeps it.
     pub stamp: u64,
+    /// Bumped when its blocks change other than by growing at the end (a
+    /// snapshot adopted, a sync, a retry's cut): a view planning only what
+    /// grew plans all of it again.
+    pub rewrites: u64,
 }
 
 /// A retry the daemon is waiting out (`stream_retry`).
@@ -345,8 +349,12 @@ pub struct Chat {
     pub output_errors: HashMap<String, String>,
     /// Which tool ids each outputs request asked for.
     pub outputs_inflight: HashMap<String, Vec<String>>,
-    /// Bumped on every change: whether the view lays the chat out again.
+    /// Bumped on every change but the live reply's: whether the view lays
+    /// the history out again.
     pub version: u64,
+    /// Bumped when only the live reply changed (a chunk, a tool call, its
+    /// tokens): the view lays out that alone.
+    pub live_version: u64,
     pub error: Option<String>,
 }
 
@@ -436,6 +444,11 @@ impl Chat {
 
     pub(crate) fn touch(&mut self) {
         self.version = self.version.wrapping_add(1);
+    }
+
+    /// Only the live reply changed.
+    pub(crate) fn touch_live(&mut self) {
+        self.live_version = self.live_version.wrapping_add(1);
     }
 
     pub(crate) fn end(&self) -> u64 {
@@ -615,6 +628,7 @@ impl Chat {
             hydrated: true,
             meta,
             stamp: if same { previous.stamp } else { next_stamp() },
+            rewrites: previous.rewrites + 1,
         });
     }
 
@@ -718,6 +732,7 @@ impl Chat {
             return;
         }
         let blocks = std::mem::take(&mut live.blocks);
+        live.rewrites += 1;
         live.committed.extend(blocks.iter().cloned());
         let meta = live.meta.clone();
         let stamp = std::mem::replace(&mut live.stamp, next_stamp());
@@ -1577,7 +1592,23 @@ impl Model {
         }
         let streaming = self.open_summary().is_some_and(|s| s.streaming);
         let chat = &mut self.chat;
-        chat.touch();
+        // What only grows the live reply lays out that alone.
+        let live_only = chat.live.is_some()
+            && matches!(
+                event,
+                Event::BlockStart { .. }
+                    | Event::TextChunk { .. }
+                    | Event::ThinkingChunk { .. }
+                    | Event::StreamingSync { .. }
+                    | Event::ToolCall { .. }
+                    | Event::ToolResult { .. }
+                    | Event::TokensUpdate { .. }
+            );
+        if live_only {
+            chat.touch_live();
+        } else {
+            chat.touch();
+        }
         match event {
             Event::StreamingStarted {
                 model,
@@ -1642,6 +1673,7 @@ impl Model {
                         || strict_extension(&live.blocks, &blocks))
                 {
                     live.blocks = merge_snapshot(&live.blocks, blocks);
+                    live.rewrites += 1;
                     live.hydrated = true;
                     if live.committed.is_empty()
                         && let Some(offset) = block_offset
@@ -1692,6 +1724,7 @@ impl Model {
                     .map_or(0, |i| i + 1);
                 live.blocks.truncate(cut);
                 live.blocks.extend(blocks);
+                live.rewrites += 1;
             }
             Event::ToolCall {
                 tool_call_id,
@@ -1880,6 +1913,7 @@ impl Model {
                         })
                         .map_or(0, |at| at + 1);
                     live.blocks.truncate(last_tool);
+                    live.rewrites += 1;
                 }
                 chat.commit_segment();
                 chat.status.retry = Some(Retry {

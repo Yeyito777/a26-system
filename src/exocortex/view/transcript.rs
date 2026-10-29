@@ -25,7 +25,7 @@ use super::super::fold::{self, FoldPlan, MergedFold};
 use super::super::footer;
 use super::super::markdown::{self, MdBlock};
 use super::super::model::chat::{
-    COMPACTION_KIND, Disclosure, SavedAnchor, merged_thinking, thinking_key, visible,
+    COMPACTION_KIND, Disclosure, Live, SavedAnchor, merged_thinking, thinking_key, visible,
 };
 use super::super::model::{Action, Chat, Model, Page, chat, composer, rich::Rich};
 use super::super::proto::{Block, Entry, Metadata, ToolStyle};
@@ -111,7 +111,40 @@ pub(crate) struct ChatLayout {
     /// Each placed entry's index in the chat by its stamp, and its top
     /// (the reader's place is kept by it).
     pub(crate) entry_tops: Vec<(usize, f32)>,
+    /// The live turn's working row (where a toggle keeps the tapped spot).
+    pub(crate) live_tops: HashMap<String, f32>,
     pub(crate) height: f32,
+    /// Where the history ends (what a pass that changed only the live
+    /// reply keeps).
+    history: Option<History>,
+}
+
+/// The history's part of a layout: what it was laid out from, how much of
+/// each list it is, and where it ends.
+#[derive(Clone)]
+struct History {
+    key: u64,
+    items: usize,
+    marks: usize,
+    tools: usize,
+    gutters: usize,
+    entry_tops: usize,
+    y: f32,
+    gap: f32,
+    /// The run's metadata before the live reply (its footer adds to it).
+    live_base: Option<Metadata>,
+}
+
+impl ChatLayout {
+    /// Back to the history alone.
+    fn truncate(&mut self, history: &History) {
+        self.items.truncate(history.items);
+        self.marks.truncate(history.marks);
+        self.tools.truncate(history.tools);
+        self.gutters.truncate(history.gutters);
+        self.entry_tops.truncate(history.entry_tops);
+        self.live_tops.clear();
+    }
 }
 
 /// A fold's mark at the left edge (PAR-407): down a row that carries
@@ -211,6 +244,9 @@ pub struct TranscriptView {
     bounds: (f32, f32),
     /// The open chat's folding, while it shows the same.
     fold: Option<Folding>,
+    /// The live reply's plan, and its folding (by what it was made from).
+    live_plan: Option<LivePlan>,
+    live_fold: Option<(u64, Rc<fold::LiveFold>)>,
     /// A fold just tapped: its first row goes where the tapped row was.
     pin: Option<Pin>,
     /// The chat placed at its saved reading place (or its latest response,
@@ -426,16 +462,46 @@ pub(crate) fn plan_entry(entry: &Entry) -> Plan {
 }
 
 pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
-    let results: HashMap<&str, usize> = blocks
+    let mut segments = Vec::new();
+    plan_blocks_from(blocks, 0, &mut segments);
+    if let Some(images) = images_of(blocks, &segments) {
+        segments.push(images);
+    }
+    Plan { segments }
+}
+
+/// The images a reply's tool results attached, after its other segments.
+fn images_of(blocks: &[Block], segments: &[Segment]) -> Option<Segment> {
+    let strip = Strip::of_blocks(blocks)?;
+    let gap = if segments.is_empty() { 0.0 } else { 25.0 };
+    Some(Segment::Images { strip, gap })
+}
+
+impl Segment {
+    /// The block it starts at (a reply's segments).
+    fn first_block(&self) -> Option<usize> {
+        match self {
+            Segment::Markdown { index, .. }
+            | Segment::Context { index, .. }
+            | Segment::Thinking { index, .. } => Some(*index),
+            Segment::Tools { calls, .. } => calls.first().map(|tool| tool.call),
+            _ => None,
+        }
+    }
+}
+
+/// Plans `blocks[from..]` after `segments`, the plan of what is before it.
+fn plan_blocks_from(blocks: &[Block], from: usize, segments: &mut Vec<Segment>) {
+    // A call's result comes after it.
+    let results: HashMap<&str, usize> = blocks[from..]
         .iter()
         .enumerate()
         .filter_map(|(index, block)| match block {
-            Block::ToolResult { tool_call_id, .. } => Some((tool_call_id.as_str(), index)),
+            Block::ToolResult { tool_call_id, .. } => Some((tool_call_id.as_str(), from + index)),
             _ => None,
         })
         .collect();
-    let mut segments = Vec::new();
-    let mut index = 0;
+    let mut index = from;
     while index < blocks.len() {
         let gap = if segments.is_empty() { 0.0 } else { BLOCK_GAP };
         match &blocks[index] {
@@ -520,11 +586,105 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
             _ => index += 1,
         }
     }
-    if let Some(strip) = Strip::of_blocks(blocks) {
-        let gap = if segments.is_empty() { 0.0 } else { 25.0 };
-        segments.push(Segment::Images { strip, gap });
+}
+
+/// The live reply's plan, kept between passes: a chunk plans again only
+/// the segment it grew (`plan_blocks_from` the start of the last one).
+pub(crate) struct LivePlan {
+    stamp: u64,
+    rewrites: u64,
+    /// The blocks planned, and the length of the last one's text.
+    blocks: usize,
+    last_len: usize,
+    /// Where the last segment starts: its index and its first block.
+    keep: usize,
+    from: usize,
+    /// The plan, without the images (`images`: they follow it).
+    plan: Plan,
+    images: bool,
+}
+
+/// What a block's text is long (a live text or thinking block grows at its
+/// end).
+fn text_len(block: Option<&Block>) -> usize {
+    match block {
+        Some(Block::Text { text } | Block::Thinking { text, .. }) => text.len(),
+        _ => 0,
     }
-    Plan { segments }
+}
+
+impl LivePlan {
+    /// The plan of `live`'s blocks, from `kept` (the last pass's) where the
+    /// blocks only grew since.
+    fn of(live: &Live, kept: Option<LivePlan>) -> LivePlan {
+        let blocks = &live.blocks;
+        let last_len = text_len(blocks.last());
+        let mut kept = kept.filter(|lp| {
+            lp.stamp == live.stamp
+                && lp.rewrites == live.rewrites
+                && blocks.len() >= lp.blocks
+                && lp.from <= lp.blocks
+                // A result for a call planned before the last segment: all
+                // of it again.
+                && !blocks[lp.blocks..].iter().any(|block| {
+                    matches!(block, Block::ToolResult { tool_call_id, .. }
+                        if !blocks[lp.from..lp.blocks].iter().any(|b| matches!(b,
+                            Block::ToolCall { tool_call_id: id, .. } if id == tool_call_id)))
+                })
+        });
+        if let Some(lp) = &mut kept {
+            if lp.blocks == blocks.len() && lp.last_len == last_len {
+                if !lp.images {
+                    return kept.unwrap();
+                }
+                lp.plan.segments.pop();
+                lp.images = false;
+            } else {
+                if lp.images {
+                    lp.plan.segments.pop();
+                    lp.images = false;
+                }
+                lp.plan.segments.truncate(lp.keep);
+                let from = lp.from;
+                plan_blocks_from(blocks, from, &mut lp.plan.segments);
+            }
+        }
+        let mut lp = kept.unwrap_or_else(|| {
+            let mut segments = Vec::new();
+            plan_blocks_from(blocks, 0, &mut segments);
+            LivePlan {
+                stamp: live.stamp,
+                rewrites: live.rewrites,
+                blocks: 0,
+                last_len: 0,
+                keep: 0,
+                from: 0,
+                plan: Plan { segments },
+                images: false,
+            }
+        });
+        // The last block's segments (a text block is a segment for each
+        // of its markdown blocks).
+        let segments = &lp.plan.segments;
+        let from = segments
+            .iter()
+            .rev()
+            .find_map(Segment::first_block)
+            .unwrap_or(0);
+        let keep = segments
+            .iter()
+            .position(|segment| segment.first_block() == Some(from))
+            .unwrap_or(0);
+        lp.keep = keep;
+        lp.from = from;
+        lp.blocks = blocks.len();
+        lp.last_len = last_len;
+        if let Some(images) = images_of(blocks, &lp.plan.segments) {
+            lp.plan.segments.push(images);
+            lp.images = true;
+        }
+        lp
+    }
 }
 
 /// Today's local day number (what "today" and "yesterday" in footers turn
@@ -934,45 +1094,36 @@ impl ViewState {
         }
     }
 
-    /// The open chat's fold plan (none while all work shows), made again
-    /// only when what it is made from changed: the entries, the live
-    /// reply's steps, the folds toggled, the fold marks setting, the
-    /// sidebar (whose subagents a conversation has).
-    fn folding(&mut self, model: &Model, disclosure: Disclosure) -> Option<Rc<FoldPlan>> {
-        use std::hash::{Hash, Hasher};
-        if disclosure.show_all {
+    /// What the open chat's folding is made from (none while all work
+    /// shows): its history (`Chat::version` changes with it), whether a
+    /// reply streams, the marks setting, the list (whose subagents a
+    /// conversation has). Not the live reply's blocks: `fold::live_fold`
+    /// adds them.
+    fn fold_key(model: &Model, disclosure: Disclosure) -> Option<u64> {
+        let chat = &model.chat;
+        (!disclosure.show_all).then(|| {
+            hash_of((
+                chat.id.as_deref(),
+                chat.version,
+                chat.live.as_ref().map(|live| live.started_at.to_bits()),
+                disclosure.marks,
+                model.sidebar.version,
+            ))
+        })
+    }
+
+    /// The open chat's fold plan, made again only when its key changed.
+    fn folding(&mut self, model: &Model, key: Option<u64>) -> Option<Rc<FoldPlan>> {
+        let Some(key) = key else {
             self.transcript.fold = None;
             return None;
-        }
-        let chat = &model.chat;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (chat.id.as_deref(), chat.start, &chat.stamps).hash(&mut hasher);
-        if let Some(live) = &chat.live {
-            live.started_at.to_bits().hash(&mut hasher);
-            for block in &live.blocks {
-                let step = match block {
-                    Block::Text { text } => 1 + u8::from(!text.trim().is_empty()),
-                    Block::Thinking { .. } => 3,
-                    Block::ToolCall { .. } => 4,
-                    Block::ToolResult { .. } => 5,
-                    Block::Other => 6,
-                };
-                step.hash(&mut hasher);
-            }
-        }
-        // The folds toggled open (any order).
-        let toggled = chat
-            .expanded
-            .iter()
-            .filter(|key| key.starts_with("turn:") || key.starts_with("group:"))
-            .fold(0u64, |sum, key| sum ^ hash_of(key));
-        (toggled, disclosure.marks, model.sidebar.version).hash(&mut hasher);
-        let key = hasher.finish();
+        };
         if let Some(folding) = &self.transcript.fold
             && folding.key == key
         {
             return Some(folding.plan.clone());
         }
+        let chat = &model.chat;
         let msgs: Vec<fold::Msg> = chat
             .entries
             .iter()
@@ -998,12 +1149,12 @@ impl ViewState {
             })
             .collect();
         let keys = fold::keys(&chat.entries, chat.start);
-        let plan = Rc::new(fold::plan(
+        let plan = Rc::new(fold::plan_turns(
             &msgs,
             &keys,
-            chat.live.as_ref().map(|live| live.blocks.as_slice()),
+            chat.live.is_some(),
             &|key| chat.expanded.contains(key),
-            disclosure.marks,
+            Disclosure::of(&model.persist).marks,
             chat.live.as_ref().map(|live| live.started_at),
             &|id| own_subagent(model, id),
         ));
@@ -1014,15 +1165,69 @@ impl ViewState {
         Some(plan)
     }
 
+    /// The live turn's fold plan (`fold::live_fold`), made again when a step
+    /// starts or the history's folding changed.
+    fn live_folding(
+        &mut self,
+        base: &fold::LiveBase,
+        fold_key: u64,
+        live: &Live,
+    ) -> Rc<fold::LiveFold> {
+        let blocks = &live.blocks;
+        let last = blocks
+            .last()
+            .map(|block| matches!(block, Block::Text { text } if !text.trim().is_empty()));
+        let key = hash_of((fold_key, live.stamp, live.rewrites, blocks.len(), last));
+        if let Some((cached, fold)) = &self.transcript.live_fold
+            && *cached == key
+        {
+            return fold.clone();
+        }
+        let fold = Rc::new(fold::live_fold(base, blocks));
+        self.transcript.live_fold = Some((key, fold.clone()));
+        fold
+    }
+
+    /// One piece on its own at `y` (the edge, a bubble, an error); returns
+    /// its bottom.
+    fn single(
+        &mut self,
+        layout: &mut ChatLayout,
+        y: f32,
+        key: u64,
+        role: Role,
+        make: &dyn Fn() -> Piece,
+    ) -> f32 {
+        let (laid, marks) = self.piece(key, make);
+        for mark in marks.iter() {
+            layout.marks.push(PlacedMark {
+                top: y,
+                mark: mark.clone(),
+            });
+        }
+        let h = laid.h;
+        layout.items.push(Placed {
+            y,
+            laid,
+            stamp: 0,
+            index: 0,
+            role,
+        });
+        y + h
+    }
+
     /// Lays the open chat out if it changed since the last frame: every
     /// entry's pieces, from the cache unless what they show is new; folded
-    /// (`fold.rs`) unless Show all work is on.
+    /// (`fold.rs`) unless Show all work is on. When only the live reply
+    /// changed (a chunk), the history's part is kept and the reply alone
+    /// laid out again, its plan from what it was (`LivePlan`).
     pub(crate) fn layout(&mut self, model: &Model) {
         self.check_generation();
         let chat = &model.chat;
         let day = today();
         let disclosure = Disclosure::of(&model.persist);
-        let key = hash_of((
+        let fold_key = Self::fold_key(model, disclosure);
+        let history_key = hash_of((
             disclosure,
             chat.version,
             chat.id.as_deref(),
@@ -1032,13 +1237,14 @@ impl ViewState {
             self.generation,
             day,
             model.open_summary().map(|s| (&s.provider, &s.title)),
+            fold_key,
         ));
+        let key = hash_of((history_key, chat.live_version));
         if self.layout.key == key && !self.layout.items.is_empty() {
             return;
         }
         self.pass += 1;
-        let fold = self.folding(model, disclosure);
-        let folding = fold.is_some();
+        let fold = self.folding(model, fold_key);
         let context = Context {
             model,
             chat,
@@ -1048,35 +1254,53 @@ impl ViewState {
             live: false,
             disclosure,
         };
-        let mut layout = ChatLayout::default();
+        let mut layout = std::mem::take(&mut self.layout);
+        let kept = layout
+            .history
+            .take()
+            .filter(|history| history.key == history_key);
+        let full = kept.is_none();
+        let history = match kept {
+            Some(history) => {
+                layout.truncate(&history);
+                history
+            }
+            None => {
+                layout = ChatLayout::default();
+                self.lay_history(&mut layout, &context, fold.as_deref(), history_key)
+            }
+        };
+        let y = self.lay_rest(&mut layout, &context, fold.as_deref(), fold_key, &history);
+        // Only the rest's are new (the history's are in order).
+        layout.marks[history.marks..].sort_by(|a, b| a.top.total_cmp(&b.top));
+        layout.tools[history.tools..].sort_by(|a, b| a.0.total_cmp(&b.0));
+        layout.history = Some(history);
+        layout.key = key;
+        layout.height = y + TRANSCRIPT_BOTTOM;
+        self.layout = layout;
+        // The history's pieces are used by every pass, whether laid out or
+        // kept: forget only on a full one.
+        if full {
+            self.prune();
+        }
+    }
+
+    /// The history: the edge, the System Instructions, the entries with
+    /// their footers and fold marks.
+    fn lay_history(
+        &mut self,
+        layout: &mut ChatLayout,
+        context: &Context,
+        fold: Option<&FoldPlan>,
+        key: u64,
+    ) -> History {
+        let chat = context.chat;
+        let disclosure = context.disclosure;
+        let folding = fold.is_some();
         let mut y = TRANSCRIPT_TOP;
         let mut gap = 0.0;
-        let single = |view: &mut Self,
-                      layout: &mut ChatLayout,
-                      y: f32,
-                      key: u64,
-                      role: Role,
-                      make: &dyn Fn() -> Piece| {
-            let (laid, marks) = view.piece(key, make);
-            for mark in marks.iter() {
-                layout.marks.push(PlacedMark {
-                    top: y,
-                    mark: mark.clone(),
-                });
-            }
-            let h = laid.h;
-            layout.items.push(Placed {
-                y,
-                laid,
-                stamp: 0,
-                index: 0,
-                role,
-            });
-            y + h
-        };
         debug_assert_eq!(chat.entries.len(), chat.stamps.len());
-        let empty = chat.entries.is_empty();
-        if !empty {
+        if !chat.entries.is_empty() {
             let edge = if let Some(error) = &chat.older_error {
                 Edge::Failed(error.clone())
             } else if chat.older_request.is_some() {
@@ -1086,14 +1310,9 @@ impl ViewState {
             } else {
                 Edge::Beginning
             };
-            y = single(
-                self,
-                &mut layout,
-                y,
-                hash_of(("edge", &edge)),
-                Role::Other,
-                &|| lay_edge(&edge),
-            );
+            y = self.single(layout, y, hash_of(("edge", &edge)), Role::Other, &|| {
+                lay_edge(&edge)
+            });
             gap = ROW_GAP;
             // The System Instructions box, pinned at the top (PAR-132).
             for (n, text) in chat.instructions.iter().enumerate() {
@@ -1104,9 +1323,8 @@ impl ViewState {
                 let open = chat.is_open(&key, disclosure);
                 y += gap;
                 let toggle = Action::Chat(chat::Act::ToggleExpanded(key.clone()));
-                y = single(
-                    self,
-                    &mut layout,
+                y = self.single(
+                    layout,
                     y,
                     hash_of(("instructions", text, &key, open)),
                     Role::Other,
@@ -1125,7 +1343,7 @@ impl ViewState {
             if !reply {
                 run_shows = false;
             }
-            if let Some(fold) = &fold {
+            if let Some(fold) = fold {
                 // Work folded with no reply to carry its mark: a line in
                 // the gap, where it was.
                 if let Some(line) = fold.line(at) {
@@ -1152,11 +1370,11 @@ impl ViewState {
                 Entry::Ai { blocks, .. } => blocks.as_slice(),
                 _ => &[],
             };
-            let folded = fold.as_ref().and_then(|f| f.by_msg.get(&at));
+            let folded = fold.and_then(|f| f.by_msg.get(&at));
             let shown = Shown {
                 hidden: folded.and_then(|f| f.hidden.as_ref()),
                 folding,
-                merged: fold.as_ref().and_then(|f| f.merged.get(&at)),
+                merged: fold.and_then(|f| f.merged.get(&at)),
                 summary: folded.and_then(|f| {
                     f.summary
                         .as_deref()
@@ -1167,13 +1385,13 @@ impl ViewState {
             let top = y + gap;
             let first = layout.items.len();
             let placed = self.place(
-                &mut layout,
+                layout,
                 top,
                 &plan,
                 Some(entry),
                 *stamp,
                 blocks,
-                &context,
+                context,
                 shown,
             );
             run_shows |= placed.any && reply;
@@ -1218,7 +1436,7 @@ impl ViewState {
             }
             // The mark down a row that carries folded work, and down every
             // row of an opened group.
-            if let Some(mark) = fold.as_ref().and_then(|f| f.mark(at)) {
+            if let Some(mark) = fold.and_then(|f| f.mark(at)) {
                 layout
                     .fold_tops
                     .entry(mark.group.clone())
@@ -1232,10 +1450,42 @@ impl ViewState {
                 });
             }
         }
+        layout.marks.sort_by(|a, b| a.top.total_cmp(&b.top));
+        layout.tools.sort_by(|a, b| a.0.total_cmp(&b.0));
+        layout.gutters.sort_by(|a, b| a.y0.total_cmp(&b.y0));
+        History {
+            key,
+            items: layout.items.len(),
+            marks: layout.marks.len(),
+            tools: layout.tools.len(),
+            gutters: layout.gutters.len(),
+            entry_tops: layout.entry_tops.len(),
+            y,
+            gap,
+            live_base,
+        }
+    }
+
+    /// What follows the history: messages sent from here, the live reply
+    /// (folded: WORKING and its newest step) with its status lines, footer
+    /// and the notices after it, queued messages, a load error. Returns the
+    /// bottom.
+    fn lay_rest(
+        &mut self,
+        layout: &mut ChatLayout,
+        context: &Context,
+        fold: Option<&FoldPlan>,
+        fold_key: Option<u64>,
+        history: &History,
+    ) -> f32 {
+        let model = context.model;
+        let chat = context.chat;
+        let folding = fold.is_some();
+        let (mut y, mut gap) = (history.y, history.gap);
         for echo in &chat.echoes {
             y += gap;
             let key = hash_of(("echo", &echo.text));
-            y = single(self, &mut layout, y, key, Role::Other, &|| {
+            y = self.single(layout, y, key, Role::Other, &|| {
                 lay_bubble(&echo.text, Tone::Sending, None, false)
             });
             gap = ROW_GAP;
@@ -1243,9 +1493,13 @@ impl ViewState {
         if let Some(live) = &chat.live {
             let live_context = Context {
                 live: true,
-                ..context
+                ..*context
             };
-            let live_fold = fold.as_ref().and_then(|f| f.live.as_ref());
+            let live_fold = match (fold.and_then(|f| f.live_base.as_ref()), fold_key) {
+                (Some(base), Some(key)) => Some(self.live_folding(base, key, live)),
+                _ => None,
+            };
+            let live_fold = live_fold.as_deref();
             let status = &chat.status;
             y += gap;
             let mut h = 0.0;
@@ -1275,7 +1529,7 @@ impl ViewState {
                     index: u32::MAX - 2,
                     role: Role::Message,
                 });
-                layout.fold_tops.entry(lf.turn.clone()).or_insert(top);
+                layout.live_tops.entry(lf.turn.clone()).or_insert(top);
                 next_gap = BLOCK_GAP - NOTIFICATION_TRIM;
             }
             if let Some((msg, block)) = live_fold.and_then(|lf| lf.revealed)
@@ -1292,7 +1546,7 @@ impl ViewState {
                     ..Shown::default()
                 };
                 let placed = self.place(
-                    &mut layout,
+                    layout,
                     y + h,
                     &plan,
                     Some(entry),
@@ -1306,7 +1560,7 @@ impl ViewState {
                     next_gap = BLOCK_GAP;
                 }
             }
-            let plan = plan_blocks(&live.blocks);
+            let plan = LivePlan::of(live, self.transcript.live_plan.take());
             let shown = Shown {
                 hidden: live_fold.and_then(|lf| lf.hidden.as_ref()),
                 folding,
@@ -1314,15 +1568,16 @@ impl ViewState {
                 ..Shown::default()
             };
             let placed = self.place(
-                &mut layout,
+                layout,
                 y + h,
-                &plan,
+                &plan.plan,
                 None,
                 live.stamp,
                 &live.blocks,
                 &live_context,
                 shown,
             );
+            self.transcript.live_plan = Some(plan);
             if placed.any {
                 h += placed.h;
             }
@@ -1352,7 +1607,7 @@ impl ViewState {
                 *h += piece_h;
             };
             if live_fold.is_none() && !live.blocks.iter().any(visible) && !status.any() {
-                push(self, &mut layout, &mut h, hash_of("working"), &lay_working);
+                push(self, layout, &mut h, hash_of("working"), &lay_working);
             }
             for (on, kind) in [
                 (status.retry.is_some(), StatusKind::Retry),
@@ -1362,7 +1617,7 @@ impl ViewState {
                 if on {
                     push(
                         self,
-                        &mut layout,
+                        layout,
                         &mut h,
                         hash_of(("status", format!("{kind:?}"))),
                         &|| lay_status(kind),
@@ -1370,8 +1625,9 @@ impl ViewState {
                 }
             }
             // The footer row: no gap above it.
+            let live_follows = chat.echoes.is_empty();
             let base = if live_follows {
-                live_base.clone()
+                history.live_base.clone()
             } else {
                 None
             };
@@ -1400,13 +1656,13 @@ impl ViewState {
                 let plan = self.plan(*stamp, entry);
                 let top = y + gap;
                 let placed = self.place(
-                    &mut layout,
+                    layout,
                     top,
                     &plan,
                     Some(entry),
                     *stamp,
                     &[],
-                    &context,
+                    context,
                     Shown::default(),
                 );
                 if placed.any {
@@ -1414,17 +1670,13 @@ impl ViewState {
                     gap = placed.tail_gap;
                 }
             }
-        } else if !chat.echoes.is_empty() {
-            y += BLOCK_GAP;
-            y = single(
-                self,
-                &mut layout,
-                y,
-                hash_of("working"),
-                Role::Other,
-                &lay_working,
-            );
-            gap = ROW_GAP;
+        } else {
+            self.transcript.live_plan = None;
+            if !chat.echoes.is_empty() {
+                y += BLOCK_GAP;
+                y = self.single(layout, y, hash_of("working"), Role::Other, &lay_working);
+                gap = ROW_GAP;
+            }
         }
         // Queued messages (D's captions and actions: "queued: next turn",
         // "Removing…"; a tap opens the message's queue actions).
@@ -1434,7 +1686,7 @@ impl ViewState {
             let sending = model.composer.optimistic(&queued.id);
             let key = hash_of(("queued", &queued.id, &queued.text, &caption, sending));
             let id = queued.id.clone();
-            y = single(self, &mut layout, y, key, Role::Queued(id.clone()), &|| {
+            y = self.single(layout, y, key, Role::Queued(id.clone()), &|| {
                 let mut piece = lay_bubble(&queued.text, Tone::Queued, Some(&caption), false);
                 let h = piece.laid.h;
                 piece.laid.hits.push((
@@ -1449,25 +1701,14 @@ impl ViewState {
             gap = ROW_GAP;
         }
         if let Some(error) = &chat.error
-            && !empty
+            && !chat.entries.is_empty()
         {
             y += gap;
-            y = single(
-                self,
-                &mut layout,
-                y,
-                hash_of(("error", error)),
-                Role::Other,
-                &|| lay_load_error(error),
-            );
+            y = self.single(layout, y, hash_of(("error", error)), Role::Other, &|| {
+                lay_load_error(error)
+            });
         }
-        layout.marks.sort_by(|a, b| a.top.total_cmp(&b.top));
-        layout.tools.sort_by(|a, b| a.0.total_cmp(&b.0));
-        layout.gutters.sort_by(|a, b| a.y0.total_cmp(&b.y0));
-        layout.key = key;
-        layout.height = y + TRANSCRIPT_BOTTOM;
-        self.layout = layout;
-        self.prune();
+        y
     }
 
     /// Forgets the least recently used pieces and plans past the limits.
@@ -1667,7 +1908,12 @@ impl ViewState {
             return;
         }
         let max = self.chat_max(model, height);
-        if let Some(y) = self.layout.fold_tops.get(&pin.key) {
+        if let Some(y) = self
+            .layout
+            .fold_tops
+            .get(&pin.key)
+            .or_else(|| self.layout.live_tops.get(&pin.key))
+        {
             self.follow = false;
             self.chat_scroll.reset();
             self.chat_scroll.offset = (y - pin.top).clamp(0.0, max);
@@ -3263,6 +3509,102 @@ mod tests {
                 .all(|a| a.0 == 0 && a.2 == GUTTER_W as i32),
             "{damage:?}"
         );
+    }
+
+    /// What a layout shows, to compare two.
+    fn shown(view: &ViewState) -> Vec<String> {
+        let layout = &view.layout;
+        let mut out: Vec<String> = layout
+            .items
+            .iter()
+            .map(|item| {
+                format!(
+                    "{} {} {} {} {:?} {:?}",
+                    item.y, item.laid.h, item.stamp, item.index, item.laid.ops, item.laid.hits
+                )
+            })
+            .collect();
+        out.extend(
+            layout
+                .marks
+                .iter()
+                .map(|m| format!("mark {} {:?}", m.top, m.mark)),
+        );
+        out.extend(layout.gutters.iter().map(|g| format!("{g:?}")));
+        out.extend(layout.tools.iter().map(|t| format!("tool {t:?}")));
+        out.push(format!("height {}", layout.height));
+        out
+    }
+
+    #[test]
+    fn a_reply_laid_out_as_it_streams_is_the_same_as_laid_out_whole() {
+        let history = format!(
+            r#"{},{{"type":"user","text":"Go on","metadata":{{"startedAt":90000,"model":"m","tokens":0}}}}"#,
+            long_entries(6)
+        );
+        let call = |id: &str| {
+            format!(
+                r#"{{"type":"tool_call","convId":"c","toolCallId":"{id}","toolName":"bash","input":{{"command":"ls"}},"summary":"ls -la /tmp/{id}"}}"#
+            )
+        };
+        let result = |id: &str| {
+            format!(
+                r#"{{"type":"tool_result","convId":"c","toolCallId":"{id}","toolName":"bash","output":"ok","isError":false}}"#
+            )
+        };
+        let text = |t: &str| format!(r#"{{"type":"text_chunk","convId":"c","text":"{t}"}}"#);
+        let think = |t: &str| format!(r#"{{"type":"thinking_chunk","convId":"c","text":"{t}"}}"#);
+        let block =
+            |kind: &str| format!(r#"{{"type":"block_start","convId":"c","blockType":"{kind}"}}"#);
+        let events = [
+            r#"{"type":"streaming_started","convId":"c","provider":"anthropic","model":"claude-opus-5-5","startedAt":90001,"snapshotKind":"start"}"#.to_owned(),
+            block("thinking"),
+            think("Looking at "),
+            think("the logs."),
+            block("text"),
+            text("First para"),
+            text("graph.\\n\\nSecond"),
+            text(" one, longer.\\n\\n- a\\n- b"),
+            r#"{"type":"tokens_update","convId":"c","tokens":40,"generationThroughput":{"provider":"anthropic","model":"claude-opus-5-5","rates":[61.5]}}"#.to_owned(),
+            call("x1"),
+            result("x1"),
+            call("x2"),
+            result("x2"),
+            block("text"),
+            text("After the calls."),
+            r#"{"type":"system_message","convId":"c","text":"Claude account switched","color":"warning"}"#.to_owned(),
+            block("thinking"),
+            think("More."),
+            call("x3"),
+            r#"{"type":"user_message","convId":"c","text":"also this","startedAt":95000,"queueId":"q1"}"#.to_owned(),
+            result("x3"),
+            block("text"),
+            text("Then the rest\\n\\nand more"),
+            r#"{"type":"stream_retry","convId":"c","attempt":1,"maxAttempts":3,"errorMessage":"Overloaded","delaySec":5}"#.to_owned(),
+            block("text"),
+            text("Resumed."),
+            r#"{"type":"message_complete","convId":"c","blocks":[{"type":"text","text":"Resumed."}],"endedAt":99000,"tokens":90}"#.to_owned(),
+            r#"{"type":"streaming_stopped","convId":"c"}"#.to_owned(),
+        ];
+        for show_all in [false, true] {
+            let mut model = open_with(&history);
+            model
+                .persist
+                .update_settings(|s| s.show_all_work = show_all);
+            let mut view = ViewState::new();
+            view.layout(&model);
+            for (at, event) in events.iter().enumerate() {
+                model.apply(parse_event(event), Instant::now());
+                view.layout(&model);
+                let mut whole = ViewState::new();
+                whole.layout(&model);
+                assert_eq!(
+                    shown(&view),
+                    shown(&whole),
+                    "show all {show_all}, after event {at}: {event}"
+                );
+            }
+        }
     }
 
     #[test]
