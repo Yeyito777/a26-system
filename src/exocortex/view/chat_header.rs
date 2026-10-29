@@ -634,6 +634,7 @@ mod tests {
                 "Usage limits",
                 "Reload conversation",
                 "Show all work",
+                "Edit…",
                 "Copy conversation id"
             ]
         );

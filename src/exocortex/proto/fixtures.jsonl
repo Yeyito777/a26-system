@@ -73,3 +73,4 @@
 {"type":"queue_notice","queueId":"q2","convId":"c1","message":"dropped","level":"warning"}
 {"type":"transcription_result","reqId":"app-34","text":"hello world"}
 {"type":"user_macros","macros":[{"name":"x"}],"reqId":"app-35","change":{"action":"created","macro":{"name":"x"}}}
+{"type":"path_directory_entries","reqId":"app-36","listings":[{"directory":"~/","prefix":"s","entries":[{"name":"src","type":"dir"},{"name":"setup.sh","type":"file"}],"truncated":false}]}

@@ -49,6 +49,36 @@ pub struct Transcription {
     pub text: String,
 }
 
+/// `path_directory_entries`: a directory on the daemon's host, for path
+/// completion (PAR-235).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PathEntries {
+    pub req_id: Option<String>,
+    pub listings: Vec<PathListing>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PathListing {
+    /// As the prompt spells it (`~/src/`).
+    pub directory: String,
+    /// Every entry starts with it.
+    pub prefix: String,
+    pub entries: Vec<PathEntry>,
+    /// A large directory, cut short.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PathEntry {
+    pub name: String,
+    /// `dir` or `file`.
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
 /// `user_macros`: the daemon's user macros (the picker's to read).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

@@ -14,6 +14,8 @@ pub struct Completion {
     pub end: usize,
     pub query: String,
     pub leading: bool,
+    /// A path on the daemon's host (`commands/paths.rs`), not a slash word.
+    pub path: bool,
 }
 
 /// A leading `//` sends one literal slash and skips commands, modifiers
@@ -77,7 +79,13 @@ pub fn completion(text: &str, caret: usize) -> Option<Completion> {
         at + prefix[at..].chars().next().map_or(1, char::len_utf8)
     });
     if path_word(&prefix[word_start..]) {
-        return None;
+        return Some(Completion {
+            start: word_start,
+            end,
+            query: prefix[word_start..].to_owned(),
+            leading: text[..word_start].trim().is_empty(),
+            path: true,
+        });
     }
     let line_start = prefix.rfind(['\n', '\t']).map_or(0, |at| at + 1);
     // The last "/" on the line that starts a word.
@@ -104,6 +112,7 @@ pub fn completion(text: &str, caret: usize) -> Option<Completion> {
         end,
         query: query.to_owned(),
         leading: text[..start].trim().is_empty(),
+        path: false,
     })
 }
 
@@ -205,7 +214,9 @@ mod tests {
         assert!(!c.leading);
         assert_eq!(c.start, 7);
         // Paths, URLs, escapes and other lines are not completions.
-        assert_eq!(completion("see /usr/lo", 11), None);
+        let c = completion("see /usr/lo", 11).unwrap();
+        assert!(c.path && c.start == 4 && c.query == "/usr/lo", "a path");
+        assert!(completion("~/src", 5).is_some_and(|c| c.path));
         assert_eq!(completion("http://x.org/a", 14), None);
         assert_eq!(completion("//x", 3), None);
         assert_eq!(completion("/go\nnext", 8), None);

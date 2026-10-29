@@ -175,6 +175,8 @@ pub struct Composer {
     pub picker_dismissed: Option<String>,
     /// `/ping` asked (its reqId) and when.
     pub ping: Option<(String, Instant)>,
+    /// Listings of the daemon host's directories (path completion).
+    pub paths: super::super::commands::paths::Paths,
     /// What is typed is a command (the trailing button says Run).
     pub is_command: bool,
     /// The text's valid commands, macros and arguments (byte ranges), drawn
@@ -488,7 +490,7 @@ impl Model {
         self.composer.set_text(text);
         self.composer.key = Some(key);
         self.composer.picker_dismissed = None;
-        self.composer_changed();
+        let _ = self.composer_changed();
     }
 
     /// Writes the drafts into the kept file now.
@@ -563,9 +565,9 @@ impl Model {
 
     /// A key from Moon's keyboard (`keyboard show multiline`: Return is a
     /// line break). Returns whether the composer changed.
-    pub fn composer_key(&mut self, input: KeyInput) -> bool {
+    pub fn composer_key(&mut self, input: KeyInput) -> Option<Vec<Value>> {
         if self.page != Page::Chat {
-            return false;
+            return None;
         }
         let now = Instant::now();
         let mut cursor = self.composer.cursor;
@@ -583,8 +585,7 @@ impl Model {
         } else {
             self.composer.touched(now);
         }
-        self.composer_changed();
-        true
+        Some(self.composer_changed())
     }
 
     /// Text from the clipboard, pasted at the caret (`Effect::Paste`'s
@@ -600,18 +601,48 @@ impl Model {
             }
             None => self.ui.toast("Nothing to paste."),
         }
-        self.composer_changed();
+        let _ = self.composer_changed();
     }
 
     pub(super) fn handle_composer(&mut self, act: Act) -> Vec<Value> {
-        let commands = self.handle_composer_act(act);
-        self.composer_changed();
+        let mut commands = self.handle_composer_act(act);
+        commands.extend(self.composer_changed());
         commands
     }
 
     /// The picker follows what is typed and where the caret is: open when it
-    /// has something to offer, closed when not.
-    pub(crate) fn composer_changed(&mut self) {
+    /// has something to offer, closed when not. A path at the caret asks the
+    /// daemon for its directory (the commands to send).
+    pub(crate) fn composer_changed(&mut self) -> Vec<Value> {
+        let mut commands = Vec::new();
+        let caret = self.composer.cursor();
+        if caret.selection().is_none()
+            && self.ready
+            && let Some(c) =
+                super::super::commands::syntax::completion(&self.composer.text, caret.caret)
+                    .filter(|c| c.path)
+            && let Some((directory, prefix)) = self.composer.paths.wanted(&c.query, Instant::now())
+        {
+            let request = self.requests.issue(
+                Owner::Composer,
+                "paths",
+                None,
+                super::super::commands::paths::INFLIGHT,
+                Instant::now(),
+            );
+            self.composer.paths.asked(
+                request.clone(),
+                directory.clone(),
+                prefix.clone(),
+                Instant::now(),
+            );
+            commands.push(serde_json::json!({
+                "type": "list_path_directory",
+                "reqId": request,
+                "directory": directory,
+                "prefix": prefix,
+            }));
+        }
         let state = self.picker();
         if state.is_none() {
             self.composer.picker_macros = false;
@@ -636,6 +667,7 @@ impl Model {
         } else {
             Vec::new()
         };
+        commands
     }
 
     /// Text put back into draft `key` after a command refused it.
@@ -1044,7 +1076,7 @@ impl Model {
             cursor.insert(&mut self.composer.text, &words);
             self.composer.cursor = cursor;
             self.composer.edited(Instant::now());
-            self.composer_changed();
+            let _ = self.composer_changed();
             if self.page == Page::Chat {
                 self.ui
                     .effect(Effect::ShowKeyboard(KeyboardPurpose::Multiline));
@@ -1897,6 +1929,16 @@ impl Model {
                     );
                 }
             }
+            Event::PathDirectoryEntries(e) => {
+                if let Some(id) = &e.req_id
+                    && self.composer.paths.is_ours(id)
+                {
+                    self.composer
+                        .paths
+                        .answered(id, Some(e.listings.clone()), Instant::now());
+                    return self.composer_changed();
+                }
+            }
             Event::ToolsAvailable {
                 macro_environment: Some(env),
                 ..
@@ -2030,6 +2072,13 @@ impl Model {
     /// An error answering one of the composer's requests; true when
     /// handled.
     pub(super) fn composer_error(&mut self, id: &str, message: &str) -> bool {
+        // An old daemon's "Unknown command": no listing, never the phone's
+        // own files.
+        if self.composer.paths.is_ours(id) {
+            self.composer.paths.answered(id, None, Instant::now());
+            let _ = self.composer_changed();
+            return true;
+        }
         if let Some(submission) = self.composer.inflight.remove(id) {
             self.fail_send(submission, message);
             return true;
@@ -2085,6 +2134,8 @@ impl Model {
                 true
             }
             "unqueue" | "unwind" => self.composer_error(id, "Exocortex did not answer. Try again."),
+            // A listing that did not come: the picker keeps what it had.
+            "paths" => false,
             _ => self.generic_timeout(),
         }
     }

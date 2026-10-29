@@ -623,8 +623,11 @@ impl Context<'_> {
         }
         // The composer's (Moon's `multiline` keyboard: Return is a line
         // break and the keyboard stays up).
-        if !self.model.composer_key(input) {
+        let Some(commands) = self.model.composer_key(input) else {
             return false;
+        };
+        for command in commands {
+            self.link.send(command);
         }
         self.take_ui(now);
         self.view.follow = true;

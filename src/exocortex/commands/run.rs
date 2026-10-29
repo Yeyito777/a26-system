@@ -77,6 +77,25 @@ impl Model {
             return None;
         }
         let completion = syntax::completion(text, cursor.caret);
+        // A path: the daemon host's files (PAR-235), "Loading…" until its
+        // listing is here.
+        if let Some(c) = completion.as_ref().filter(|c| c.path) {
+            let files = self
+                .composer
+                .paths
+                .matches(&c.query, std::time::Instant::now());
+            if files.as_ref().is_some_and(Vec::is_empty) {
+                return None;
+            }
+            return Some(PickerState {
+                completion: c.clone(),
+                hint: files.is_none().then(|| ("Loading…".to_owned(), false)),
+                commands: files.unwrap_or_default(),
+                macros: Vec::new(),
+                title: "Files".into(),
+                prefix: String::new(),
+            });
+        }
         let env = SlashEnv::new(self);
         let items = match &completion {
             Some(c) if c.leading => env.leading(&c.query),
@@ -100,6 +119,7 @@ impl Model {
             end: cursor.caret,
             query: String::new(),
             leading: false,
+            path: false,
         });
         let (title, prefix) =
             syntax::heading(&completion.query, commands.len(), macros.len(), &is_macro);
@@ -161,23 +181,27 @@ impl Model {
         };
         let tail = &text[c.end..];
         let spaced = tail.starts_with([' ', '\t']);
-        let insertion = if spaced {
+        // A directory goes on to its listing: no space after it.
+        let directory = c.path && insert.ends_with('/');
+        let insertion = if spaced || directory {
             insert.to_owned()
         } else {
             format!("{insert} ")
         };
         let mut next = text.clone();
         next.replace_range(c.start..c.end, &insertion);
-        let caret = c.start + insertion.len() + usize::from(spaced);
+        let caret = c.start + insertion.len() + usize::from(spaced && !directory);
         self.composer.text = next;
         self.composer.cursor = crate::exocortex::editor::Cursor::at(caret);
         self.composer.picker_dismissed = None;
         self.ui.haptic(Haptic::Selection);
-        self.composer_changed();
-        // A finished command or macro needs no exact-match menu.
-        if self
-            .picker()
-            .is_none_or(|p| p.commands.is_empty() && p.macros.is_empty())
+        // (The composer's change follows in `handle_composer`.)
+        // A finished command or macro needs no exact-match menu; a
+        // directory's listing is still to come.
+        if !directory
+            && self
+                .picker()
+                .is_none_or(|p| p.commands.is_empty() && p.macros.is_empty())
         {
             self.composer.picker_dismissed = Some(self.composer.text.clone());
         }
@@ -1451,6 +1475,52 @@ mod tests {
             opened(&mut model),
             vec!["Nothing to edit in this chat yet."]
         );
+    }
+
+    #[test]
+    fn paths_complete_from_the_daemons_host() {
+        let mut model = ready(false);
+        let mut sent = Vec::new();
+        for character in "see ~/sr".chars() {
+            sent.extend(model.composer_key(KeyInput::Character(character)).unwrap());
+        }
+        let ask = sent
+            .iter()
+            .rev()
+            .find(|c| c["type"] == "list_path_directory")
+            .unwrap()
+            .clone();
+        // A prefetch of "~/", then one targeted request the rest rides on.
+        assert_eq!(
+            (ask["directory"].as_str(), ask["prefix"].as_str()),
+            (Some("~/"), Some("s"))
+        );
+        let picker = model.composer.picker_state.clone().unwrap();
+        assert_eq!(
+            (
+                picker.title.as_str(),
+                picker.hint.as_ref().map(|h| h.0.as_str())
+            ),
+            ("Files", Some("Loading…"))
+        );
+        let id = ask["reqId"].as_str().unwrap();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"path_directory_entries","reqId":"{id}","listings":[{{"directory":"~/","prefix":"s","entries":[{{"name":"srv","type":"file"}},{{"name":"src","type":"dir"}},{{"name":"sbin","type":"dir"}}]}}]}}"#
+            )),
+            Instant::now(),
+        );
+        let picker = model.composer.picker_state.clone().unwrap();
+        let names: Vec<&str> = picker.commands.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["~/src/", "~/srv"]);
+        // A directory: no space, and its own listing asked for.
+        let next = model.handle(Action::Composer(Act::Complete("~/src/".into())));
+        assert_eq!(model.composer.text, "see ~/src/");
+        assert!(
+            next.iter()
+                .any(|c| c["type"] == "list_path_directory" && c["directory"] == "~/src/")
+        );
+        assert!(model.composer.picker_state.is_some(), "loading the next");
     }
 
     #[test]
