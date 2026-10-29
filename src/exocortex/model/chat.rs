@@ -824,7 +824,6 @@ impl Model {
         };
         let old = std::mem::replace(&mut self.chat, draft);
         self.shelf.keep(old);
-        self.ops.draft_selection = None;
         self.ui.close_all = true;
         self.page = Page::Chat;
         previous

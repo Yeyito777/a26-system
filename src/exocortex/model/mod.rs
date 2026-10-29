@@ -101,6 +101,9 @@ pub enum Effect {
     OpenUrl(String),
     ShowKeyboard(KeyboardPurpose),
     HideKeyboard,
+    /// Moon's status bar takes the theme's background again (E: a theme
+    /// change).
+    StatusBar,
 }
 
 /// What the model asks of the interface: overlays to open or close and
@@ -283,6 +286,7 @@ impl Model {
         self.offline = self.quiet_until.is_none();
         // Nothing in flight will be answered.
         self.requests.clear();
+        self.ops_disconnected();
         self.chat_disconnected(self.quiet_until.is_some());
     }
 

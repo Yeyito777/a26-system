@@ -221,7 +221,7 @@ pub fn animate(model: &Model, view: &mut ViewState, now: Instant) {
             view.animator = animator;
         }
         Page::List => list::animate(model, now, &mut view.animator),
-        Page::Settings => {}
+        Page::Settings => settings::animate(model, now, &mut view.animator),
     }
 }
 
@@ -593,13 +593,7 @@ fn new_chat_state(
 }
 
 fn new_chat_label(model: &Model) -> String {
-    let selection = model.selection();
-    let label = model.model_label(&selection);
-    if selection.effort.is_empty() {
-        label
-    } else {
-        format!("{label} · {}", selection.effort)
-    }
+    model.new_chat_label()
 }
 
 /// The new-chat state's model box.
