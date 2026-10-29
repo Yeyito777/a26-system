@@ -656,10 +656,11 @@ pub(crate) fn draw_transcript(
         }
         for (rect, action) in &item.laid.hits {
             if pressed == Some(action) {
+                // Under its own rect (rows are as wide as the window).
                 canvas.fill_rect(
-                    0,
+                    rect.x as i32,
                     (y + rect.y) as i32,
-                    W as i32,
+                    rect.w as i32,
                     rect.h as i32,
                     c.row_pressed,
                     1.0,

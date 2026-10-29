@@ -6,11 +6,14 @@
 //! Everything here bakes the current theme's colours and sizes into its
 //! ops: the view caches pieces by `theme::generation()`.
 
+use std::rc::Rc;
+
 use crate::gfx::{RectF, Rgb};
 use crate::text::{self, Weight};
 
-use super::super::markdown::{self, MdBlock, Span, Style};
+use super::super::markdown::{self, LinkKind, MdBlock, Span, Style, link_kind};
 use super::super::model::rich::Rich;
+use super::super::model::{Action, rich};
 use super::super::theme::{
     self, HAIRLINE, LIST_INDENT, MARKDOWN_GAP, MARKER_GAP, QUOTE_BAR, QUOTE_INDENT, T_BODY,
     T_CAPTION, T_CODE, T_H1, T_H2, T_H3, T_H4, T_INLINE_CODE,
@@ -35,6 +38,8 @@ pub struct Run {
     pub w: f32,
     pub text: String,
     pub style: Style,
+    /// A link's target (`Style::Link`).
+    pub link: Option<Rc<str>>,
 }
 
 /// A span style's face, size and colour at body size `size`.
@@ -76,9 +81,13 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
         lines.push(std::mem::take(line));
         *x = 0.0;
     };
-    let append = |line: &mut Vec<Run>, x: &mut f32, piece: &str, w: f32, style: Style| {
+    let append = |line: &mut Vec<Run>, x: &mut f32, piece: &str, w: f32, span: &Span| {
         match line.last_mut() {
-            Some(last) if last.style == style && (last.x + last.w - *x).abs() < 0.01 => {
+            Some(last)
+                if last.style == span.style
+                    && last.link == span.link
+                    && (last.x + last.w - *x).abs() < 0.01 =>
+            {
                 last.text.push_str(piece);
                 last.w += w;
             }
@@ -86,7 +95,8 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                 x: *x,
                 w,
                 text: piece.to_owned(),
-                style,
+                style: span.style,
+                link: span.link.clone(),
             }),
         }
         *x += w;
@@ -105,7 +115,7 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                 let w = text::measure(piece, weight, fsize);
                 if piece.starts_with(' ') || piece.starts_with('\t') {
                     if x > 0.0 && x + w <= width {
-                        append(&mut line, &mut x, piece, w, span.style);
+                        append(&mut line, &mut x, piece, w, span);
                     }
                     after_space = true;
                     continue;
@@ -114,14 +124,14 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                 after_space = false;
                 if glued && x + w > width && w <= GLUE_OVERHANG {
                     // Short punctuation stays with what it follows.
-                    append(&mut line, &mut x, piece, w, span.style);
+                    append(&mut line, &mut x, piece, w, span);
                     continue;
                 }
                 if x > 0.0 && x + w > width {
                     finish(&mut lines, &mut line, &mut x);
                 }
                 if w <= width {
-                    append(&mut line, &mut x, piece, w, span.style);
+                    append(&mut line, &mut x, piece, w, span);
                     continue;
                 }
                 // Longer than a line: as many characters as fit, repeatedly.
@@ -130,7 +140,7 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                 for character in piece.chars() {
                     let cw = text::measure(character.encode_utf8(&mut [0; 4]), weight, fsize);
                     if x + chunk_w + cw > width && (x > 0.0 || !chunk.is_empty()) {
-                        append(&mut line, &mut x, &chunk, chunk_w, span.style);
+                        append(&mut line, &mut x, &chunk, chunk_w, span);
                         finish(&mut lines, &mut line, &mut x);
                         chunk.clear();
                         chunk_w = 0.0;
@@ -138,7 +148,7 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                     chunk.push(character);
                     chunk_w += cw;
                 }
-                append(&mut line, &mut x, &chunk, chunk_w, span.style);
+                append(&mut line, &mut x, &chunk, chunk_w, span);
             }
         }
     }
@@ -184,9 +194,49 @@ pub(crate) fn push_lines(
     color: Option<Rgb>,
     alpha: f32,
 ) -> f32 {
+    lines_into(ops, None, lines, x, top, size, line_h, color, alpha)
+}
+
+/// `push_lines`, its links tappable: a hit per link run (C1's blocks).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_lines_linked(
+    laid: &mut Laid,
+    lines: &[Vec<Run>],
+    x: f32,
+    top: f32,
+    size: f32,
+    line_h: f32,
+    color: Option<Rgb>,
+) -> f32 {
+    lines_into(
+        &mut laid.ops,
+        Some(&mut laid.hits),
+        lines,
+        x,
+        top,
+        size,
+        line_h,
+        color,
+        1.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lines_into(
+    ops: &mut Vec<Op>,
+    mut hits: Option<&mut Vec<(RectF, Action)>>,
+    lines: &[Vec<Run>],
+    x: f32,
+    top: f32,
+    size: f32,
+    line_h: f32,
+    color: Option<Rgb>,
+    alpha: f32,
+) -> f32 {
     let c = theme::c();
     for (index, line) in lines.iter().enumerate() {
-        let base = top + index as f32 * line_h + (line_h + size * 0.74) / 2.0;
+        let line_top = top + index as f32 * line_h;
+        let base = line_top + (line_h + size * 0.74) / 2.0;
         for run in line {
             let (weight, fsize, default) = font(run.style, size);
             if run.style == Style::Code {
@@ -230,11 +280,36 @@ pub(crate) fn push_lines(
                     color,
                     alpha,
                 }),
-                // Links underlined 4 px under the baseline.
-                Style::Link => ops.push(ops::rect(
-                    RectF::new(x + run.x, (base + 4.0).round(), run.w, HAIRLINE),
-                    c.link_underline,
-                )),
+                Style::Link => {
+                    // Underlined 4 px under the baseline; dashed for a file.
+                    let file = run
+                        .link
+                        .as_deref()
+                        .is_some_and(|link| matches!(link_kind(link), Some(LinkKind::File(_))));
+                    let y = (base + 4.0).round();
+                    if file {
+                        let mut dx = 0.0;
+                        while dx < run.w {
+                            let w = 8.0_f32.min(run.w - dx);
+                            ops.push(ops::rect(
+                                RectF::new((x + run.x + dx).round(), y, w, HAIRLINE),
+                                c.link_underline,
+                            ));
+                            dx += 14.0;
+                        }
+                    } else {
+                        ops.push(ops::rect(
+                            RectF::new(x + run.x, y, run.w, HAIRLINE),
+                            c.link_underline,
+                        ));
+                    }
+                    if let (Some(hits), Some(link)) = (hits.as_deref_mut(), &run.link) {
+                        hits.push((
+                            RectF::new(x + run.x - 6.0, line_top, run.w + 12.0, line_h),
+                            Action::Rich(rich::Act::OpenLink(link.to_string())),
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -243,10 +318,7 @@ pub(crate) fn push_lines(
 }
 
 pub(crate) fn plain(text: &str) -> Vec<Span> {
-    vec![Span {
-        text: text.to_owned(),
-        style: Style::Plain,
-    }]
+    vec![Span::new(text, Style::Plain)]
 }
 
 /// How a piece of markdown is set: the transcript's body for now (C1 adds
@@ -341,7 +413,7 @@ fn block_into(
     match block {
         MdBlock::Paragraph(spans) => {
             let lines = wrap(spans, width, BODY);
-            y += push_lines(&mut laid.ops, &lines, x, y, BODY, BODY_LINE, None, 1.0);
+            y += push_lines_linked(laid, &lines, x, y, BODY, BODY_LINE, None);
         }
         MdBlock::Heading(level, spans) => {
             let (ty, color) = match level {
@@ -353,25 +425,16 @@ fn block_into(
             let spans: Vec<Span> = spans
                 .iter()
                 .map(|span| Span {
-                    text: span.text.clone(),
                     style: if span.style == Style::Plain {
                         Style::Bold
                     } else {
                         span.style
                     },
+                    ..span.clone()
                 })
                 .collect();
             let lines = wrap(&spans, width, ty.px());
-            y += push_lines(
-                &mut laid.ops,
-                &lines,
-                x,
-                y,
-                ty.px(),
-                ty.line(),
-                Some(color),
-                1.0,
-            );
+            y += push_lines_linked(laid, &lines, x, y, ty.px(), ty.line(), Some(color));
         }
         MdBlock::Item(depth, marker, spans) => {
             // Markers 34 px in, 30 more per level; the text after them
@@ -392,28 +455,26 @@ fn block_into(
                 p.accent,
             ));
             let lines = wrap(spans, (width - indent - marker_w).max(BODY * 4.0), BODY);
-            y += push_lines(
-                &mut laid.ops,
+            y += push_lines_linked(
+                laid,
                 &lines,
                 x + indent + marker_w,
                 y,
                 BODY,
                 BODY_LINE,
                 None,
-                1.0,
             );
         }
         MdBlock::Quote(spans) => {
             let lines = wrap(spans, width - QUOTE_INDENT, BODY);
-            let h = push_lines(
-                &mut laid.ops,
+            let h = push_lines_linked(
+                laid,
                 &lines,
                 x + QUOTE_INDENT,
                 y,
                 BODY,
                 BODY_LINE,
                 Some(c.text_quote),
-                1.0,
             );
             laid.ops
                 .push(ops::rect(RectF::new(x, y, QUOTE_BAR, h), c.quote_bar));

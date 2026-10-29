@@ -217,12 +217,12 @@ pub fn lay(laid: &mut Laid, table: &Table, x: f32, width: f32, top: f32) -> f32 
 
 fn bold(span: &Span) -> Span {
     Span {
-        text: span.text.clone(),
         style: if span.style == Style::Plain {
             Style::Bold
         } else {
             span.style
         },
+        ..span.clone()
     }
 }
 

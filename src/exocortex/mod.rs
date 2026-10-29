@@ -15,6 +15,7 @@ pub mod highlight;
 pub mod images;
 pub mod line;
 pub mod link;
+pub mod links;
 pub mod list;
 pub mod markdown;
 pub mod model;

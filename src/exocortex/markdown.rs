@@ -8,6 +8,8 @@
 //! A newline inside a paragraph is a line break, as chat apps show replies.
 #![allow(dead_code)]
 
+use std::rc::Rc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Style {
     Plain,
@@ -23,6 +25,108 @@ pub enum Style {
 pub struct Span {
     pub text: String,
     pub style: Style,
+    /// A link's target as written (`Style::Link` only): a web address or a
+    /// local file (`link_kind`).
+    pub link: Option<Rc<str>>,
+}
+
+impl Span {
+    pub fn new(text: impl Into<String>, style: Style) -> Self {
+        Self {
+            text: text.into(),
+            style,
+            link: None,
+        }
+    }
+}
+
+/// What a link points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkKind {
+    /// Opened in the Browser (http, https; `www.` made https).
+    Web(String),
+    /// A mail address or telephone number (`mailto:`, `tel:`): copied.
+    Other(String),
+    /// A path on the daemon's host (relative, `/abs`, `~/`, `file://`).
+    File(String),
+}
+
+/// What a link target is (render.ts `safeHref` / `localFileTarget`); None:
+/// not a link at all (its text shows plain).
+pub fn link_kind(target: &str) -> Option<LinkKind> {
+    let target = target.trim();
+    let lower = target.to_ascii_lowercase();
+    if lower.starts_with("http:") || lower.starts_with("https:") {
+        return Some(LinkKind::Web(target.to_owned()));
+    }
+    if lower.starts_with("www.") {
+        return Some(LinkKind::Web(format!("https://{target}")));
+    }
+    if lower.starts_with("mailto:") || lower.starts_with("tel:") || lower.starts_with("exocortex:")
+    {
+        return Some(LinkKind::Other(target.to_owned()));
+    }
+    local_file(target).map(LinkKind::File)
+}
+
+/// A local file link's path (shared/src/file-links.ts): relative, `/abs`,
+/// `~/…` or `file://` (localhost) paths; no other schemes, network paths,
+/// queries or fragments.
+fn local_file(target: &str) -> Option<String> {
+    let control = |s: &str| s.chars().any(char::is_control);
+    if target.is_empty() || control(target) || target.starts_with('#') || target.starts_with("//") {
+        return None;
+    }
+    let has_scheme = |s: &str| {
+        let scheme: String = s.chars().take_while(|c| *c != ':').collect();
+        s.len() > scheme.len()
+            && scheme
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    };
+    let path = if target.to_ascii_lowercase().starts_with("file:") {
+        let rest = &target[5..];
+        let rest = rest.strip_prefix("//").map_or(Some(rest), |after| {
+            // file://host/path: only localhost (or no host).
+            let host_end = after.find('/').unwrap_or(after.len());
+            let host = &after[..host_end];
+            (host.is_empty() || host.eq_ignore_ascii_case("localhost")).then(|| &after[host_end..])
+        })?;
+        if rest.contains('?') || rest.contains('#') {
+            return None;
+        }
+        percent_decode(rest)?
+    } else {
+        if has_scheme(target) {
+            return None;
+        }
+        percent_decode(target)?
+    };
+    if path.trim().is_empty() || control(&path) || path.starts_with("//") || has_scheme(&path) {
+        return None;
+    }
+    Some(path)
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// A table column's alignment (from its delimiter row).
@@ -274,10 +378,7 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
             && paragraph.is_empty()
             && let Some(MdBlock::Item(_, _, spans)) = blocks.last_mut()
         {
-            spans.push(Span {
-                text: "\n".into(),
-                style: Style::Plain,
-            });
+            spans.push(Span::new("\n", Style::Plain));
             spans.extend(inline(trimmed));
             continue;
         }
@@ -443,10 +544,7 @@ fn table_cells(line: &str) -> Vec<Vec<Span>> {
             let cell = cell.trim();
             if cell.chars().count() > CELL_MAX_CHARS {
                 let cut: String = cell.chars().take(CELL_MAX_CHARS).collect();
-                vec![Span {
-                    text: format!("{cut}…"),
-                    style: Style::Plain,
-                }]
+                vec![Span::new(format!("{cut}…"), Style::Plain)]
             } else {
                 inline(cell)
             }
@@ -460,19 +558,17 @@ pub fn strip_inline(text: &str) -> String {
 }
 
 /// Inline markup: `**bold**`, `__bold__`, `*italic*`, `_italic_`,
-/// `` `code` ``, `[link](url)`, `~~strike~~`, `\` escapes.
+/// `` `code` ``, `[link](url)`, `![alt](src)` (a link), `<https://…>`,
+/// bare `https://…` and `www.…` addresses, `~~strike~~`, `\` escapes.
 pub fn inline(text: &str) -> Vec<Span> {
     let mut out = Vec::new();
     parse_inline(text, Style::Plain, &mut out);
-    merge(out)
+    merge(bare_links(out))
 }
 
 fn push(out: &mut Vec<Span>, text: &str, style: Style) {
     if !text.is_empty() {
-        out.push(Span {
-            text: text.to_owned(),
-            style,
-        });
+        out.push(Span::new(text, style));
     }
 }
 
@@ -480,11 +576,132 @@ fn merge(spans: Vec<Span>) -> Vec<Span> {
     let mut merged: Vec<Span> = Vec::with_capacity(spans.len());
     for span in spans {
         match merged.last_mut() {
-            Some(last) if last.style == span.style => last.text.push_str(&span.text),
+            Some(last) if last.style == span.style && last.link == span.link => {
+                last.text.push_str(&span.text)
+            }
             _ => merged.push(span),
         }
     }
     merged
+}
+
+/// Bare web addresses in plain text become links (GFM's autolink
+/// literals): `http://`, `https://` or `www.` after a space or the start,
+/// up to a space, without trailing punctuation or an unbalanced `)`.
+fn bare_links(spans: Vec<Span>) -> Vec<Span> {
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.style != Style::Plain || !(span.text.contains("://") || span.text.contains("www."))
+        {
+            out.push(span);
+            continue;
+        }
+        let text = span.text.as_str();
+        let mut plain_start = 0;
+        let mut i = 0;
+        while i < text.len() {
+            let rest = &text[i..];
+            let starts = ["https://", "http://", "www."]
+                .iter()
+                .any(|p| rest.len() > p.len() && rest[..p.len()].eq_ignore_ascii_case(p));
+            let at_word = text[..i].chars().next_back().is_none_or(|c| {
+                c.is_whitespace() || matches!(c, '(' | '*' | '_' | '~' | '"' | '\'')
+            });
+            if starts && at_word {
+                let mut end = rest
+                    .find(|c: char| c.is_whitespace() || c == '<')
+                    .unwrap_or(rest.len());
+                // Trailing punctuation is not part of it; nor is a `)` it
+                // does not open.
+                loop {
+                    let url = &rest[..end];
+                    let Some(last) = url.chars().next_back() else {
+                        break;
+                    };
+                    let unbalanced =
+                        last == ')' && url.matches('(').count() < url.matches(')').count();
+                    if matches!(
+                        last,
+                        '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~' | '\'' | '"' | ';'
+                    ) || unbalanced
+                    {
+                        end -= last.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let url = &rest[..end];
+                let domain = url.split("://").last().unwrap_or(url);
+                if domain.len() > 4 && domain.contains('.') {
+                    if i > plain_start {
+                        out.push(Span::new(&text[plain_start..i], Style::Plain));
+                    }
+                    out.push(Span {
+                        text: url.to_owned(),
+                        style: Style::Link,
+                        link: Some(Rc::from(url)),
+                    });
+                    i += end;
+                    plain_start = i;
+                    continue;
+                }
+            }
+            i += rest.chars().next().map_or(1, char::len_utf8);
+        }
+        if plain_start < text.len() {
+            out.push(Span::new(&text[plain_start..], Style::Plain));
+        }
+    }
+    out
+}
+
+/// The label and target of a link starting at `[` (`at`): `[label](dest)`
+/// with balanced brackets and parentheses, the destination's title left
+/// out; and where it ends.
+fn link_at(text: &str, at: usize) -> Option<(&str, &str, usize)> {
+    let bytes = text.as_bytes();
+    let mut depth = 0;
+    let mut i = at;
+    let label_end = loop {
+        match bytes.get(i)? {
+            b'\\' => i += 1,
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    };
+    if bytes.get(label_end + 1) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0;
+    let mut j = label_end + 1;
+    let dest_end = loop {
+        match bytes.get(j)? {
+            b'\\' => j += 1,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break j;
+                }
+            }
+            b'\n' => return None,
+            _ => {}
+        }
+        j += 1;
+    };
+    let dest = text[label_end + 2..dest_end].trim();
+    let dest = match dest.strip_prefix('<') {
+        Some(rest) => rest.split('>').next().unwrap_or(""),
+        None => dest.split_whitespace().next().unwrap_or(""),
+    };
+    Some((&text[at + 1..label_end], dest, dest_end + 1))
 }
 
 fn parse_inline(text: &str, style: Style, out: &mut Vec<Span>) {
@@ -555,23 +772,53 @@ fn parse_inline(text: &str, style: Style, out: &mut Vec<Span>) {
                 }
             }
             b'[' => {
-                if let Some(close) = text[i + 1..].find("](")
-                    && let Some(end) = text[i + 1 + close + 2..].find(')')
-                {
-                    push(out, &text[plain_start..i], style);
-                    let label = &text[i + 1..i + 1 + close];
+                if let Some((label, dest, end)) = link_at(text, i) {
+                    // `![alt](src)`: an image, shown as a link to it.
+                    let image = i > plain_start && bytes[i - 1] == b'!';
+                    let start = if image { i - 1 } else { i };
+                    push(out, &text[plain_start..start], style);
+                    let label = if image && label.trim().is_empty() {
+                        "image"
+                    } else {
+                        label
+                    };
+                    let target = link_kind(dest).map(|_| Rc::<str>::from(dest));
                     let mut inner = Vec::new();
-                    parse_inline(label, Style::Link, &mut inner);
+                    parse_inline(label, style, &mut inner);
                     out.extend(inner.into_iter().map(|mut span| {
-                        if span.style != Style::Code {
+                        // A target that is no link leaves its text plain.
+                        if target.is_some() && span.style != Style::Code {
                             span.style = Style::Link;
+                            span.link.clone_from(&target);
                         }
                         span
                     }));
-                    i = i + 1 + close + 2 + end + 1;
+                    i = end;
                     plain_start = i;
                 } else {
                     i += 1;
+                }
+            }
+            // `<https://…>`, `<mailto:…>`: an address as written.
+            b'<' => {
+                let close = text[i + 1..].find('>').map(|at| i + 1 + at);
+                let dest = close.map(|end| &text[i + 1..end]);
+                match dest.filter(|d| {
+                    !d.contains(char::is_whitespace)
+                        && matches!(link_kind(d), Some(LinkKind::Web(_) | LinkKind::Other(_)))
+                        && d.contains(':')
+                }) {
+                    Some(dest) => {
+                        push(out, &text[plain_start..i], style);
+                        out.push(Span {
+                            text: dest.to_owned(),
+                            style: Style::Link,
+                            link: Some(Rc::from(dest)),
+                        });
+                        i = close.unwrap_or(i) + 1;
+                        plain_start = i;
+                    }
+                    None => i += 1,
                 }
             }
             _ => i += 1,
@@ -761,10 +1008,85 @@ mod tests {
     }
 
     fn span(text: &str, style: Style) -> Span {
+        Span::new(text, style)
+    }
+
+    fn link(text: &str, target: &str) -> Span {
         Span {
             text: text.into(),
-            style,
+            style: Style::Link,
+            link: Some(Rc::from(target)),
         }
+    }
+
+    #[test]
+    fn links_bare_addresses_and_file_paths() {
+        assert_eq!(
+            inline("see [the dashboard](https://example.com/q3) and [notes](./docs/q3-notes.md)."),
+            vec![
+                span("see ", Style::Plain),
+                link("the dashboard", "https://example.com/q3"),
+                span(" and ", Style::Plain),
+                link("notes", "./docs/q3-notes.md"),
+                span(".", Style::Plain),
+            ]
+        );
+        // Balanced parentheses in the address; a title is left out.
+        assert_eq!(
+            inline("[w](https://en.wikipedia.org/wiki/A_(b) \"T\")"),
+            vec![link("w", "https://en.wikipedia.org/wiki/A_(b)")]
+        );
+        // Bare addresses, without trailing punctuation.
+        assert_eq!(
+            inline("Go to https://x.org/a, or www.rust-lang.org."),
+            vec![
+                span("Go to ", Style::Plain),
+                link("https://x.org/a", "https://x.org/a"),
+                span(", or ", Style::Plain),
+                link("www.rust-lang.org", "www.rust-lang.org"),
+                span(".", Style::Plain),
+            ]
+        );
+        assert_eq!(
+            inline("<https://a.b/c> (see https://a.b/d)"),
+            vec![
+                link("https://a.b/c", "https://a.b/c"),
+                span(" (see ", Style::Plain),
+                link("https://a.b/d", "https://a.b/d"),
+                span(")", Style::Plain),
+            ]
+        );
+        // An image is a link to it; a bad scheme is no link.
+        assert_eq!(
+            inline("![](https://a.b/i.png)"),
+            vec![link("image", "https://a.b/i.png")]
+        );
+        assert_eq!(
+            inline("[x](javascript:alert(1))"),
+            vec![span("x", Style::Plain)]
+        );
+        assert_eq!(inline("`[a](b)`"), vec![span("[a](b)", Style::Code)]);
+        // What each target is.
+        assert_eq!(
+            link_kind("www.a.org"),
+            Some(LinkKind::Web("https://www.a.org".into()))
+        );
+        assert_eq!(
+            link_kind("mailto:a@b.c"),
+            Some(LinkKind::Other("mailto:a@b.c".into()))
+        );
+        assert_eq!(
+            link_kind("~/x y.md"),
+            Some(LinkKind::File("~/x y.md".into()))
+        );
+        assert_eq!(link_kind("/a/b%20c"), Some(LinkKind::File("/a/b c".into())));
+        assert_eq!(
+            link_kind("file:///etc/hosts"),
+            Some(LinkKind::File("/etc/hosts".into()))
+        );
+        assert_eq!(link_kind("file://server/x"), None);
+        assert_eq!(link_kind("ftp://x"), None);
+        assert_eq!(link_kind("#anchor"), None);
     }
 
     #[test]
@@ -779,7 +1101,7 @@ mod tests {
                 span(" ", Style::Plain),
                 span("d", Style::Code),
                 span(" ", Style::Plain),
-                span("e", Style::Link),
+                link("e", "http://x"),
                 span(" f", Style::Plain),
             ]
         );

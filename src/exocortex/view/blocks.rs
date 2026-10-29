@@ -48,10 +48,7 @@ pub(crate) fn lay_thinking(text: &str, key: &str, open: bool) -> Laid {
     ));
     laid.h = TOOL_ROW;
     if open {
-        let spans = vec![Span {
-            text: text.trim().to_owned(),
-            style: Style::Italic,
-        }];
+        let spans = vec![Span::new(text.trim(), Style::Italic)];
         let size = theme::T_NOTE.px();
         let lines = wrap(&spans, width - 30.0, size);
         let h = push_lines(
