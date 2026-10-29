@@ -16,8 +16,9 @@ use super::env::SlashEnv;
 use super::inline::{self, Generation};
 use super::registry::{self, Command, QUEUEABLE};
 use super::syntax::{self, Completion};
+use crate::exocortex::attachments;
 use crate::exocortex::macros;
-use crate::exocortex::model::composer::{BUDGET, ComposerError, Timing, VoicePhase};
+use crate::exocortex::model::composer::{ComposerError, Timing, VoicePhase};
 use crate::exocortex::model::ops::{self, model_info, provider_info, supports_speed};
 use crate::exocortex::model::{Action, Effect, Model, Nav, Page, chat};
 use crate::exocortex::proto::{Entry, Speed};
@@ -254,14 +255,15 @@ impl Model {
     pub(crate) fn submit_prompt(&mut self, timing: Option<Timing>) -> Vec<Value> {
         let original = self.composer.text.clone();
         let key = self.shown_draft_key();
-        if original.trim().is_empty() || !self.ready || self.composer.submitting(&key) {
+        let attached = !self.attachments_of(&key).is_empty();
+        if (original.trim().is_empty() && !attached)
+            || !self.ready
+            || self.composer.submitting(&key)
+        {
             return Vec::new();
         }
-        if original.len() > BUDGET {
-            self.refuse(
-                &key,
-                "Message exceeds the 12 MB attachment budget. Remove an item before sending.",
-            );
+        if attachments::weight(&original, self.attachments_of(&key)) > attachments::BUDGET {
+            self.refuse(&key, attachments::OVER_BUDGET);
             return Vec::new();
         }
         if self.rewinding() {
@@ -274,6 +276,12 @@ impl Model {
         self.composer.errors.remove(&key);
         // `//`: one literal slash, nothing else.
         if let Some(literal) = syntax::unescape_literal(&original) {
+            let g = SlashEnv::new(self).generation();
+            if let Some(problem) = self.attachments_problem(&key, &original, &g.provider, &g.model)
+            {
+                self.refuse(&key, &problem);
+                return Vec::new();
+            }
             let key = self.take_draft();
             return self.deliver(key, literal.trim().to_owned(), original, timing, None);
         }
@@ -290,6 +298,10 @@ impl Model {
             {
                 let args = args.to_owned();
                 drop(env);
+                if attached && name != "/queue" {
+                    self.refuse(&key, attachments::COMMAND);
+                    return Vec::new();
+                }
                 return self.run(command, &args, &original);
             }
             if command.is_none() && !inline::INLINE_NAMES.contains(&name) {
@@ -305,6 +317,7 @@ impl Model {
         // Inline modifiers: all valid, or nothing changes.
         let parsed = inline::parse(&resolved, &env.inline_env());
         let macro_env = self.composer.macro_env.clone();
+        let generation = env.generation();
         drop(env);
         let parsed = match parsed {
             Ok(parsed) => parsed,
@@ -322,6 +335,10 @@ impl Model {
                 self.refuse(&key, &format!("{primary} needs an existing conversation."));
                 return Vec::new();
             }
+            if attached {
+                self.refuse(&key, attachments::COMMAND);
+                return Vec::new();
+            }
             let key = self.take_draft();
             let mut commands =
                 self.deliver(key, primary.clone(), original, None, Some(wait.clone()));
@@ -331,6 +348,14 @@ impl Model {
             }
             return commands;
         }
+        // Images need a model with vision (after any model modifier).
+        let target = parsed.selection.as_ref().unwrap_or(&generation);
+        if let Some(problem) =
+            self.attachments_problem(&key, &original, &target.provider, &target.model)
+        {
+            self.refuse(&key, &problem);
+            return Vec::new();
+        }
         let mut commands = Vec::new();
         if let Some(selection) = &parsed.selection {
             commands.extend(self.apply_modifiers(selection, &parsed));
@@ -339,7 +364,7 @@ impl Model {
             }
         }
         let body = parsed.text.trim().to_owned();
-        if body.is_empty() {
+        if body.is_empty() && !attached {
             let key = self.take_draft();
             let _ = key;
             if parsed.queue.is_some() {

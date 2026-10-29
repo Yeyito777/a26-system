@@ -25,6 +25,9 @@ pub struct Queued {
     pub wait_target: Option<Value>,
     pub folder_id: Option<String>,
     pub created_at: f64,
+    /// Its images (the daemon's copy has their bytes; one queued from here
+    /// shows them by id until the daemon's arrives).
+    pub images: Vec<super::ImageAttachment>,
 }
 
 /// `queue_updated`'s ids settled for this client.
