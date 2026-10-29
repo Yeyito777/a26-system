@@ -24,3 +24,12 @@ codegen-units = 1
 lto = "thin"
 panic = "abort"
 strip = "symbols"
+
+# For agents' sandbox builds (/opt/build/bin/oss-build): release optimisation
+# without LTO, codegen split and incremental, so a small edit rebuilds in
+# seconds. Never shipped; releases use the profile above.
+[profile.dev-release]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
