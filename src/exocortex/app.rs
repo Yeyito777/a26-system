@@ -232,6 +232,9 @@ struct Input {
     dragging: Option<ScrollArea>,
     /// The horizontal scroller a sideways drag moves, and the finger's last x.
     sideways: Option<(u64, f32)>,
+    /// The inner scroller a vertical drag moves (a tall table's rows, C1),
+    /// and the finger's last y.
+    inner: Option<(u64, f32)>,
     /// Moon's keyboard was asked for.
     keyboard: bool,
     /// …by an overlay (a prompt), which puts it away when it goes.
@@ -431,12 +434,29 @@ impl Context<'_> {
             Gesture::DragStart {
                 axis: Axis::Vertical,
                 y,
+                start_x,
                 start_y,
                 edge: false,
                 ..
             } => {
                 self.input.pressed = None;
                 self.view.lifted = None;
+                // On a tall table that can scroll that way: its rows move.
+                self.input.inner = view::inner_vertical_target(
+                    self.model,
+                    self.view,
+                    height,
+                    (start_x, start_y),
+                    y - start_y,
+                    now,
+                )
+                .map(|key| (key, start_y));
+                if let Some((key, last)) = &mut self.input.inner {
+                    view::inner_drag(self.view, *key, y - *last);
+                    *last = y;
+                    self.input.dragging = None;
+                    return true;
+                }
                 self.input.dragging = view::scroll_area(self.model, self.view, height, start_y);
                 match self.input.dragging {
                     Some(ScrollArea::List) => {
@@ -486,6 +506,11 @@ impl Context<'_> {
                 y,
                 ..
             } => {
+                if let Some((key, last)) = &mut self.input.inner {
+                    view::inner_drag(self.view, *key, y - *last);
+                    *last = y;
+                    return true;
+                }
                 match self.input.dragging {
                     Some(ScrollArea::List) => {
                         let max = view::list_max(self.model, height);
@@ -530,6 +555,7 @@ impl Context<'_> {
                     }
                 }
                 self.input.sideways = None;
+                self.input.inner = None;
                 true
             }
             Gesture::Tap { x, y } => {

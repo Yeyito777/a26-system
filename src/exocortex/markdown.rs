@@ -1,9 +1,11 @@
-//! The markdown the Exocortex app draws: paragraphs, headings, bullet and
-//! numbered lists, block quotes, rules, fenced code (and tables, kept as
-//! monospaced lines), with bold, italic, inline code and link text inside.
-//! It is tolerant of text still streaming in: an unclosed fence is code to
-//! the end, an unclosed `**` is plain text. A newline inside a paragraph is a
-//! line break, as chat apps show replies.
+//! The markdown the Exocortex app draws (GFM as the iPhone renders it,
+//! PAR-135–138): paragraphs, headings, bullet, numbered and task lists
+//! nested to 12 levels, block quotes, rules, fenced (``` and ~~~) and
+//! indented code with its language, and tables with their alignment, with
+//! bold, italic, strikethrough, inline code and link text inside. It is
+//! tolerant of text still streaming in: an unclosed fence is code to the
+//! end, an unclosed `**` is plain text, a table shows from its first row.
+//! A newline inside a paragraph is a line break, as chat apps show replies.
 #![allow(dead_code)]
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -13,6 +15,8 @@ pub enum Style {
     Italic,
     Code,
     Link,
+    /// `~~struck through~~`.
+    Strike,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -21,22 +25,117 @@ pub struct Span {
     pub style: Style,
 }
 
+/// A table column's alignment (from its delimiter row).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+/// A table: its header cells, its rows' cells (inline markdown each) and
+/// its columns' alignment. Rows may have fewer or more cells than the
+/// header.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Table {
+    pub align: Vec<Align>,
+    pub header: Vec<Vec<Span>>,
+    pub rows: Vec<Vec<Vec<Span>>>,
+}
+
+impl Table {
+    /// Its columns: the most cells any row has.
+    pub fn columns(&self) -> usize {
+        self.rows
+            .iter()
+            .map(Vec::len)
+            .chain([self.header.len(), self.align.len()])
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// As aligned monospaced text (the reader, copying, the bridge).
+    pub fn text(&self) -> String {
+        let columns = self.columns();
+        let plain = |cells: &[Vec<Span>]| -> Vec<String> {
+            (0..columns)
+                .map(|index| {
+                    cells
+                        .get(index)
+                        .map(|spans| spans.iter().map(|span| span.text.as_str()).collect())
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
+        let mut rows = vec![plain(&self.header)];
+        rows.extend(self.rows.iter().map(|row| plain(row)));
+        let mut widths = vec![0; columns];
+        for row in &rows {
+            for (index, cell) in row.iter().enumerate() {
+                widths[index] = widths[index].max(cell.chars().count());
+            }
+        }
+        let line = |row: &[String]| -> String {
+            row.iter()
+                .enumerate()
+                .map(|(index, cell)| {
+                    let pad = widths[index].saturating_sub(cell.chars().count());
+                    match self.align.get(index).copied().unwrap_or_default() {
+                        Align::Right => format!("{}{cell}", " ".repeat(pad)),
+                        Align::Center => {
+                            format!("{}{cell}{}", " ".repeat(pad / 2), " ".repeat(pad - pad / 2))
+                        }
+                        Align::Left => format!("{cell}{}", " ".repeat(pad)),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" │ ")
+                .trim_end()
+                .to_owned()
+        };
+        let mut out = vec![line(&rows[0])];
+        out.push(
+            widths
+                .iter()
+                .map(|w| "─".repeat(*w))
+                .collect::<Vec<_>>()
+                .join("─┼─"),
+        );
+        out.extend(rows[1..].iter().map(|row| line(row)));
+        out.join("\n")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MdBlock {
     Paragraph(Vec<Span>),
     Heading(u8, Vec<Span>),
-    /// A list item: nesting depth, its marker ("•", "3."), and its text.
+    /// A list item: nesting depth (0 to 11), its marker ("•", "3.", "☐",
+    /// "☑"), and its text.
     Item(u8, String, Vec<Span>),
     Quote(Vec<Span>),
-    /// Fenced code or a table: monospaced lines, never wrapped by words.
-    Code(Vec<String>),
+    /// Fenced or indented code: its language ("" when none given) and its
+    /// lines (tabs as four spaces), never wrapped by words.
+    Code {
+        lang: String,
+        lines: Vec<String>,
+    },
+    Table(Table),
     Rule,
 }
+
+/// Lists nest at most this deep.
+pub const MAX_DEPTH: u8 = 11;
+/// A table cell keeps at most this many characters (the iPhone's).
+pub const CELL_MAX_CHARS: usize = 2000;
 
 pub fn parse(text: &str) -> Vec<MdBlock> {
     let mut blocks = Vec::new();
     let mut paragraph: Vec<&str> = Vec::new();
     let mut quote: Vec<&str> = Vec::new();
+    // The indents of the list items that are open, outermost first.
+    let mut list: Vec<usize> = Vec::new();
     let mut lines = text.lines().peekable();
     let flush = |blocks: &mut Vec<MdBlock>, paragraph: &mut Vec<&str>, quote: &mut Vec<&str>| {
         if !paragraph.is_empty() {
@@ -51,35 +150,65 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
     while let Some(raw) = lines.next() {
         let line = raw.trim_end();
         let trimmed = line.trim_start();
-        if let Some(fence) = fence_of(trimmed) {
+        let indent = indent_of(line);
+        if let Some((fence, run)) = fence_of(trimmed) {
             flush(&mut blocks, &mut paragraph, &mut quote);
-            let indent = line.len() - trimmed.len();
+            list.clear();
+            let lang = trimmed[run..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c| c == '{' || c == '}' || c == '.')
+                .to_owned();
+            let strip = line.len() - trimmed.len();
             let mut code = Vec::new();
             for raw in lines.by_ref() {
                 let inner = raw.trim_end();
-                if inner.trim_start().starts_with(fence)
-                    && inner
+                let inner_trimmed = inner.trim_start();
+                if inner_trimmed.starts_with(&fence[..1].repeat(run))
+                    && inner_trimmed
+                        .trim_start_matches(&fence[..1])
                         .trim()
-                        .trim_start_matches(fence.chars().next().unwrap_or('`'))
                         .is_empty()
                 {
                     break;
                 }
                 // Drop the fence's own indentation from its lines.
-                let strip = inner.len() - inner.trim_start().len();
-                code.push(inner[strip.min(indent)..].replace('\t', "    "));
+                let leading = inner.len() - inner_trimmed.len();
+                code.push(detab(&inner[leading.min(strip)..]));
             }
-            blocks.push(MdBlock::Code(code));
+            blocks.push(MdBlock::Code { lang, lines: code });
             continue;
         }
         if trimmed.is_empty() {
             flush(&mut blocks, &mut paragraph, &mut quote);
             continue;
         }
+        // Indented code: four spaces, not inside a list or a paragraph.
+        if indent >= 4 && paragraph.is_empty() && quote.is_empty() && list.is_empty() {
+            let mut code = vec![detab(line).chars().skip(4).collect::<String>()];
+            while let Some(next) = lines.peek() {
+                let next = next.trim_end();
+                if !next.trim().is_empty() && indent_of(next) < 4 {
+                    break;
+                }
+                code.push(detab(next).chars().skip(4).collect());
+                lines.next();
+            }
+            while code.last().is_some_and(String::is_empty) {
+                code.pop();
+            }
+            blocks.push(MdBlock::Code {
+                lang: String::new(),
+                lines: code,
+            });
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix('>') {
             if !paragraph.is_empty() {
                 flush(&mut blocks, &mut paragraph, &mut quote);
             }
+            list.clear();
             quote.push(rest.strip_prefix(' ').unwrap_or(rest));
             continue;
         }
@@ -88,32 +217,55 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
         }
         if is_rule(trimmed) {
             flush(&mut blocks, &mut paragraph, &mut quote);
+            list.clear();
             blocks.push(MdBlock::Rule);
             continue;
         }
         if let Some((level, title)) = heading(trimmed) {
             flush(&mut blocks, &mut paragraph, &mut quote);
+            list.clear();
             blocks.push(MdBlock::Heading(level, inline(title)));
             continue;
         }
-        if trimmed.starts_with('|') {
+        let delimiter_next = lines.peek().is_some_and(|next| is_delimiter_row(next));
+        if (trimmed.starts_with('|') || (trimmed.contains('|') && delimiter_next))
+            && paragraph.is_empty()
+        {
             flush(&mut blocks, &mut paragraph, &mut quote);
-            let mut rows = vec![table_row(trimmed)];
+            list.clear();
+            let mut rows = vec![table_cells(trimmed)];
+            let mut align = Vec::new();
+            if delimiter_next {
+                align = lines.next().map(delimiter_align).unwrap_or_default();
+            }
             while let Some(next) = lines.peek() {
                 let next = next.trim();
-                if !next.starts_with('|') {
+                if next.is_empty() || !next.contains('|') {
                     break;
                 }
-                rows.push(table_row(next));
+                if !next.starts_with('|') && align.is_empty() {
+                    break;
+                }
+                rows.push(table_cells(next));
                 lines.next();
             }
-            blocks.push(MdBlock::Code(align_table(rows)));
+            let header = rows.remove(0);
+            blocks.push(MdBlock::Table(Table {
+                align,
+                header,
+                rows,
+            }));
             continue;
         }
-        let indent = line.len() - trimmed.len();
         if let Some((marker, rest)) = list_item(trimmed) {
             flush(&mut blocks, &mut paragraph, &mut quote);
-            let depth = (indent / 2).min(4) as u8;
+            while list.last().is_some_and(|open| *open > indent) {
+                list.pop();
+            }
+            if list.last() != Some(&indent) {
+                list.push(indent);
+            }
+            let depth = (list.len() - 1).min(usize::from(MAX_DEPTH)) as u8;
             blocks.push(MdBlock::Item(depth, marker, inline(rest)));
             continue;
         }
@@ -129,20 +281,49 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
             spans.extend(inline(trimmed));
             continue;
         }
+        if indent == 0 {
+            list.clear();
+        }
         paragraph.push(trimmed);
     }
     flush(&mut blocks, &mut paragraph, &mut quote);
     blocks
 }
 
-fn fence_of(line: &str) -> Option<&'static str> {
-    if line.starts_with("```") {
-        Some("```")
-    } else if line.starts_with("~~~") {
-        Some("~~~")
-    } else {
-        None
+/// Leading whitespace in columns (a tab is four).
+fn indent_of(line: &str) -> usize {
+    let mut columns = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => columns += 1,
+            '\t' => columns += 4 - columns % 4,
+            _ => break,
+        }
     }
+    columns
+}
+
+fn detab(line: &str) -> String {
+    if line.contains('\t') {
+        line.replace('\t', "    ")
+    } else {
+        line.to_owned()
+    }
+}
+
+/// A fence's character and run length (three or more backticks or tildes).
+fn fence_of(line: &str) -> Option<(&'static str, usize)> {
+    for fence in ["`", "~"] {
+        let run = line.chars().take_while(|c| c.to_string() == fence).count();
+        if run >= 3 {
+            // A backtick fence's info string has no backticks.
+            if fence == "`" && line[run..].contains('`') {
+                return None;
+            }
+            return Some((if fence == "`" { "```" } else { "~~~" }, run));
+        }
+    }
+    None
 }
 
 fn is_rule(line: &str) -> bool {
@@ -194,44 +375,81 @@ fn list_item(line: &str) -> Option<(String, &str)> {
     None
 }
 
-fn table_row(line: &str) -> Vec<String> {
-    let inner = line.trim().trim_start_matches('|').trim_end_matches('|');
-    inner
-        .split('|')
-        .map(|cell| strip_inline(cell.trim()))
+/// `|---|:--:|--:|`: a table's delimiter row.
+fn is_delimiter_row(line: &str) -> bool {
+    let cells = split_cells(line.trim());
+    !cells.is_empty()
+        && line.contains('-')
+        && cells.iter().all(|cell| {
+            let cell = cell.trim();
+            !cell.is_empty()
+                && cell.trim_matches(':').chars().all(|c| c == '-')
+                && cell.contains('-')
+        })
+}
+
+fn delimiter_align(line: &str) -> Vec<Align> {
+    split_cells(line.trim())
+        .iter()
+        .map(|cell| {
+            let cell = cell.trim();
+            match (cell.starts_with(':'), cell.ends_with(':')) {
+                (true, true) => Align::Center,
+                (false, true) => Align::Right,
+                _ => Align::Left,
+            }
+        })
         .collect()
 }
 
-/// Pads cells into columns; the `|---|` separator becomes a rule of dashes.
-fn align_table(rows: Vec<Vec<String>>) -> Vec<String> {
-    let separator = |row: &Vec<String>| {
-        row.iter()
-            .all(|cell| !cell.is_empty() && cell.chars().all(|c| matches!(c, '-' | ':' | ' ')))
-    };
-    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
-    let mut widths = vec![0; columns];
-    for row in rows.iter().filter(|row| !separator(row)) {
-        for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
+/// A row's cells, split at pipes that are not escaped or in code spans.
+fn split_cells(line: &str) -> Vec<String> {
+    let inner = line.strip_prefix('|').unwrap_or(line);
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut code = false;
+    let mut escaped = false;
+    for c in inner.chars() {
+        match c {
+            _ if escaped => {
+                if c != '|' {
+                    cell.push('\\');
+                }
+                cell.push(c);
+                escaped = false;
+            }
+            '\\' => escaped = true,
+            '`' => {
+                code = !code;
+                cell.push(c);
+            }
+            '|' if !code => cells.push(std::mem::take(&mut cell)),
+            _ => cell.push(c),
         }
     }
-    rows.iter()
-        .map(|row| {
-            if separator(row) {
-                return widths
-                    .iter()
-                    .map(|w| "─".repeat(*w))
-                    .collect::<Vec<_>>()
-                    .join("─┼─");
+    if escaped {
+        cell.push('\\');
+    }
+    if !cell.trim().is_empty() || cells.is_empty() {
+        cells.push(cell);
+    }
+    cells
+}
+
+fn table_cells(line: &str) -> Vec<Vec<Span>> {
+    split_cells(line)
+        .iter()
+        .map(|cell| {
+            let cell = cell.trim();
+            if cell.chars().count() > CELL_MAX_CHARS {
+                let cut: String = cell.chars().take(CELL_MAX_CHARS).collect();
+                vec![Span {
+                    text: format!("{cut}…"),
+                    style: Style::Plain,
+                }]
+            } else {
+                inline(cell)
             }
-            let cells: Vec<String> = (0..columns)
-                .map(|index| {
-                    let cell = row.get(index).map_or("", String::as_str);
-                    let pad = widths[index].saturating_sub(cell.chars().count());
-                    format!("{cell}{}", " ".repeat(pad))
-                })
-                .collect();
-            cells.join(" │ ").trim_end().to_owned()
         })
         .collect()
 }
@@ -242,7 +460,7 @@ pub fn strip_inline(text: &str) -> String {
 }
 
 /// Inline markup: `**bold**`, `__bold__`, `*italic*`, `_italic_`,
-/// `` `code` ``, `[link](url)`, `~~strike~~` (drawn plain), `\` escapes.
+/// `` `code` ``, `[link](url)`, `~~strike~~`, `\` escapes.
 pub fn inline(text: &str) -> Vec<Span> {
     let mut out = Vec::new();
     parse_inline(text, Style::Plain, &mut out);
@@ -323,7 +541,8 @@ fn parse_inline(text: &str, style: Style, out: &mut Vec<Span>) {
                         push(out, &text[plain_start..i], style);
                         let inner = &text[i + marker_len..end];
                         let inner_style = match (c, marker_len) {
-                            (b'~', _) => style,
+                            (b'~', _) if style == Style::Code => style,
+                            (b'~', _) => Style::Strike,
                             (_, 1) if style == Style::Plain => Style::Italic,
                             (_, 1) => style,
                             _ => Style::Bold,
@@ -391,6 +610,156 @@ fn closing(text: &str, from: usize, marker: &str, c: u8) -> Option<usize> {
 mod tests {
     use super::*;
 
+    fn plain(text: &str) -> Vec<Span> {
+        vec![span(text, Style::Plain)]
+    }
+
+    #[test]
+    fn lists_nest_by_indentation_to_twelve_levels() {
+        // Four-space nesting is one level per step, as two-space is.
+        let blocks = parse("- a\n    - b\n        - c\n    - d\n- e");
+        let depths: Vec<u8> = blocks
+            .iter()
+            .map(|b| match b {
+                MdBlock::Item(depth, ..) => *depth,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(depths, [0, 1, 2, 1, 0]);
+        let deep: String = (0..14)
+            .map(|level| format!("{}- l{level}\n", "  ".repeat(level)))
+            .collect();
+        let depths: Vec<u8> = parse(&deep)
+            .iter()
+            .map(|b| match b {
+                MdBlock::Item(depth, ..) => *depth,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(depths[11], 11);
+        assert_eq!(depths[13], MAX_DEPTH);
+        // Task items, and a numbered item nested in a bullet.
+        assert_eq!(
+            parse("- [x] done\n- [ ] todo\n  1. first"),
+            vec![
+                MdBlock::Item(0, "☑".into(), plain("done")),
+                MdBlock::Item(0, "☐".into(), plain("todo")),
+                MdBlock::Item(1, "1.".into(), plain("first")),
+            ]
+        );
+    }
+
+    #[test]
+    fn tildes_indented_code_and_languages() {
+        assert_eq!(
+            parse("~~~python extra\nprint(1)\n  ~~~"),
+            vec![MdBlock::Code {
+                lang: "python".into(),
+                lines: vec!["print(1)".into()]
+            }]
+        );
+        assert_eq!(
+            parse("Text\n\n    let a = 1;\n\n    let b;\n\nAfter"),
+            vec![
+                MdBlock::Paragraph(plain("Text")),
+                MdBlock::Code {
+                    lang: String::new(),
+                    lines: vec!["let a = 1;".into(), "".into(), "let b;".into()]
+                },
+                MdBlock::Paragraph(plain("After")),
+            ]
+        );
+        // Inside a list, indentation continues the item.
+        assert_eq!(
+            parse("- item\n\n    more"),
+            vec![MdBlock::Item(
+                0,
+                "•".into(),
+                vec![
+                    span("item", Style::Plain),
+                    span("\n", Style::Plain),
+                    span("more", Style::Plain)
+                ]
+            )]
+        );
+        // A longer fence holds a shorter one.
+        assert_eq!(
+            parse("````md\n```\ninner\n```\n````"),
+            vec![MdBlock::Code {
+                lang: "md".into(),
+                lines: vec!["```".into(), "inner".into(), "```".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn tables_keep_alignment_and_inline_markdown() {
+        let blocks = parse(
+            "| Metric | Q2 | Q3 |\n|:--|--:|:-:|\n| **Rev** | 100 | `x\\|y` |\n| Costs | 80 |",
+        );
+        let MdBlock::Table(table) = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(table.align, [Align::Left, Align::Right, Align::Center]);
+        assert_eq!(table.header.len(), 3);
+        assert_eq!(table.rows[0][0], vec![span("Rev", Style::Bold)]);
+        assert_eq!(table.rows[0][2], vec![span("x|y", Style::Code)]);
+        assert_eq!(table.rows[1].len(), 2);
+        assert_eq!(table.columns(), 3);
+        // Without leading pipes, but with a delimiter row.
+        let blocks = parse("a | b\n--- | ---\n1 | 2\n\nnext");
+        assert!(matches!(&blocks[0], MdBlock::Table(t) if t.rows.len() == 1));
+        assert_eq!(blocks[1], MdBlock::Paragraph(plain("next")));
+        // A pipe in a paragraph is just text.
+        assert_eq!(parse("a | b"), vec![MdBlock::Paragraph(plain("a | b"))]);
+    }
+
+    #[test]
+    fn the_iphones_rich_transcript() {
+        let text = "## Summary\n\nThe report says revenue **grew 12%** and costs *fell*; see [the dashboard](https://example.com/q3) and [notes](./docs/q3-notes.md).\n\n- [x] Tests pass (104)\n- [ ] Gmail needs re-auth\n  - nested detail\n\n> Costs are seasonal.\n\nInline math $E = mc^2$ and money: $5 and $10.\n\n```ts\nexport function grow(rate: number): number {\n  // compound\n}\n```\n\n| Metric | Q2 | Q3 |\n|:--|--:|--:|\n| Revenue | 100 | 112 |\n| Costs | 80 | 76 |\n\n---\n\nDone.";
+        let kinds: Vec<&str> = parse(text)
+            .iter()
+            .map(|b| match b {
+                MdBlock::Paragraph(_) => "p",
+                MdBlock::Heading(..) => "h",
+                MdBlock::Item(..) => "li",
+                MdBlock::Quote(_) => "quote",
+                MdBlock::Code { .. } => "code",
+                MdBlock::Table(_) => "table",
+                MdBlock::Rule => "hr",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "h", "p", "li", "li", "li", "quote", "p", "code", "table", "hr", "p"
+            ]
+        );
+    }
+
+    /// Streaming (no raw-syntax flash): at every prefix of a reply, every
+    /// block but the one still growing is already what it will be.
+    #[test]
+    fn a_streaming_prefix_only_changes_its_last_block() {
+        let full = "## Summary\n\nRevenue **grew 12%**; see [it](https://x.y).\n\n- [x] Tests pass\n- [ ] Gmail\n  - nested\n\n> Costs are seasonal.\n\n```ts\nexport function grow() {\n  return 1;\n}\n```\n\n| Metric | Q2 |\n|:--|--:|\n| Revenue | 100 |\n\n~~~\nt\n~~~\n\n    indented\n\n---\n\nDone.";
+        let done = parse(full);
+        let cuts: Vec<usize> = full
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain([full.len()])
+            .collect();
+        for cut in cuts {
+            let blocks = parse(&full[..cut]);
+            let settled = blocks.len().saturating_sub(1);
+            assert_eq!(
+                blocks[..settled],
+                done[..settled],
+                "at {cut}: {:?}",
+                &full[..cut]
+            );
+        }
+    }
+
     fn span(text: &str, style: Style) -> Span {
         Span {
             text: text.into(),
@@ -431,7 +800,7 @@ mod tests {
         );
         assert_eq!(inline(r"\*not\*"), vec![span("*not*", Style::Plain)]);
         assert_eq!(inline("``a ` b``"), vec![span("a ` b", Style::Code)]);
-        assert_eq!(inline("~~gone~~"), vec![span("gone", Style::Plain)]);
+        assert_eq!(inline("~~gone~~"), vec![span("gone", Style::Strike)]);
         assert_eq!(
             inline("**bold *and italic***"),
             vec![span("bold and italic", Style::Bold)]
@@ -471,11 +840,19 @@ mod tests {
             MdBlock::Quote(vec![span("quoted", Style::Plain)])
         );
         assert_eq!(blocks[6], MdBlock::Rule);
-        assert_eq!(blocks[7], MdBlock::Code(vec!["fn main() {}".into()]));
         assert_eq!(
-            blocks[8],
-            MdBlock::Code(vec!["a   │ bb".into(), "────┼───".into(), "ccc │ d".into()])
+            blocks[7],
+            MdBlock::Code {
+                lang: "rust".into(),
+                lines: vec!["fn main() {}".into()]
+            }
         );
+        let MdBlock::Table(table) = &blocks[8] else {
+            panic!("{:?}", blocks[8]);
+        };
+        assert_eq!(table.header, vec![plain("a"), plain("bb")]);
+        assert_eq!(table.rows, vec![vec![plain("ccc"), plain("d")]]);
+        assert_eq!(table.text(), "a   │ bb\n────┼───\nccc │ d");
         assert_eq!(
             blocks[9],
             MdBlock::Paragraph(vec![span("after", Style::Plain)])
@@ -489,9 +866,14 @@ mod tests {
             parse("Here:\n```\nlet x = 1;\nlet y"),
             vec![
                 MdBlock::Paragraph(vec![span("Here:", Style::Plain)]),
-                MdBlock::Code(vec!["let x = 1;".into(), "let y".into()])
+                MdBlock::Code {
+                    lang: String::new(),
+                    lines: vec!["let x = 1;".into(), "let y".into()]
+                }
             ]
         );
+        // A table shows from its first row.
+        assert!(matches!(&parse("| Metric | Q2 |")[0], MdBlock::Table(t) if t.rows.is_empty()));
         assert_eq!(parse(""), vec![]);
         assert_eq!(parse("#"), vec![MdBlock::Heading(1, vec![])]);
         assert_eq!(strip_inline("**a** `b`"), "a b");

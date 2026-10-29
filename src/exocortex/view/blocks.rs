@@ -15,7 +15,7 @@ use crate::text::Weight;
 use super::super::anim;
 use super::super::footer;
 use super::super::markdown::{self, MdBlock, Style};
-use super::super::model::{Action, Model, chat};
+use super::super::model::{Action, Model, chat, rich::Rich};
 use super::super::proto::Metadata;
 use super::super::theme::{
     self, BUBBLE_PAD_X, BUBBLE_PAD_Y, HAIRLINE, RAIL, T_BODY, T_CAPTION, T_EDGE, T_EYEBROW,
@@ -24,7 +24,7 @@ use super::super::theme::{
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets;
 use super::W;
-use super::markdown_layout::{Run, lay_md_block, line_width, plain, wrap};
+use super::markdown_layout::{Run, lay_block, line_width, plain, wrap};
 use super::ops::{Laid, Op};
 
 /// The widest bubble: the row less the 24 pt leading gap.
@@ -124,7 +124,7 @@ fn run_weight(style: Style, ty: Type) -> Weight {
     match style {
         Style::Bold => Weight::MonoBold,
         Style::Italic => theme::T_ITALIC,
-        Style::Plain | Style::Code | Style::Link => ty.weight,
+        Style::Plain | Style::Code | Style::Link | Style::Strike => ty.weight,
     }
 }
 
@@ -204,10 +204,10 @@ fn boxed(ops: &mut Vec<Op>, rect: RectF, fill: Rgb, border: Rgb) {
 // ----- Markdown -------------------------------------------------------------------
 
 /// One block of a reply's markdown (C1 lays it out).
-pub(crate) fn lay_md_piece(block: &MdBlock) -> Piece {
-    let mut laid = Laid::default();
-    laid.h = lay_md_block(&mut laid.ops, block, MARGIN, W - 2.0 * MARGIN, 0.0);
-    laid.into()
+/// A markdown block (C1's `lay_block`); its key must include
+/// `markdown_layout::state_key`.
+pub(crate) fn lay_md_piece(block: &MdBlock, rich: &Rich) -> Piece {
+    lay_block(block, MARGIN, W - 2.0 * MARGIN, Some(rich)).into()
 }
 
 /// A text block that starts `[Context:` (PAR-133): plain, dim.
@@ -559,7 +559,8 @@ fn lay_note_markdown(
                 Some(marker.clone()),
                 spans.clone(),
             ),
-            MdBlock::Code(lines) => (0.0, None, plain(&lines.join("\n"))),
+            MdBlock::Code { lines, .. } => (0.0, None, plain(&lines.join("\n"))),
+            MdBlock::Table(_) => (0.0, None, plain("(a table: OPEN shows it)")),
             MdBlock::Rule => (0.0, None, plain("———")),
         };
         let marker_w = if let Some(marker) = &marker {

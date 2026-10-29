@@ -39,7 +39,7 @@ use super::blocks::{
     lay_notification, lay_status, lay_thinking, lay_working, mark_frames, mark_key, notice_color,
     wall_ms,
 };
-use super::markdown_layout::md_gap;
+use super::markdown_layout::{md_gap, state_key};
 use super::media::{Strip, lay_strip};
 use super::ops::{Laid, draw_ops, px, quantized};
 use super::tools::{GROUP_MIN, Output, expandable, lay_group, lay_tool, output_state, tool_run};
@@ -709,7 +709,9 @@ impl ViewState {
                 }
                 Segment::Markdown { block, hash, gap } => {
                     h += gap;
-                    let piece = self.piece(*hash, || lay_md_piece(block));
+                    let rich = context.rich;
+                    let key = hash_of((hash, state_key(block, Some(rich))));
+                    let piece = self.piece(key, || lay_md_piece(block, rich));
                     put(layout, &mut h, piece);
                 }
                 Segment::Context { index, gap } => {

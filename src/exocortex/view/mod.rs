@@ -14,12 +14,14 @@
 
 pub mod blocks;
 pub mod chat_header;
+pub mod code;
 pub mod composer;
 pub mod frame;
 pub mod list;
 pub mod markdown_layout;
 pub mod media;
 pub mod ops;
+pub mod table;
 pub mod tools;
 pub mod transcript;
 
@@ -79,6 +81,9 @@ pub struct ViewState {
     /// by their key (C1), and a counter bumped when one changes.
     pub xscroll: HashMap<u64, f32>,
     pub xscroll_version: u64,
+    /// How far the scroller being dragged can go (from its piece's
+    /// `xmax` / `ymax`, C1).
+    pub scroll_limit: HashMap<u64, f32>,
     /// What wants the next frame, gathered while a frame is made.
     pub animator: Animator,
     layout: ChatLayout,
@@ -240,7 +245,8 @@ pub struct ChatFrame {
     pressed: Option<Action>,
     header: u64,
     composer: u64,
-    xscroll: u64,
+    /// Per item, where its scrollers are (0: it has none).
+    scrolls: Vec<u64>,
 }
 
 impl ChatFrame {
@@ -253,7 +259,7 @@ impl ChatFrame {
             && self.pressed == other.pressed
             && self.header == other.header
             && self.composer == other.composer
-            && self.xscroll == other.xscroll
+            && self.scrolls == other.scrolls
             && self.items.len() == other.items.len()
             && self
                 .items
@@ -299,9 +305,33 @@ pub fn chat_frame(
         transcript,
         header: chat_header::frame_key(model, pressed.as_ref(), now),
         composer: composer::frame_key(model, view.keyboard, pressed.as_ref(), now),
-        xscroll: view.xscroll_version,
+        scrolls: view
+            .layout
+            .items
+            .iter()
+            .map(|item| scroll_key(view, &item.laid))
+            .collect(),
         pressed,
     })
+}
+
+/// Where a piece's scrollers are (0 when it has none): what a frame
+/// compares to redraw only the pieces whose content moved sideways.
+fn scroll_key(view: &ViewState, laid: &Laid) -> u64 {
+    if laid.xkeys.is_empty() {
+        return 0;
+    }
+    let offsets: Vec<(u64, u32)> = laid
+        .xkeys
+        .iter()
+        .map(|key| {
+            (
+                *key,
+                view.xscroll.get(key).copied().unwrap_or(0.0).to_bits(),
+            )
+        })
+        .collect();
+    hash_of(offsets) | 1
 }
 
 /// Where two layouts of one piece start to differ (relative to it), if
@@ -412,10 +442,10 @@ pub fn draw_chat_update(
             redraw.push((from.max(top), bottom));
         }
     }
-    // Horizontal scrollers moved: their pieces' rows.
-    if old.xscroll != new.xscroll {
-        for (y, laid) in &new.items {
-            if laid.xkeys.is_empty() {
+    // Scrollers moved: their pieces' rows.
+    if old.scrolls != new.scrolls {
+        for (index, (y, laid)) in new.items.iter().enumerate() {
+            if laid.xkeys.is_empty() || old.scrolls.get(index) == new.scrolls.get(index) {
                 continue;
             }
             let y0 = (CHAT_TOP + y + laid.ink.0 - new.offset).floor() as i32;
@@ -736,22 +766,70 @@ pub fn horizontal_target(
     view.layout(model);
     let (top, _) = transcript_bounds(model, height, view.keyboard);
     let offset = view.chat_scroll.value(now);
-    view.layout.items.iter().find_map(|item| {
+    let found = view.layout.items.iter().find_map(|item| {
         let iy = top + item.y - offset;
         (y >= iy && y < iy + item.laid.h)
-            .then(|| item.laid.xkeys.first().copied())
+            .then(|| item.laid.xmax.first().copied())
             .flatten()
-    })
+    });
+    let (key, max) = found?;
+    view.scroll_limit.insert(key, max);
+    Some(key)
 }
 
-/// Moves horizontal scroller `key` by `dx` (C1 clamps it to its content).
+/// Moves horizontal scroller `key` by `dx`, within its content.
 pub fn horizontal_drag(view: &mut ViewState, key: u64, dx: f32) {
+    let max = view.scroll_limit.get(&key).copied().unwrap_or(f32::MAX);
     let offset = view.xscroll.entry(key).or_insert(0.0);
-    let next = (*offset - dx).max(0.0).round();
+    let next = (*offset - dx).clamp(0.0, max.max(0.0)).round();
     if next != *offset {
         *offset = next;
         view.xscroll_version = view.xscroll_version.wrapping_add(1);
     }
+}
+
+/// A vertical drag starting at (`x`, `y`) and moving `dy` so far: the
+/// inner scroller it moves (a tall table's rows, C1), if it starts on one
+/// that can move that way; else the transcript scrolls.
+pub fn inner_vertical_target(
+    model: &Model,
+    view: &mut ViewState,
+    height: f32,
+    (x, y): (f32, f32),
+    dy: f32,
+    now: Instant,
+) -> Option<u64> {
+    if model.page != Page::Chat || dy == 0.0 {
+        return None;
+    }
+    view.layout(model);
+    let (top, _) = transcript_bounds(model, height, view.keyboard);
+    let offset = view.chat_scroll.value(now);
+    let found = view.layout.items.iter().find_map(|item| {
+        let iy = top + item.y - offset;
+        if y < iy || y >= iy + item.laid.h {
+            return None;
+        }
+        item.laid.ymax.iter().find_map(|(key, max, rect)| {
+            let inside =
+                x >= rect.x && x < rect.x + rect.w && y >= iy + rect.y && y < iy + rect.y + rect.h;
+            inside.then_some((*key, *max))
+        })
+    });
+    let (key, max) = found?;
+    let at = view.xscroll.get(&key).copied().unwrap_or(0.0);
+    // Up moves it on, down back; at its end the transcript takes the drag.
+    let can = if dy < 0.0 { at < max } else { at > 0.0 };
+    if !can {
+        return None;
+    }
+    view.scroll_limit.insert(key, max);
+    Some(key)
+}
+
+/// Moves inner vertical scroller `key` by `dy`, within its content.
+pub fn inner_drag(view: &mut ViewState, key: u64, dy: f32) {
+    horizontal_drag(view, key, dy);
 }
 
 #[cfg(test)]
@@ -1371,5 +1449,152 @@ mod tests {
         );
         let mut canvas = Canvas::new(1080, 2216);
         draw(&mut canvas, &mut model, &mut view, None, now);
+    }
+
+    // ----- Rich content (C1): code, tables, images ---------------------------
+
+    /// A chat whose reply has a wide code block, a wide table, a tall table
+    /// and an attached image.
+    fn rich_chat() -> Model {
+        let mut model = Model::new();
+        model.on_connected();
+        model.apply(
+            parse_event(r#"{"type":"conversation_updated","summary":{"id":"c","provider":"anthropic","model":"m","effort":"low","title":"Hi","pinned":false,"sortOrder":0,"streaming":false,"unread":false}}"#),
+            Instant::now(),
+        );
+        let commands = model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        let request = commands[0]["reqId"].as_str().unwrap().to_owned();
+        let rows: String = (0..30)
+            .map(|i| format!("| r{i} | {i} | wide cell {i} |\\n"))
+            .collect();
+        let text = format!(
+            "Intro.\\n\\n```rust\\nfn main() {{ let x = 1; }} // {}\\nmore\\n```\\n\\n| a | b | c |\\n|--|--:|:-:|\\n| one | 1 | x |\\n\\n| tall | n | w |\\n|---|---|---|\\n{rows}\\nEnd.",
+            "a long trailing comment ".repeat(4)
+        );
+        let image = r#"{"type":"tool_call","toolCallId":"a1","toolName":"attach","input":{},"summary":"shot.png"},{"type":"tool_result","toolCallId":"a1","toolName":"","output":"","isError":false,"images":[{"id":"img","mediaType":"image/png","width":200,"height":100,"sizeBytes":10}]}"#;
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_loaded","reqId":"{request}","convId":"c","entries":[{{"type":"user","text":"Show"}},{{"type":"ai","blocks":[{image},{{"type":"text","text":"{text}"}}]}}],"historyStartIndex":0}}"#
+            )),
+            Instant::now(),
+        );
+        model
+    }
+
+    #[test]
+    fn code_and_tables_scroll_sideways_drawing_only_their_rows() {
+        let height = 2216.0;
+        let mut model = rich_chat();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        view.layout(&model);
+        let top = CHAT_TOP;
+        // Scroll to the code block, then drag it sideways.
+        let code = view
+            .layout
+            .items
+            .iter()
+            .find(|item| !item.laid.xmax.is_empty())
+            .map(|item| item.y)
+            .expect("a scroller");
+        view.follow = false;
+        view.chat_scroll.offset = (code - 200.0).max(0.0);
+        let offset = view.chat_scroll.value(now);
+        let y = top + code - offset + 150.0;
+        let key = horizontal_target(&model, &mut view, height, 500.0, y, now).expect("the code");
+        for dx in [-120.0, -400.0, 2000.0, -50000.0] {
+            let damage = update_matches(&mut model, &mut view, height, |_, view| {
+                horizontal_drag(view, key, dx);
+            });
+            let redrawn: i32 = damage.rows.iter().map(|(a, b)| b - a).sum();
+            assert!(redrawn > 0 && redrawn < 1000, "only its rows: {damage:?}");
+        }
+        // Clamped to its content.
+        let max = view.scroll_limit[&key];
+        assert_eq!(view.xscroll[&key], max);
+        // Scrolled frames with the code offset still equal redrawn ones.
+        for to in [offset + 300.0, offset + 50.0, offset + 900.0] {
+            update_matches(&mut model, &mut view, height, |_, view| {
+                view.chat_scroll.offset = to;
+            });
+        }
+    }
+
+    #[test]
+    fn a_tall_tables_rows_scroll_inside_it() {
+        let height = 2216.0;
+        let mut model = rich_chat();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        view.layout(&model);
+        let (item_y, area) = view
+            .layout
+            .items
+            .iter()
+            .find_map(|item| item.laid.ymax.first().map(|(_, _, area)| (item.y, *area)))
+            .expect("a tall table");
+        view.follow = false;
+        view.chat_scroll.offset = item_y;
+        let y = CHAT_TOP + area.y + area.h / 2.0;
+        // Down first: it is at its top, so the transcript takes it.
+        assert_eq!(
+            inner_vertical_target(&model, &mut view, height, (500.0, y), 40.0, now),
+            None
+        );
+        let key = inner_vertical_target(&model, &mut view, height, (500.0, y), -40.0, now)
+            .expect("its rows");
+        for dy in [-60.0, -300.0, 120.0, -100000.0] {
+            update_matches(&mut model, &mut view, height, |_, view| {
+                inner_drag(view, key, dy);
+            });
+        }
+        let max = view.scroll_limit[&key];
+        assert_eq!(view.xscroll[&key], max);
+        // At its end, moving on is the transcript's again.
+        assert_eq!(
+            inner_vertical_target(&model, &mut view, height, (500.0, y), -40.0, now),
+            None
+        );
+    }
+
+    #[test]
+    fn an_image_arriving_redraws_its_strip_exactly() {
+        let height = 2216.0;
+        let mut model = rich_chat();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let wants = view.image_wants(&model, height, now);
+        assert_eq!(wants.len(), 1);
+        assert_eq!((wants[0].width, wants[0].height), (465, 465));
+        let commands = model.want_images(&wants, now);
+        assert_eq!(commands[0]["type"], "get_image");
+        let req = commands[0]["reqId"].as_str().unwrap().to_owned();
+        update_matches(&mut model, &mut view, height, |model, _| {
+            let mut data = crate::exocortex::proto::ImageData {
+                req_id: Some(req),
+                image_id: "img".into(),
+                ..Default::default()
+            };
+            data.pixels = Some(crate::exocortex::proto::Pixels {
+                width: 200,
+                height: 100,
+                argb: (0..20000).map(|i| 0xff00_0000 | (i as u32 * 97)).collect(),
+            });
+            model.apply(crate::exocortex::proto::Event::ImageData(data), now);
+        });
+        // A tap on it opens the viewer.
+        view.layout(&model);
+        let strip = view
+            .layout
+            .items
+            .iter()
+            .find(|item| !item.laid.images.is_empty())
+            .unwrap();
+        let (rect, action) = &strip.laid.hits[0];
+        assert_eq!((rect.w, rect.h), (200.0, 100.0));
+        assert!(matches!(
+            action,
+            Action::Rich(crate::exocortex::model::rich::Act::ViewImages { index: 0, .. })
+        ));
     }
 }

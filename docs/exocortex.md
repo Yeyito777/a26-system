@@ -86,6 +86,35 @@ reply shows WORKING until it shows something, the retry, compaction and
 connection-wait lines, and a footer whose duration ticks. A jump-to-latest
 button shows more than 120 pt from the end once the transcript is still.
 
+The replies' markdown (`src/exocortex/markdown.rs`, GFM as the iPhone renders it): headings in
+the accent colours, paragraphs (a newline is a line break), bullet,
+numbered and task lists nested to 12 levels, quotes, rules, fenced (``` and
+~~~) and indented code, tables, with bold, italic, strikethrough, inline
+code and underlined link spans. A code block has a header (its language,
+WRAP / NO WRAP, OPEN in the reader, COPY), keeps its lines and scrolls
+sideways, and over 8000 characters shows a preview. A table is a grid
+(header row, cells wrapped and aligned per its delimiter row, at most 12
+columns) that scrolls sideways when wide; over 10 rows it is at most 997 px
+tall and its rows scroll inside it under the header; "Open full response"
+opens the reply in the reader.
+
+
+Images a model attached (the `attach` tool) show after its message, and
+the user's pasted images under their bubble: thumbnails fitted in 465 px
+(pasted ones as 233 px filled squares), wrapping onto more rows. Each is a
+`get_image` PNG preview of the size drawn, asked for while it is within a
+screen of the viewport (nearest first, three at a time, retried with
+backoff while "not found" or unanswered), decoded on the link thread while
+the event is parsed, and kept in a cache bounded by its pixels
+(`images.rs`). A tap opens the viewer (`viewer.rs`): i/N, swipe between a
+message's images, double tap to zoom 2.5x (with a sharper preview) and drag
+to pan, swipe down, Back or ✕ to close.
+
+The reader (`reader.rs`) shows a text as written (wrapped at spaces or
+anywhere), how many characters, Copy, and Find: a field on Moon's keyboard,
+i/N, previous and next, every match marked and the current one scrolled
+into view (`find.rs`, the engine Find in chat uses).
+
 The composer is a text area on Moon's `keyboard show multiline` (Return is
 a line break; only the Send button sends). Its editor (`editor.rs`) keeps a
 caret and a selection by cluster (an emoji sequence is one step) and wraps
@@ -201,7 +230,7 @@ the interfaces below. Every file's header says whose it is.
 | `model/mod.rs` | A | `Model`, `Action`, the pages, the connection, the event fan-out, `Ui` |
 | `proto/mod.rs`, `proto/fixtures.jsonl` | A | `Event`, `parse_event`, the bootstrap |
 | `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands, menus and prompts (`list/actions.rs`) |
-| `view/markdown_layout.rs`, `markdown.rs`, `reader.rs` | C1 | markdown as pieces, code, tables; the reader (A's is minimal) |
+| `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks, tables; images in the transcript, their cache and the viewer; the reader and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
 | `view/composer.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
@@ -274,15 +303,22 @@ additions are the only shared edits.
   (`frame(now)`, `slow_frame(now)` for a 30 Hz pulse, `follow(&tween, now)`,
   `request(at)`); nothing animating means no frames.
 - **Pieces** (`view/ops.rs`). A transcript piece is a `Laid` (height,
-  `Op`s, hits, ink rows, horizontal scroller keys) relative to its top,
-  passed through `ops::quantized`. Ops: `Text` (with tracking), `Rect`,
-  `Border`, `Line`, `Icon`, `Image` (an `ImageHandle`), `Chevron`, and
-  `Clip { rect, xscroll: Some(key), ops }`, whose content the view scrolls
-  sideways by `ViewState::xscroll[key]` (code blocks, tables: C1 clamps).
-  C1's entry point is `markdown_layout::lay(source, x, width, top, MdStyle)
-  -> Laid`; C2's is the transcript's planning in `transcript.rs` and
-  `blocks.rs`. Pieces are cached by a hash of what they show, so a piece's
-  key must include everything it draws.
+  `Op`s, hits, ink rows, scroller keys, how far its scrollers go, the image
+  previews it shows) relative to its top, passed through `ops::quantized`.
+  Ops: `Text` (with tracking), `Rect`, `Border`, `Line`, `Icon`, `Image` (a
+  weak `ImageHandle`: the image cache decides what stays in memory),
+  `Chevron`, and `Clip { rect, xscroll, yscroll, ops }`, whose content the
+  view scrolls sideways (code blocks, wide tables) or up (a tall table's
+  rows) by `ViewState::xscroll[key]`, clamped to the piece's `xmax` /
+  `ymax`; a frame redraws only the pieces whose scrollers moved. Hits are
+  checked in x and y. C1's entry points are `markdown_layout::lay(source,
+  x, width, top, MdStyle) -> Laid` and `lay_block(block, x, width, rich)`
+  (one markdown block; its cache key must include `state_key(block,
+  rich)`, which says whether a code block wraps), and `media::lay_strip`
+  for a message's images (keyed by `Strip::state_key`); C2's is the
+  transcript's planning in `transcript.rs` and `blocks.rs`, whose layout key
+  includes `model.rich.version()`. Pieces are cached by a hash of what they
+  show, so a piece's key must include everything it draws.
 - **The rules every drawing follows** (they keep partial frames equal to
   full ones, which `EXOCORTEX_APP_VERIFY=1` and the tests check):
   draw only inside the canvas's clip, and nest clips with
