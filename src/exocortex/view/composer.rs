@@ -19,16 +19,17 @@ use std::time::{Duration, Instant};
 use crate::gfx::{Canvas, RectF};
 
 use super::super::anim::{self, Animator, Tween};
+use super::super::dictation;
 use super::super::editor::{self, Line, Metrics};
 use super::super::gesture::Gesture;
 #[cfg(test)]
 use super::super::model::composer;
-use super::super::model::composer::{Act, End};
+use super::super::model::composer::{Act, End, VoicePhase};
 use super::super::model::{Action, Model, Page};
 use super::super::theme::{
     self, COMPOSER_BUTTON, COMPOSER_FACE, COMPOSER_GAP, COMPOSER_MARGIN, EDITOR_INSET,
     EDITOR_LINES, EDITOR_PAD_Y, GESTURE_RESERVE, HAIRLINE, ISLAND_MIN, ISLAND_PAD, ISLAND_RADIUS,
-    S1, S2, T_CAPTION, T_COMPOSER, T_MENU, W,
+    S1, S2, T_CAPTION, T_COMPOSER, T_MENU, T_NOTE, W,
 };
 use super::super::ui::icons::{self, Icon, Style};
 use super::super::ui::overlay::{Body, Cx, Overlay, Response};
@@ -80,6 +81,8 @@ pub enum Primary {
     },
     /// A message from this draft is on its way.
     Busy,
+    /// Nothing typed: dictate (PAR-180, PAR-243).
+    Mic,
 }
 
 /// The composer's trailing buttons.
@@ -95,6 +98,8 @@ pub fn trailing(model: &Model) -> Trailing {
     let streaming = model.chat.id.is_some() && model.streaming();
     let primary = if model.submitting() {
         Primary::Busy
+    } else if !typed && dictation::available() {
+        Primary::Mic
     } else if !typed {
         Primary::None
     } else if streaming {
@@ -241,7 +246,12 @@ pub fn geometry(model: &Model, height: f32, keyboard: bool) -> ComposerGeometry 
     let buttons = 1.0 + if trailing.stop.is_some() { 1.0 } else { 0.0 };
     let editor_right = x1 - ISLAND_PAD - buttons * COMPOSER_BUTTON;
     let lines = wrapped(&model.composer.text, editor_right - editor_x);
-    let shown = lines.len().clamp(1, EDITOR_LINES);
+    // Dictating, the recording strip takes the row: one line high.
+    let shown = if model.composer.voice.active() {
+        1
+    } else {
+        lines.len().clamp(1, EDITOR_LINES)
+    };
     let line = T_COMPOSER.line();
     let h = (shown as f32 * line + 2.0 * EDITOR_PAD_Y + 2.0 * ISLAND_PAD).max(ISLAND_MIN);
     let island = RectF::new(x0, (bottom - h).round(), x1 - x0, h.round());
@@ -326,7 +336,15 @@ pub fn geometry(model: &Model, height: f32, keyboard: bool) -> ComposerGeometry 
 pub fn owns(action: &Action) -> bool {
     matches!(
         action,
-        Action::Composer(Act::Send | Act::Abort | Act::Attach | Act::DismissError)
+        Action::Composer(
+            Act::Send
+                | Act::Abort
+                | Act::Attach
+                | Act::DismissError
+                | Act::Mic
+                | Act::MicDone
+                | Act::MicCancel
+        )
     )
 }
 
@@ -358,6 +376,7 @@ pub fn frame_key(model: &Model, keyboard: bool, pressed: Option<&Action>, now: I
         error,
         caret_shows(model, keyboard, now),
         busy.then(|| spinner_step(now)),
+        voice_key(model, now),
         super::action_key(pressed.filter(|action| owns(action))),
         theme::generation(),
     )
@@ -376,7 +395,7 @@ pub fn animate(model: &Model, keyboard: bool, now: Instant, animator: &mut Anima
         animator.request(since + half * (elapsed + 1));
     }
     let t = trailing(model);
-    if matches!(t.primary, Primary::Busy) || t.stop == Some(true) {
+    if matches!(t.primary, Primary::Busy) || t.stop == Some(true) || model.composer.voice.active() {
         animator.slow_frame(now);
     }
     if let Some(error) = model.composer_error_label()
@@ -399,6 +418,17 @@ pub fn hit(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) -> Option
     {
         return Some(Hit::Action(Action::Composer(Act::DismissError)));
     }
+    // The recording strip: ✕ and ✓, nothing else.
+    let voice = &model.composer.voice;
+    if voice.active() {
+        if near(geometry.plus, x, y) {
+            return Some(Hit::Action(Action::Composer(Act::MicCancel)));
+        }
+        if voice.phase == VoicePhase::Recording && near(strip_finish(&geometry), x, y) {
+            return Some(Hit::Action(Action::Composer(Act::MicDone)));
+        }
+        return None;
+    }
     if near(geometry.plus, x, y) {
         return Some(Hit::Action(Action::Composer(Act::Attach)));
     }
@@ -407,13 +437,14 @@ pub fn hit(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) -> Option
     {
         return Some(Hit::Action(Action::Composer(Act::Abort)));
     }
-    if near(geometry.send, x, y)
-        && matches!(
-            geometry.trailing.primary,
-            Primary::Send { .. } | Primary::Queue { .. }
-        )
-    {
-        return Some(Hit::Action(Action::Composer(Act::Send)));
+    if near(geometry.send, x, y) {
+        match geometry.trailing.primary {
+            Primary::Send { .. } | Primary::Queue { .. } => {
+                return Some(Hit::Action(Action::Composer(Act::Send)));
+            }
+            Primary::Mic => return Some(Hit::Action(Action::Composer(Act::Mic))),
+            Primary::None | Primary::Busy => {}
+        }
     }
     if geometry.island.inset(-16.0).contains(x, y) {
         let index = geometry.index_at(&model.composer.text, x, y);
@@ -428,6 +459,9 @@ pub fn hit(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) -> Option
 
 /// A long press in the editor: its word selected.
 pub fn long_press(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) -> Option<Action> {
+    if model.composer.voice.active() {
+        return None;
+    }
     let geometry = geometry(model, height, keyboard);
     let buttons = [Some(geometry.plus), Some(geometry.send), geometry.stop];
     if !geometry.island.contains(x, y) || buttons.iter().flatten().any(|b| near(*b, x, y)) {
@@ -472,6 +506,9 @@ pub enum EditDrag {
 /// A drag starting at (`x`, `y`): the editor's, if it starts on a handle
 /// (or the caret) or in text that scrolls.
 pub fn drag_start(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) -> Option<EditDrag> {
+    if model.composer.voice.active() {
+        return None;
+    }
     let geometry = geometry(model, height, keyboard);
     if !geometry.island.inset(-16.0).contains(x, y) {
         return None;
@@ -583,6 +620,10 @@ pub fn draw(
         p.surface_background,
         1.0,
     );
+    if model.composer.voice.active() {
+        draw_strip(canvas, model, &geometry, pressed, now);
+        return;
+    }
     // "+".
     let plus_down = pressed == Some(&Action::Composer(Act::Attach));
     icons::draw_styled(
@@ -797,6 +838,18 @@ fn draw_trailing(
                 Style::new(if down { 46.0 } else { 52.0 }, icon).stroke(5.0),
             );
         }
+        Primary::Mic => {
+            let down = pressed == Some(&Action::Composer(Act::Mic));
+            icons::draw_styled(
+                canvas,
+                Icon::Mic,
+                sx,
+                sy,
+                Style::new(60.0, c.text_output)
+                    .stroke(5.0)
+                    .alpha(if down { 0.5 } else { 1.0 }),
+            );
+        }
         Primary::Busy => {
             canvas.fill_circle(sx, sy, face(false), c.send_disabled_face, 1.0);
             widgets::spinner(
@@ -830,6 +883,155 @@ fn draw_trailing(
                 4.0,
                 p.error,
                 1.0,
+            );
+        }
+    }
+}
+
+// ----- The recording strip ---------------------------------------------------------
+
+/// The strip's waveform bars: width and gap (2 and 3 pt), height 2 pt plus
+/// up to 28 pt of loudness.
+const BAR_W: f32 = 6.0;
+const BAR_GAP: f32 = 8.0;
+const BAR_MIN: f32 = 6.0;
+const BAR_SPAN: f32 = 78.0;
+/// The recording dot's pulse.
+const DOT_PULSE_MS: u64 = 1200;
+
+/// Where the strip's ✓ is: the rightmost button's place.
+fn strip_finish(geometry: &ComposerGeometry) -> (f32, f32) {
+    (
+        W - COMPOSER_MARGIN - ISLAND_PAD - COMPOSER_BUTTON / 2.0,
+        geometry.plus.1,
+    )
+}
+
+/// "1:05": a recording's length.
+fn clock(elapsed: Duration) -> String {
+    let s = elapsed.as_secs();
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// What the strip's pixels depend on at `now`.
+fn voice_key(model: &Model, now: Instant) -> Option<(VoicePhase, u64, u64, u32)> {
+    let voice = &model.composer.voice;
+    let since = voice.since?;
+    match voice.phase {
+        VoicePhase::Idle => None,
+        VoicePhase::Recording => Some((
+            voice.phase,
+            voice.version,
+            now.saturating_duration_since(since).as_secs(),
+            anim::pulse_percent(now, DOT_PULSE_MS),
+        )),
+        VoicePhase::Transcribing => Some((voice.phase, 0, 0, spinner_step(now))),
+    }
+}
+
+/// The recording strip in the island (PAR-243, PAR-244): ✕, the red dot
+/// and the clock, the waveform of measured levels (newest on the right) and
+/// ✓; while transcribing, a spinner and "Transcribing…".
+fn draw_strip(
+    canvas: &mut Canvas,
+    model: &Model,
+    geometry: &ComposerGeometry,
+    pressed: Option<&Action>,
+    now: Instant,
+) {
+    let p = theme::p();
+    let c = theme::c();
+    let voice = &model.composer.voice;
+    let (cx, cy) = geometry.plus;
+    let cancel_down = pressed == Some(&Action::Composer(Act::MicCancel));
+    icons::draw_styled(
+        canvas,
+        Icon::X,
+        cx,
+        cy,
+        Style::new(50.0, c.text_output)
+            .stroke(5.0)
+            .alpha(if cancel_down { 0.5 } else { 1.0 }),
+    );
+    let x = cx + COMPOSER_BUTTON / 2.0 + S1;
+    let baseline = T_NOTE.baseline(cy - T_NOTE.line() / 2.0);
+    match voice.phase {
+        VoicePhase::Idle => {}
+        VoicePhase::Transcribing => {
+            widgets::spinner(
+                canvas,
+                x + SPINNER / 2.0,
+                cy,
+                SPINNER,
+                p.accent,
+                p.surface_background,
+                spinner_time(now),
+            );
+            widgets::text(
+                canvas,
+                "Transcribing…",
+                x + SPINNER + S2,
+                baseline,
+                T_NOTE,
+                p.muted,
+                1.0,
+            );
+        }
+        VoicePhase::Recording => {
+            let elapsed = voice
+                .since
+                .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+            canvas.fill_circle(
+                x + 9.0,
+                cy,
+                9.0,
+                p.error,
+                anim::pulse_percent(now, DOT_PULSE_MS) as f32 / 100.0,
+            );
+            let clock_x = x + 18.0 + S1;
+            let w = widgets::text(
+                canvas,
+                &clock(elapsed),
+                clock_x,
+                baseline,
+                T_NOTE,
+                p.text,
+                1.0,
+            );
+            let finish = strip_finish(geometry);
+            let left = clock_x + w.max(widgets::measure("0:00", T_NOTE)) + S2;
+            let right = finish.0 - COMPOSER_BUTTON / 2.0 - S1;
+            let on = theme::mix(p.accent, 85, p.surface_background);
+            let off = theme::mix(p.accent, 20, p.surface_background);
+            let mut bar_x = right - BAR_W;
+            for level in voice.levels.iter().rev() {
+                if bar_x < left {
+                    break;
+                }
+                let h = (BAR_MIN + level * BAR_SPAN).round();
+                canvas.fill_rect(
+                    bar_x.round() as i32,
+                    (cy - h / 2.0).round() as i32,
+                    BAR_W as i32,
+                    h as i32,
+                    if *level > 0.01 { on } else { off },
+                    1.0,
+                );
+                bar_x -= BAR_W + BAR_GAP;
+            }
+            let down = pressed == Some(&Action::Composer(Act::MicDone));
+            let face = if down {
+                COMPOSER_FACE * 0.88
+            } else {
+                COMPOSER_FACE
+            } / 2.0;
+            canvas.fill_circle(finish.0, finish.1, face, p.accent, 1.0);
+            icons::draw_styled(
+                canvas,
+                Icon::Check,
+                finish.0,
+                finish.1,
+                Style::new(if down { 46.0 } else { 52.0 }, p.on_accent).stroke(7.0),
             );
         }
     }
@@ -1300,7 +1502,7 @@ mod tests {
         assert_eq!(
             trailing(&model),
             Trailing {
-                primary: Primary::None,
+                primary: Primary::Mic,
                 stop: Some(false)
             }
         );
@@ -1403,6 +1605,43 @@ mod tests {
         for _ in 0..5 {
             frames(&mut model, &mut view, &|_| {}, 33);
         }
+        // Dictation: the strip takes the row; levels, the clock and the
+        // dot redraw it; transcribing turns a spinner.
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                model.handle(Action::Composer(Act::Mic));
+            },
+            10,
+        );
+        for step in 0..12 {
+            frames(
+                &mut model,
+                &mut view,
+                &|model| {
+                    model.dictation_line(dictation::Line::Level((step % 5) as f32 / 4.0));
+                },
+                50,
+            );
+        }
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                model.handle(Action::Composer(Act::MicDone));
+            },
+            10,
+        );
+        for _ in 0..4 {
+            frames(&mut model, &mut view, &|_| {}, 33);
+        }
+        frames(
+            &mut model,
+            &mut view,
+            &|model| model.dictation_line(dictation::Line::Text("dictated".into())),
+            10,
+        );
         // An error label rises over the island (the transcript's bottom
         // moves: drawn whole), then fades in over its own rows.
         frames(

@@ -10,11 +10,12 @@
 //! says why above the composer.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use super::super::dictation::{self, Do, Line};
 use super::super::drafts::Drafts;
 use super::super::editor::{self, Cursor};
 use super::super::proto::{self, Entry, Event, Queued};
@@ -55,6 +56,43 @@ pub enum End {
     /// The caret (with no selection, the caret itself).
     Caret,
     Anchor,
+}
+
+/// Dictation stops by itself before the hook's capture limit (120 s).
+const RECORD_FOR: Duration = Duration::from_secs(115);
+/// Its transcription is given up on after this (PAR-247).
+const TRANSCRIBE_WITHIN: Duration = requests::TRANSCRIPTION_WITHIN;
+/// Levels kept for the waveform (newest last).
+pub const LEVELS: usize = 64;
+
+/// Where the composer's microphone is (PAR-243–250).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum VoicePhase {
+    #[default]
+    Idle,
+    Recording,
+    Transcribing,
+}
+
+/// The composer's microphone: one recording at a time, for the draft it
+/// started in (its words go there, wherever the user is by then).
+#[derive(Debug, Default)]
+pub struct Voice {
+    pub phase: VoicePhase,
+    pub key: Option<String>,
+    /// When the phase began (the recording's clock, the transcription's
+    /// deadline).
+    pub since: Option<Instant>,
+    /// Recent loudness, 0..1, newest last.
+    pub levels: VecDeque<f32>,
+    /// Bumped with every level (what the strip's frame shows).
+    pub version: u64,
+}
+
+impl Voice {
+    pub fn active(&self) -> bool {
+        self.phase != VoicePhase::Idle
+    }
 }
 
 /// An error shown above the composer for one draft (PAR-186).
@@ -124,6 +162,8 @@ pub struct Composer {
     queue_errors: HashMap<String, String>,
     /// Stops on their way: conversation → request id.
     stopping: HashMap<String, String>,
+    /// The microphone.
+    pub voice: Voice,
 }
 
 impl Composer {
@@ -311,6 +351,12 @@ pub enum Act {
     Unqueue(String),
     /// Take a queued message back into the composer (PAR-261).
     PullBack(String),
+    /// The mic: start dictating into this draft.
+    Mic,
+    /// The recording strip's ✓: stop and transcribe.
+    MicDone,
+    /// Its ✕: drop the recording (or the transcription).
+    MicCancel,
 }
 
 impl Model {
@@ -398,6 +444,29 @@ impl Model {
     /// Writes typing into the kept drafts once it pauses; whether anything
     /// shows differently (never).
     pub(super) fn composer_tick(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        let voice = &self.composer.voice;
+        match (voice.phase, voice.since) {
+            // A recording ends with its chat: no microphone left open
+            // behind another page.
+            (VoicePhase::Recording, _)
+                if self.page != Page::Chat || self.composer.key != voice.key =>
+            {
+                self.cancel_dictation();
+                changed = true;
+            }
+            (VoicePhase::Recording, Some(since)) if now >= since + RECORD_FOR => {
+                changed = true;
+                self.handle_composer(Act::MicDone);
+            }
+            (VoicePhase::Transcribing, Some(since)) if now >= since + TRANSCRIBE_WITHIN => {
+                let key = voice.key.clone().unwrap_or_default();
+                self.cancel_dictation();
+                self.voice_error(&key, "Voice transcription took too long. Try again.");
+                changed = true;
+            }
+            _ => {}
+        }
         if self
             .composer
             .unsaved
@@ -406,12 +475,22 @@ impl Model {
             self.composer.drafts.load(&self.persist);
             self.write_drafts();
         }
-        false
+        changed
     }
 
     /// When `composer_tick` next has something to do.
     pub(super) fn composer_deadline(&self) -> Option<Instant> {
-        self.composer.unsaved.map(|at| at + SAVE_AFTER)
+        let voice = &self.composer.voice;
+        let voice = voice.since.and_then(|since| match voice.phase {
+            VoicePhase::Recording => Some(since + RECORD_FOR),
+            VoicePhase::Transcribing => Some(since + TRANSCRIBE_WITHIN),
+            VoicePhase::Idle => None,
+        });
+        let unsaved = self.composer.unsaved.map(|at| at + SAVE_AFTER);
+        match (voice, unsaved) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Writes everything typed into the kept drafts (the app is closing).
@@ -617,6 +696,164 @@ impl Model {
             }
             Act::Unqueue(id) => self.unqueue(&id, false),
             Act::PullBack(id) => self.unqueue(&id, true),
+            Act::Mic => {
+                self.start_dictation(now);
+                Vec::new()
+            }
+            Act::MicDone => {
+                if self.composer.voice.phase == VoicePhase::Recording {
+                    self.ui.effect(Effect::Dictate(Do::Stop));
+                    self.composer.voice.phase = VoicePhase::Transcribing;
+                    self.composer.voice.since = Some(now);
+                }
+                Vec::new()
+            }
+            Act::MicCancel => {
+                self.cancel_dictation();
+                Vec::new()
+            }
+        }
+    }
+
+    fn start_dictation(&mut self, now: Instant) {
+        if self.composer.voice.active() || !dictation::available() {
+            return;
+        }
+        let Some(key) = self.composer.key.clone() else {
+            return;
+        };
+        self.composer.errors.remove(&key);
+        self.composer.menu = None;
+        self.composer.selecting = false;
+        self.composer.voice = Voice {
+            phase: VoicePhase::Recording,
+            key: Some(key),
+            since: Some(now),
+            levels: VecDeque::new(),
+            version: self.composer.voice.version.wrapping_add(1),
+        };
+        // The strip takes the editor's row: the keyboard goes.
+        self.ui.effect(Effect::HideKeyboard);
+        self.ui.effect(Effect::Dictate(Do::Start));
+    }
+
+    fn cancel_dictation(&mut self) {
+        if self.composer.voice.active() {
+            self.ui.effect(Effect::Dictate(Do::Cancel));
+        }
+        self.composer.voice.phase = VoicePhase::Idle;
+        self.composer.voice.since = None;
+    }
+
+    /// The voice hook said something (`dictation::take`).
+    pub fn dictation_line(&mut self, line: Line) {
+        let voice = &mut self.composer.voice;
+        let Some(key) = voice.key.clone() else {
+            return;
+        };
+        match line {
+            Line::Level(level) => {
+                if voice.phase == VoicePhase::Recording {
+                    voice.levels.push_back(level);
+                    while voice.levels.len() > LEVELS {
+                        voice.levels.pop_front();
+                    }
+                    voice.version = voice.version.wrapping_add(1);
+                }
+            }
+            Line::Text(text) => {
+                if voice.phase != VoicePhase::Transcribing {
+                    return;
+                }
+                voice.phase = VoicePhase::Idle;
+                let text = text.trim().to_owned();
+                if text.is_empty() {
+                    self.voice_error(&key, "No speech was detected in the recording.");
+                    return;
+                }
+                self.insert_transcript(&key, &text);
+            }
+            Line::Error(message) => {
+                if voice.active() {
+                    voice.phase = VoicePhase::Idle;
+                    self.voice_error(&key, &message);
+                }
+            }
+            Line::Failed(why) => {
+                if voice.active() {
+                    voice.phase = VoicePhase::Idle;
+                    eprintln!("exocortex: dictation did not start: {why}");
+                    self.voice_error(&key, "The microphone recording could not start.");
+                }
+            }
+            Line::Exited => {
+                // Gone without its answer (it failed, or was cancelled).
+                if voice.active() {
+                    let recording = voice.phase == VoicePhase::Recording;
+                    voice.phase = VoicePhase::Idle;
+                    self.voice_error(
+                        &key,
+                        if recording {
+                            "The recording stopped."
+                        } else {
+                            "The transcription did not come back. Try again."
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn voice_error(&mut self, key: &str, message: &str) {
+        self.composer.errors.insert(
+            key.to_owned(),
+            ComposerError {
+                text: message.to_owned(),
+                since: Instant::now(),
+            },
+        );
+        if self.composer.key.as_deref() != Some(key) || self.page != Page::Chat {
+            self.ui.error_toast(message.to_owned());
+        }
+    }
+
+    /// Words dictated into draft `key`: at the caret when it shows (spaced
+    /// from what is around them), else after the draft's text; the editor
+    /// gets the keyboard back.
+    fn insert_transcript(&mut self, key: &str, text: &str) {
+        if self.composer.key.as_deref() == Some(key) {
+            let cursor = self.composer.cursor();
+            let (a, b) = cursor.selection().unwrap_or((cursor.caret, cursor.caret));
+            let before = self.composer.text[..a].chars().next_back();
+            let after = self.composer.text[b..].chars().next();
+            let mut words = String::new();
+            if before.is_some_and(|c| !c.is_whitespace()) {
+                words.push(' ');
+            }
+            words.push_str(text);
+            if after.is_some_and(|c| !c.is_whitespace()) {
+                words.push(' ');
+            }
+            let mut cursor = self.composer.cursor;
+            cursor.insert(&mut self.composer.text, &words);
+            self.composer.cursor = cursor;
+            self.composer.edited(Instant::now());
+            if self.page == Page::Chat {
+                self.ui
+                    .effect(Effect::ShowKeyboard(KeyboardPurpose::Multiline));
+            }
+        } else {
+            self.composer.drafts.load(&self.persist);
+            let current = self.composer.drafts.get(key).unwrap_or_default().to_owned();
+            let next = if current.is_empty() {
+                text.to_owned()
+            } else if current.ends_with(char::is_whitespace) {
+                format!("{current}{text}")
+            } else {
+                format!("{current} {text}")
+            };
+            self.composer.drafts.set(key, &next, now_ms());
+            self.composer.drafts.save(&mut self.persist);
         }
     }
 
@@ -1594,6 +1831,116 @@ mod tests {
         model.handle(Action::Composer(Act::Send));
         let kept: serde_json::Map<String, Value> = model.persist.section(DRAFTS, "drafts");
         assert!(!kept.contains_key("d"));
+    }
+
+    #[test]
+    fn dictation_records_transcribes_and_inserts_at_the_caret() {
+        let mut model = ready(false);
+        type_text(&mut model, "Hello world");
+        model.handle(Action::Composer(Act::Place {
+            index: 5,
+            focused: true,
+        }));
+        model.ui.effects.clear();
+        model.handle(Action::Composer(Act::Mic));
+        assert_eq!(model.composer.voice.phase, VoicePhase::Recording);
+        assert_eq!(
+            model.ui.effects,
+            vec![Effect::HideKeyboard, Effect::Dictate(Do::Start)]
+        );
+        for level in [0.0, 0.4, 0.9] {
+            model.dictation_line(Line::Level(level));
+        }
+        assert_eq!(model.composer.voice.levels, [0.0, 0.4, 0.9]);
+        model.ui.effects.clear();
+        model.handle(Action::Composer(Act::MicDone));
+        assert_eq!(model.ui.effects, vec![Effect::Dictate(Do::Stop)]);
+        assert_eq!(model.composer.voice.phase, VoicePhase::Transcribing);
+        model.dictation_line(Line::Level(0.5));
+        assert_eq!(model.composer.voice.levels.len(), 3, "no levels after stop");
+        model.dictation_line(Line::Text("  dear  ".into()));
+        assert_eq!(model.composer.text, "Hello dear world");
+        assert_eq!(model.composer.voice.phase, VoicePhase::Idle);
+        assert!(
+            model
+                .ui
+                .effects
+                .contains(&Effect::ShowKeyboard(KeyboardPurpose::Multiline))
+        );
+        // Its exit after the answer says nothing more.
+        model.dictation_line(Line::Exited);
+        assert!(model.composer_error_label().is_none());
+    }
+
+    #[test]
+    fn dictation_problems_are_said_and_nothing_is_lost() {
+        let mut model = ready(false);
+        type_text(&mut model, "keep me");
+        model.handle(Action::Composer(Act::Mic));
+        model.handle(Action::Composer(Act::MicDone));
+        model.dictation_line(Line::Text(String::new()));
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some("No speech was detected in the recording.")
+        );
+        assert_eq!(model.composer.text, "keep me");
+        model.handle(Action::Composer(Act::Mic));
+        assert!(
+            model.composer_error_label().is_none(),
+            "a new try clears it"
+        );
+        model.handle(Action::Composer(Act::MicDone));
+        model.dictation_line(Line::Error("Transcription failed: quota".into()));
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some("Transcription failed: quota")
+        );
+        // The hook dying mid-recording, and a transcription that never comes.
+        model.handle(Action::Composer(Act::Mic));
+        model.dictation_line(Line::Exited);
+        assert_eq!(model.composer.voice.phase, VoicePhase::Idle);
+        assert!(model.composer_error_label().is_some());
+        model.handle(Action::Composer(Act::Mic));
+        model.handle(Action::Composer(Act::MicDone));
+        let since = model.composer.voice.since.unwrap();
+        model.ui.effects.clear();
+        model.tick(since + TRANSCRIBE_WITHIN);
+        assert_eq!(model.ui.effects, vec![Effect::Dictate(Do::Cancel)]);
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some("Voice transcription took too long. Try again.")
+        );
+        // A late answer after that is no one's.
+        model.dictation_line(Line::Text("late".into()));
+        assert_eq!(model.composer.text, "keep me");
+    }
+
+    #[test]
+    fn a_recording_ends_with_its_chat_and_a_transcript_finds_its_draft() {
+        let mut model = ready(false);
+        model.handle(Action::Composer(Act::Mic));
+        open(&mut model, "d");
+        model.ui.effects.clear();
+        model.tick(Instant::now());
+        assert_eq!(model.ui.effects, vec![Effect::Dictate(Do::Cancel)]);
+        assert_eq!(model.composer.voice.phase, VoicePhase::Idle);
+        // Transcribing, the words go to the draft they were spoken for.
+        open(&mut model, "c");
+        model.handle(Action::Composer(Act::Mic));
+        model.handle(Action::Composer(Act::MicDone));
+        open(&mut model, "d");
+        model.tick(Instant::now());
+        assert_eq!(model.composer.voice.phase, VoicePhase::Transcribing);
+        model.dictation_line(Line::Text("for c".into()));
+        assert!(model.composer.text.is_empty());
+        open(&mut model, "c");
+        assert_eq!(model.composer.text, "for c");
+        // A recording stops by itself before the capture's limit.
+        model.composer.text.clear();
+        model.handle(Action::Composer(Act::Mic));
+        let since = model.composer.voice.since.unwrap();
+        model.tick(since + RECORD_FOR);
+        assert_eq!(model.composer.voice.phase, VoicePhase::Transcribing);
     }
 
     #[test]

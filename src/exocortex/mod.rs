@@ -7,6 +7,7 @@ pub mod anim;
 pub mod app;
 pub mod clipboard;
 pub mod commands;
+pub mod dictation;
 pub mod drafts;
 pub mod editor;
 pub mod gesture;

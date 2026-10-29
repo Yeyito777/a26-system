@@ -103,6 +103,9 @@ pub enum Effect {
     HideKeyboard,
     /// Paste the clipboard into the composer (`Model::paste_text`).
     Paste,
+    /// The composer's microphone (`dictation.rs`; lines come back through
+    /// `Model::dictation_line`).
+    Dictate(super::dictation::Do),
     /// Moon's status bar takes the theme's background again (E: a theme
     /// change).
     StatusBar,
