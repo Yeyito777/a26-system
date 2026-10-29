@@ -64,7 +64,7 @@ pub enum Action {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Nav {
     /// The top bar's back, Moon's Back, the left-edge swipe: out of a chat,
-    /// up a folder, or from the list to Settings.
+    /// a search on the list, or from the list to Settings.
     Back,
     OpenConversation(String),
     NewConversation,
@@ -248,6 +248,8 @@ impl Model {
             &proto::APP_CAPABILITIES,
             Some(24),
         )];
+        // The list's tree and open folders (B).
+        commands[0]["sidebarView"] = self.list_view_hint();
         // The open conversation comes back first, then the list (PAR-018),
         // all in the same write.
         let reopen = self.pending_open.take().or_else(|| match self.page {
@@ -291,12 +293,14 @@ impl Model {
         self.quiet_until.filter(|_| !self.connected)
     }
 
-    /// Updates `offline` for the time; returns whether it changed.
+    /// Updates `offline` (and the list's search) for the time; returns
+    /// whether anything changed.
     pub fn tick(&mut self, now: Instant) -> bool {
         let offline = !self.connected && self.quiet_until.is_none_or(|until| now >= until);
         let changed = offline != self.offline;
         self.offline = offline;
-        changed
+        // The list's search follows the typing (B).
+        self.list_tick(now) || changed
     }
 
     pub fn handle(&mut self, action: Action) -> Vec<Value> {
@@ -330,12 +334,18 @@ impl Model {
             Nav::Back => {
                 self.ui.close_all = true;
                 match self.page {
-                    Page::Chat => self.leave_chat(),
+                    Page::Chat => {
+                        // Its row shows selected on the list (B).
+                        if let Some(id) = &self.chat.id {
+                            self.sidebar.selected = Some(id.clone());
+                        }
+                        self.leave_chat()
+                    }
                     Page::Settings => {
                         self.page = Page::List;
                         Vec::new()
                     }
-                    // Up a folder; at the top, Settings (left of the list).
+                    // A search ends first; then Settings (left of the list).
                     Page::List => {
                         if !self.sidebar.up() {
                             self.page = Page::Settings;
@@ -513,6 +523,18 @@ mod tests {
         model
     }
 
+    /// The list's rows.
+    fn rows(model: &mut Model) -> Vec<Row> {
+        model.sidebar.layout().rows.clone()
+    }
+
+    fn conv(id: &str, depth: usize) -> Row {
+        Row::Conversation {
+            id: id.into(),
+            depth,
+        }
+    }
+
     #[test]
     fn the_list_orders_pinned_then_sort_order_with_folders() {
         let mut model = connected();
@@ -524,23 +546,27 @@ mod tests {
             summary("d", false, 0.0, Some("f1")),
         );
         model.apply(parse_event(&list), Instant::now());
+        let folder = |open| Row::Folder {
+            id: "f1".into(),
+            depth: 0,
+            open,
+        };
         assert_eq!(
-            model.sidebar.rows(None),
-            &[
-                Row::Conversation("b".into()),
-                Row::Conversation("c".into()),
-                Row::Folder {
-                    id: "f1".into(),
-                    name: "Work".into(),
-                    count: 1,
-                    pinned: false
-                },
-                Row::Conversation("a".into()),
+            rows(&mut model),
+            vec![
+                Row::Pinned,
+                conv("b", 0),
+                Row::Divider { depth: 0 },
+                conv("c", 0),
+                folder(false),
+                conv("a", 0),
             ]
         );
+        // A folder opens in place.
+        model.handle(Action::List(sidebar::Act::Toggle("f1".into())));
         assert_eq!(
-            model.sidebar.rows(Some("f1")),
-            &[Row::Conversation("d".into())]
+            rows(&mut model)[4..],
+            [folder(true), conv("d", 1), conv("a", 0)]
         );
         // A reorder delta and a deletion.
         model.apply(
@@ -551,8 +577,8 @@ mod tests {
             parse_event(r#"{"type":"conversation_deleted","convId":"c"}"#),
             Instant::now(),
         );
-        assert_eq!(model.sidebar.rows(None)[1], Row::Conversation("a".into()));
-        assert_eq!(model.sidebar.rows(None).len(), 3);
+        assert_eq!(rows(&mut model)[3], conv("a", 0));
+        assert_eq!(rows(&mut model).len(), 6);
     }
 
     #[test]
@@ -570,7 +596,7 @@ mod tests {
         assert!(!model.sidebar.complete);
         model.apply(parse_event(&rest), Instant::now());
         assert!(model.sidebar.complete);
-        assert_eq!(model.sidebar.rows(None).len(), 2);
+        assert_eq!(rows(&mut model).len(), 2);
     }
 
     fn open(model: &mut Model, id: &str) -> String {
@@ -712,8 +738,8 @@ mod tests {
             parse_event(r#"{"type":"tools_available","providers":[{"id":"anthropic","label":"Anthropic","defaultModel":"o","models":[{"id":"claude-haiku-5-5","label":"Haiku","defaultEffort":"high","supportedEfforts":[{"effort":"low"}]}]}],"authByProvider":{"anthropic":true},"conversationDefaults":{"defaults":{"provider":"openai","model":"gpt","effort":"low"}}}"#),
             now,
         );
-        model.sidebar.path.push("f1".into());
-        model.handle(Action::Nav(Nav::NewConversation));
+        // A folder's "+": the new chat goes in it.
+        model.handle(Action::List(sidebar::Act::NewChatIn("f1".into())));
         assert_eq!(model.selection().model, "gpt");
         model.handle(Action::Ops(ops::Act::PickModel(
             "anthropic".into(),
@@ -1113,10 +1139,13 @@ mod tests {
         model.handle(Action::Nav(Nav::Back));
         assert_eq!(model.page, Page::Settings, "left of the list");
         model.handle(Action::Nav(Nav::CloseSettings));
-        model.handle(Action::List(sidebar::Act::OpenFolder("f1".into())));
+        model.handle(Action::List(sidebar::Act::Search));
+        model.handle(Action::List(sidebar::Act::Key(
+            crate::keys::KeyInput::Character('x'),
+        )));
         model.handle(Action::Nav(Nav::Back));
-        assert_eq!(model.page, Page::List, "up a folder first");
-        assert!(model.sidebar.path.is_empty());
+        assert_eq!(model.page, Page::List, "a search ends first");
+        assert!(model.sidebar.search.text.is_empty() && !model.sidebar.search.focused);
         open(&mut model, "c");
         assert!(model.ui.close_all, "leaving the list closes its menus");
         model.ui.close_all = false;
@@ -1127,6 +1156,9 @@ mod tests {
         model.handle(Action::List(sidebar::Act::Menu(crate::gfx::RectF::new(
             707.0, 0.0, 122.0, 122.0,
         ))));
-        assert_eq!(opened(&mut model), vec!["menu: Settings"]);
+        assert_eq!(
+            opened(&mut model),
+            vec!["menu: Next unread, Undo last deletion, Redo deletion, Settings"]
+        );
     }
 }

@@ -10,6 +10,7 @@ pub mod gesture;
 pub mod handoff;
 pub mod line;
 pub mod link;
+pub mod list;
 pub mod markdown;
 pub mod model;
 pub mod proto;

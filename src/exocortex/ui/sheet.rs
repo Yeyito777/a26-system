@@ -412,6 +412,10 @@ pub enum Tone {
     Plain,
     Accent,
     Warning,
+    /// Icon in the success colour (Next unread).
+    Success,
+    /// Icon in the muted colour (Settings, Copy id).
+    Muted,
     /// Destructive: icon and label in the error colour.
     Destructive,
 }
@@ -423,6 +427,8 @@ impl Tone {
             Tone::Plain => p.secondary_accent,
             Tone::Accent => p.accent,
             Tone::Warning => p.warning,
+            Tone::Success => p.success,
+            Tone::Muted => p.muted,
             Tone::Destructive => p.error,
         }
     }
