@@ -479,10 +479,10 @@ additions are the only shared edits.
 
 ### Things to know
 
-- `exocortex-notify` builds `markdown.rs`, `line.rs`, `handoff.rs` and
-  `proto/` into itself by path: they may use only each other and outside
-  crates, and the bridge matches `MdBlock` exhaustively (a new block kind
-  needs a line there).
+- `exocortex-notify` builds `markdown.rs`, `line.rs`, `handoff.rs`,
+  `proto/` and `list/activity.rs` into itself by path: they may use only
+  each other and outside crates, and the bridge matches `MdBlock`
+  exhaustively (a new block kind needs a line there).
 - `proto/chat.rs` is shared by C1 (images, file links, display blocks) and
   C2; extend structs with defaulted fields, never rename.
 - JetBrains Mono NL in five cuts (Regular, Medium, SemiBold, Bold, Italic)
@@ -504,9 +504,10 @@ The bridge connects to the daemon with `sidebar-state-patch` and
 first page holding only the conversations showing activity (which is how it
 learns what streams), and the rest of the list, which it skips unparsed.
 After that it only hears the broadcasts every client gets, and looks at no
-event but `conversation_updated`, `conversation_deleted`, the list and its
-own replies. It never subscribes: the daemon marks a conversation unread
-only when no client is subscribed.
+event but `conversation_updated`, `conversation_deleted`,
+`conversation_restored`, `conversation_unwound`, `sidebar_state_patched`,
+`queue_updated`, the list and its own replies. It never subscribes: the
+daemon marks a conversation unread only when no client is subscribed.
 
 It posts to `moon-notifyd` (`MOON_NOTIFY_SOCKET`, else
 `/run/moon-notify/notify.sock`; OSS-Phone-V1 `docs/notifications-protocol.md`):
@@ -535,6 +536,25 @@ and starts over. It sleeps in `poll(2)` between events (no timer runs while
 nothing streams and nothing waits), so it costs nothing while idle, and
 across Moon's screen-off and deep suspend (a warm reboot) it simply starts
 again with the session.
+
+### The icon's badge
+
+The bridge keeps the unread count on the Exocortex icon (Moon's `badge
+exocortex N`, OSS-Phone-V1 `docs/app-services.md`; 0 removes it): the
+conversations the list shows with a green dot, as the iPhone's badge counts
+them (`list/activity.rs`, built into the bridge by path: unread, not muted
+by itself, a folder above or `notificationsMuted`, no model work, neither
+streaming nor waiting on its provider, a long sleep or the global-idle
+queue; subagents count like any conversation). The first page holds every
+folder and every unread conversation, and `unread` changes only with a
+whole summary, so it keeps just the unread summaries, the folders and the
+queue. It sets the count once the first page has come and whenever it
+changes (about 30 ms after the daemon's event, measured in a sandbox),
+including while the app is closed or frozen; while Moon is absent or
+refuses it tries again after 5 s, 15 s, 1 min, 5 min, then every 15 min.
+Moon keeps the badge across its restarts and reboots, and the bridge keeps
+it while the daemon is away. The app does not set it: one writer, always
+running.
 
 ### Keeping the phone awake for a turn
 
@@ -580,7 +600,7 @@ soon as it is.
 | --- | --- | --- |
 | `EXOCORTEX_SOCKET` | `/opt/exocortex/config/runtime/exocortexd.sock` | both |
 | `EXOCORTEX_APP_STATE` | `/run/exocortex-app/view.json` | both |
-| `A26_SHELL_SOCKET` | `/run/a26-shell/control.sock` | both (Moon's state, keyboard, transitions, leases) |
+| `A26_SHELL_SOCKET` | `/run/a26-shell/control.sock` | both (Moon's state, keyboard, transitions, leases, the icon's badge) |
 | `MOON_NOTIFY_SOCKET` | `/run/moon-notify/notify.sock` | both |
 | `MOON_FONTS` | `/opt/a26-shell/share/fonts` | the app (fallback glyphs) |
 | `EXOCORTEX_APP_PROFILE` | unset | the app: logs each frame's draw and present time, and whether it was full or partial; when the list first shows, how long an open took to draw, event batches over 2 ms, and coming back to the front |
