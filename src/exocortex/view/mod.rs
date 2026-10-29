@@ -486,6 +486,29 @@ pub fn draw_chat_update(
         );
     }
     damage.rows = merged;
+    // Spinners and shimmers that turned: their own columns.
+    for (x0, y0, x1, y1) in
+        transcript::mark_areas(&old.transcript, &new.transcript, new.offset, (top, bottom))
+    {
+        for rows in transcript::subtract_rows((y0, y1), &damage.rows) {
+            let outer = canvas.clip();
+            canvas.set_clip(x0.max(0), outer.1, x1.min(canvas.width), outer.3);
+            transcript::draw_band(
+                canvas,
+                model,
+                view,
+                new.pressed.as_ref(),
+                rows,
+                0,
+                new.offset,
+                now,
+            );
+            canvas.set_clip(outer.0, outer.1, outer.2, outer.3);
+            damage
+                .areas
+                .push((x0.max(0), rows.0, x1.min(canvas.width), rows.1));
+        }
+    }
     // Fold marks that changed in place: their column.
     let marks =
         transcript::gutter_damage(&old.transcript, &new.transcript, new.offset, (top, bottom));

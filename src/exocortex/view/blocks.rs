@@ -97,6 +97,23 @@ pub(crate) enum MarkKind {
     Status(StatusKind),
 }
 
+impl Mark {
+    /// The columns it draws in, when it keeps to a few (a spinner, a
+    /// shimmering label): a frame draws it again there alone.
+    pub(crate) fn columns(&self) -> Option<(f32, f32)> {
+        match &self.kind {
+            MarkKind::Spinner { cx, size, .. } => {
+                Some((cx - size / 2.0 - 3.0, cx + size / 2.0 + 3.0))
+            }
+            MarkKind::Shimmer { x, text, ty, .. } => {
+                let w = widgets::measure(text, *ty);
+                Some((x - (w * 0.3).max(40.0) - 2.0, x + w + 2.0))
+            }
+            MarkKind::LiveFooter { .. } | MarkKind::Status(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusKind {
     Compaction,

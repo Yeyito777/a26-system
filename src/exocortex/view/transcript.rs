@@ -2240,7 +2240,9 @@ pub fn requests(model: &mut Model, view: &mut ViewState, height: f32, now: Insta
 /// screen (content rows and what they show) and the jump button's fade.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TranscriptFrame {
-    marks: Vec<(i32, i32, u64)>,
+    /// Marks on screen: their rows, what they show, the columns they keep
+    /// to (none: all).
+    marks: Vec<(i32, i32, u64, Option<(i32, i32)>)>,
     /// Fold marks on screen: their rows and how they show (closed, open,
     /// pressed), and the content rows on screen.
     gutters: Vec<(i32, i32, u8)>,
@@ -2269,7 +2271,8 @@ pub(crate) fn jump_columns() -> i32 {
 /// The jump button's opacity at `now`, 0..=32.
 fn jump_alpha(view: &ViewState, now: Instant) -> u32 {
     match &view.transcript.jump {
-        Some((_, tween)) => (tween.value(now).clamp(0.0, 1.0) * 32.0).round() as u32,
+        // Eight steps: each is the button's rows drawn again.
+        Some((_, tween)) => (tween.value(now).clamp(0.0, 1.0) * 8.0).round() as u32 * 4,
         None => 0,
     }
 }
@@ -2337,6 +2340,9 @@ pub(crate) fn frame(
                 y0.floor() as i32,
                 y1.ceil() as i32,
                 mark_key(&m.mark, model, now),
+                m.mark
+                    .columns()
+                    .map(|(x0, x1)| (x0.floor() as i32, x1.ceil() as i32)),
             )
         })
         .collect();
@@ -2375,6 +2381,35 @@ pub(crate) fn mark_damage(
     offset: f32,
     (top, bottom): (i32, i32),
 ) -> Vec<(i32, i32)> {
+    mark_changes(old, new, offset, (top, bottom))
+        .into_iter()
+        .filter(|(_, columns)| columns.is_none())
+        .map(|(rows, _)| rows)
+        .collect()
+}
+
+/// Areas (`x0, y0, x1, y1`, on screen) of marks that keep to their own
+/// columns (a spinner, a shimmer) to draw again: theirs alone.
+pub(crate) fn mark_areas(
+    old: &TranscriptFrame,
+    new: &TranscriptFrame,
+    offset: f32,
+    (top, bottom): (i32, i32),
+) -> Vec<(i32, i32, i32, i32)> {
+    mark_changes(old, new, offset, (top, bottom))
+        .into_iter()
+        .filter_map(|((y0, y1), columns)| columns.map(|(x0, x1)| (x0, y0, x1, y1)))
+        .collect()
+}
+
+/// Marks whose key changed, where they were and where they are: their
+/// rows on screen and their columns.
+fn mark_changes(
+    old: &TranscriptFrame,
+    new: &TranscriptFrame,
+    offset: f32,
+    (top, bottom): (i32, i32),
+) -> Vec<((i32, i32), Option<(i32, i32)>)> {
     let screen = |(y0, y1): (i32, i32)| {
         let base = chat_top() - offset;
         (
@@ -2382,19 +2417,19 @@ pub(crate) fn mark_damage(
             ((base + y1 as f32).ceil() as i32).min(bottom),
         )
     };
-    let mut rows = Vec::new();
-    for (y0, y1, key) in &new.marks {
-        if !old.marks.contains(&(*y0, *y1, *key)) {
-            rows.push(screen((*y0, *y1)));
+    let mut out = Vec::new();
+    for mark in &new.marks {
+        if !old.marks.contains(mark) {
+            out.push((screen((mark.0, mark.1)), mark.3));
         }
     }
-    for (y0, y1, key) in &old.marks {
-        if !new.marks.contains(&(*y0, *y1, *key)) {
-            rows.push(screen((*y0, *y1)));
+    for mark in &old.marks {
+        if !new.marks.contains(mark) {
+            out.push((screen((mark.0, mark.1)), mark.3));
         }
     }
-    rows.retain(|(y0, y1)| y1 > y0);
-    rows
+    out.retain(|((y0, y1), _)| y1 > y0);
+    out
 }
 
 /// Rows (on screen) of the fold marks' column to draw again: marks that
@@ -3392,8 +3427,13 @@ mod tests {
             let at = t0 + Duration::from_millis(step * 100);
             let damage = update(&mut model, &mut view, (t0, at), |_, _| {});
             assert!(
-                rows(&damage) <= 2 * (28 + 4) + 2 * 40 + 4,
-                "spinner and clock only: {damage:?}"
+                rows(&damage) <= 2 * 40 + 4,
+                "the clock's rows only: {damage:?}"
+            );
+            // The spinners (the call's, WORKING's) in their own columns.
+            assert!(
+                damage.areas.iter().all(|(x0, _, x1, _)| x1 - x0 <= 28 + 8),
+                "{damage:?}"
             );
         }
         // Its result: the row keeps its height; the spinner goes.
