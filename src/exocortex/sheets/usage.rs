@@ -38,6 +38,8 @@ pub struct Link {
     /// When the current connection came up, and its last pong (ms).
     pub since: Option<u64>,
     pub last_pong: Option<u64>,
+    /// The last ping's round trip (ms).
+    pub rtt_ms: Option<u64>,
     /// `daemon_shutdown`'s mode, until the connection drops.
     pub shutdown: Option<String>,
     /// The daemon's network monitor: online, offline since (ms).
@@ -264,6 +266,7 @@ impl Model {
             link.drops += 1;
         }
         link.last_pong = None;
+        link.rtt_ms = None;
         self.ops.usage.watching = false;
         self.ops.usage.accounts_request = None;
         self.ops.usage.tokens_request = None;
@@ -752,10 +755,8 @@ pub fn connection_state(model: &Model) -> (&'static str, u32) {
         ("Connected", p.success)
     } else if model.connected {
         ("Syncing…", p.warning)
-    } else if model.was_connected {
-        ("Reconnecting…", p.warning)
     } else {
-        ("Connecting…", p.warning)
+        (model.link_status(), p.warning)
     }
 }
 
@@ -777,20 +778,30 @@ pub fn connection_rows(model: &Model, detailed: bool) -> Vec<Row> {
             p.warning,
         ));
     }
-    let mut rows = vec![Row::Rail { color, lines: card }];
+    let mut rows = vec![Row::Status {
+        color,
+        lines: card,
+        right: link
+            .rtt_ms
+            .filter(|_| model.ready)
+            .map(|ms| format!("{ms} ms")),
+    }];
     if let Some(since) = link.since {
         let at = clock::format_due_time(since as f64, now_ms() as f64);
-        rows.push(panel::kv(
-            "Up since",
-            if detailed {
+        rows.push(if detailed {
+            panel::kv(
+                "Up since",
                 format!(
                     "{at} ({})",
                     clock::format_task_elapsed(since as f64, now_ms() as f64)
-                )
-            } else {
-                at
-            },
-        ));
+                ),
+            )
+        } else {
+            Row::Field {
+                label: "Daemon session".into(),
+                value: format!("up since {at}"),
+            }
+        });
     }
     if detailed {
         rows.push(panel::kv("Socket", socket));

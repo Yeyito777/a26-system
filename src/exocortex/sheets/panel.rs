@@ -148,6 +148,25 @@ pub enum Row {
     },
     /// A rule between blocks (between providers' usage, `real-08`).
     Rule,
+    /// The connection card (`real-09-settings-2`): a rail and a dot in the
+    /// state's colour, the state and its details, a note on the right (the
+    /// round trip).
+    Status {
+        color: Rgb,
+        lines: Vec<(String, Style, Rgb)>,
+        right: Option<String>,
+    },
+    /// A muted eyebrow over its value (Settings' "SSH SESSION / up since …").
+    Field {
+        label: String,
+        value: String,
+    },
+    /// A plain action: its label in the accent, the row its target
+    /// (Settings' "Clear cached chats").
+    Action {
+        label: String,
+        tap: Tap,
+    },
     /// A 3 pt bar filled to `permille`.
     Bar {
         permille: u16,
@@ -173,6 +192,18 @@ const RULE_AT: f32 = 44.0;
 const RULE_ROW: f32 = 76.0;
 /// Between a lead's title and its note.
 const LEAD_GAP: f32 = 24.0;
+/// The connection card's dot centre and its text, from the card's left.
+const STATUS_DOT_X: f32 = 79.0;
+const STATUS_X: f32 = 142.0;
+/// A field's padding above and below.
+const FIELD_PAD: f32 = 18.0;
+
+/// The room a status card's right note takes.
+fn status_note_w(right: Option<&str>) -> f32 {
+    right.map_or(0.0, |note| {
+        widgets::measure(note, Style::Caption.ty()) + 34.0
+    })
+}
 
 /// Whether a pair's two texts fit on one line.
 fn pair_fits(left: &str, right: &str, style: Style, width: f32) -> bool {
@@ -336,6 +367,32 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
         }
         Row::Lead { style, .. } => style.ty().line() + 8.0,
         Row::Rule => RULE_ROW,
+        Row::Status {
+            lines: items,
+            right,
+            ..
+        } => {
+            let inner = width - STATUS_X - RAIL_PAD.1 - status_note_w(right.as_deref());
+            parts = items
+                .iter()
+                .map(|(text, style, _)| wrap(text, style.ty(), inner))
+                .collect();
+            let text_h: f32 = parts
+                .iter()
+                .zip(items)
+                .map(|(p, (_, style, _))| p.len() as f32 * style.ty().line())
+                .sum();
+            2.0 * RAIL_PAD.0 + text_h
+        }
+        Row::Field { value, .. } => {
+            lines = wrap(value, Style::Body.ty(), width);
+            FIELD_PAD
+                + theme::T_EYEBROW.line()
+                + 6.0
+                + lines.len() as f32 * Style::Body.ty().line()
+                + FIELD_PAD
+        }
+        Row::Action { .. } => theme::grown(TARGET, 60.0),
         Row::Bar { .. } => BAR + 14.0,
         Row::Gap(px) => *px as f32,
         Row::Hit { preview, .. } => {
@@ -492,7 +549,7 @@ pub fn targets(laid: &Laid, width: f32) -> Vec<(RectF, Tap)> {
                         }
                     }
                 }
-                Row::Hit { tap, .. } => {
+                Row::Hit { tap, .. } | Row::Action { tap, .. } => {
                     targets.push((RectF::new(0.0, top, width, laid.height), tap.clone()));
                 }
                 Row::Task { tap, more, .. } => {
@@ -841,6 +898,62 @@ pub fn draw_row(
         }
         Row::Rule => {
             widgets::hairline(canvas, x, right, y + RULE_AT, c.rule_settings);
+        }
+        Row::Status {
+            color,
+            lines,
+            right: note,
+        } => {
+            let rect = RectF::new(x, y, width, laid.height);
+            widgets::fill(canvas, rect, theme::mix(*color, 4, background));
+            widgets::fill(canvas, RectF::new(x, y, RAIL, laid.height), *color);
+            let cy = y + laid.height / 2.0;
+            canvas.fill_circle(x + STATUS_DOT_X, cy, 8.0, *color, 1.0);
+            let mut ty_top = y + RAIL_PAD.0;
+            for ((_, style, color), parts) in lines.iter().zip(&laid.parts) {
+                let ty = style.ty();
+                for part in parts {
+                    widgets::text(
+                        canvas,
+                        part,
+                        x + STATUS_X,
+                        ty.baseline(ty_top),
+                        ty,
+                        *color,
+                        1.0,
+                    );
+                    ty_top += ty.line();
+                }
+            }
+            if let Some(note) = note {
+                let ty = Style::Caption.ty();
+                let baseline = ty.baseline(cy - ty.line() / 2.0);
+                widgets::text_right(canvas, note, right - RAIL_PAD.1, baseline, ty, p.muted, 1.0);
+            }
+        }
+        Row::Field { label, .. } => {
+            let eyebrow = theme::T_EYEBROW;
+            widgets::eyebrow(canvas, label, x, eyebrow.baseline(y + FIELD_PAD), p.muted);
+            let body = Style::Body.ty();
+            let top = y + FIELD_PAD + eyebrow.line() + 6.0;
+            for (index, line) in laid.lines.iter().enumerate() {
+                let baseline = body.baseline(top + index as f32 * body.line());
+                widgets::text(canvas, line, x, baseline, body, p.text, 1.0);
+            }
+        }
+        Row::Action { label, tap } => {
+            if down(tap) {
+                widgets::fill(
+                    canvas,
+                    RectF::new(0.0, y, W, laid.height - HAIRLINE),
+                    p.selection_background,
+                );
+            }
+            let body = Style::Body.ty();
+            let baseline = body.baseline(y + (laid.height - body.line()) / 2.0);
+            let label = widgets::fit(label, body, width);
+            widgets::text(canvas, &label, x, baseline, body, p.accent, 1.0);
+            widgets::hairline(canvas, x, right, y + laid.height - HAIRLINE, row_rule);
         }
         Row::Bar { permille, color } => {
             let track = RectF::new(x, y + 14.0, width, BAR);

@@ -316,11 +316,10 @@ fn build_rows(model: &Model, now: Instant) -> Vec<(f32, Row)> {
             p.error,
         )));
     }
-    list.push(panel_row(panel::Row::Buttons(vec![panel::Btn::new(
-        "Clear cached chats",
-        panel::Kind::Secondary,
-        Some(panel::Tap::Stay(Action::Ops(ops::Act::ClearCache))),
-    )])));
+    list.push(panel_row(panel::Row::Action {
+        label: "Clear cached chats".into(),
+        tap: panel::Tap::Stay(Action::Ops(ops::Act::ClearCache)),
+    }));
     list.push(Row::End);
     list.push(Row::Section("About"));
     for (key, value) in [
@@ -329,7 +328,10 @@ fn build_rows(model: &Model, now: Instant) -> Vec<(f32, Row)> {
         ("Daemon", proto::socket_path().display().to_string()),
         ("Device", "Samsung Galaxy A26 · Moon".to_owned()),
     ] {
-        list.push(panel_row(panel::kv(key, value)));
+        list.push(panel_row(panel::Row::Field {
+            label: key.into(),
+            value,
+        }));
     }
     list.push(note_row(
         "The app updates with a26-system; Exocortex itself updates on the daemon's side.",

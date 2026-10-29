@@ -455,6 +455,12 @@ impl Model {
                 .map(|pending| (id.to_owned(), pending))
         });
         let mut commands = Vec::new();
+        // A pong for a ping of ours: the daemon's round trip (Settings'
+        // connection card, as the iPhone's "12 ms").
+        if let (Event::Pong { .. }, Some((_, pending))) = (&event, &settled) {
+            let rtt = now.saturating_duration_since(pending.sent);
+            self.ops.usage.link.rtt_ms = Some(rtt.as_millis() as u64);
+        }
         match &event {
             Event::Pong { req_id, .. } if req_id.is_some() && *req_id == self.ping => {
                 self.ready = true;
