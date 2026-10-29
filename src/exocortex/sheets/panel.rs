@@ -538,7 +538,7 @@ impl Panel {
             Panel::SystemPrompt(conv) => super::system::build(model, conv.as_deref()),
             Panel::Btw(conv) => super::btw::build(model, conv),
             Panel::Connection => super::usage::connection(model, now),
-            Panel::Tokens => super::usage::tokens(model),
+            Panel::Tokens => super::usage::tokens(model, now),
             Panel::Find(conv) => super::find::build(model, conv),
         }
     }

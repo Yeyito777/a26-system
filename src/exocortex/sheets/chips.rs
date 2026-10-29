@@ -24,6 +24,7 @@ use super::super::theme::{self, T_CAPTION, T_EYEBROW, T_META, W};
 use super::super::ui::layer::{Layer, Sprite};
 use super::super::ui::overlay::{Body, Cx, Overlay, Response};
 use super::super::ui::widgets;
+use super::clock;
 use super::usage;
 
 /// A chip's target and its face inside it.
@@ -102,8 +103,8 @@ fn bold_caption() -> theme::Type {
     T_CAPTION.weight(Weight::MonoBold)
 }
 
-/// The chips the open chat shows now, left to right.
-fn chips(model: &Model) -> Vec<Chip> {
+/// The chips the open chat shows at `now`, left to right.
+fn chips(model: &Model, now: Instant) -> Vec<Chip> {
     let mut chips = Vec::new();
     let Some(conv) = model
         .chat
@@ -114,7 +115,9 @@ fn chips(model: &Model) -> Vec<Chip> {
         return chips;
     };
     let provider = model.resolve().provider;
-    if let Some((five, week)) = usage::compact(model.usage_of(&provider)) {
+    if let Some((five, week)) =
+        usage::compact(model.usage_of(&provider), clock::wall_ms(model, now))
+    {
         let low = five.unwrap_or(100.0).min(week.unwrap_or(100.0));
         if low <= 20.0 {
             chips.push(Chip::Usage {
@@ -353,7 +356,7 @@ impl Overlay for ChatChips {
     }
 
     fn layout(&mut self, cx: &Cx) {
-        let chips = chips(cx.model);
+        let chips = chips(cx.model, cx.now);
         // Placed (text measured) only when they change.
         let generation = theme::generation();
         if self.placed != generation || !self.shown.iter().map(|(_, c)| c).eq(chips.iter()) {
@@ -454,9 +457,9 @@ mod tests {
             parse_event(r#"{"type":"usage_update","provider":"anthropic","usage":{"fiveHour":{"utilization":90,"resetsAt":null},"sevenDay":{"utilization":50,"resetsAt":null}}}"#),
             now,
         );
-        assert!(chips(&model).is_empty(), "on the list");
+        assert!(chips(&model, now).is_empty(), "on the list");
         model.handle(Action::Nav(Nav::OpenConversation("c".into())));
-        let shown = chips(&model);
+        let shown = chips(&model, now);
         assert!(matches!(&shown[0], Chip::Usage { low: 10, .. }));
         assert!(matches!(&shown[1], Chip::Tasks { count: 1, .. }));
         let mut stack = OverlayStack::default();
@@ -472,7 +475,7 @@ mod tests {
         let (_, floating) = stack.bodies(&cx);
         assert!(floating[0].1.rows.1 > 0);
         // A tap on the tasks chip opens the panel.
-        let tasks = ChatChips::place(chips(&model))[1].0;
+        let tasks = ChatChips::place(chips(&model, now))[1].0;
         let tap = Gesture::Tap {
             x: tasks.x + 10.0,
             y: tasks.y + 10.0,
@@ -648,7 +651,7 @@ mod tests {
         {
             // The chips drawn once, and blended again over a moved page.
             let overlay = ChatChips {
-                shown: ChatChips::place(super::chips(&model)),
+                shown: ChatChips::place(super::chips(&model, now)),
                 ..ChatChips::default()
             };
             let t = Instant::now();

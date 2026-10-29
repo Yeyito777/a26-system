@@ -132,13 +132,12 @@ pub fn window_view(title: &'static str, w: &UsageWindow, capacity: f64, now: f64
 }
 
 /// The 5-hour and weekly remaining shares, for the chat menu's line.
-pub fn compact(usage: Option<&Usage>) -> Option<(Option<f64>, Option<f64>)> {
+pub fn compact(usage: Option<&Usage>, now: f64) -> Option<(Option<f64>, Option<f64>)> {
     let usage = usage?;
     if usage.five_hour.is_none() && usage.seven_day.is_none() {
         return None;
     }
     let capacity = usage.capacity.filter(|c| *c > 0.0).unwrap_or(100.0);
-    let now = now_ms() as f64;
     let share = |w: &Option<UsageWindow>| {
         w.as_ref()
             .map(|w| window_view("5-hour", w, capacity, now).fraction)
@@ -276,7 +275,7 @@ impl Model {
 /// The usage rows (the Usage panel and Settings).
 pub fn usage_rows(model: &Model, with_links: bool, now: Instant) -> Vec<Row> {
     let p = theme::p();
-    let now_ms = now_ms() as f64;
+    let now_ms = clock::wall_ms(model, now);
     let mut rows = Vec::new();
     let waiting: Vec<_> = model
         .sidebar
@@ -451,7 +450,7 @@ fn cost(t: &Value) -> f64 {
 }
 
 /// The Token statistics panel (PAR-295, without the heatmap).
-pub fn tokens(model: &Model) -> Built {
+pub fn tokens(model: &Model, now: Instant) -> Built {
     let p = theme::p();
     let mut rows = Vec::new();
     match &model.ops.usage.tokens {
@@ -473,7 +472,7 @@ pub fn tokens(model: &Model) -> Built {
                 stats["days"].as_array().map_or(0, Vec::len).to_string(),
             ));
             rows.push(panel::section("Daily · last 26 weeks"));
-            rows.push(Row::Heat(heatmap(stats, now_ms() as f64)));
+            rows.push(Row::Heat(heatmap(stats, clock::wall_ms(model, now))));
             for (title, key) in [
                 ("Models", "byModel"),
                 ("Providers", "byProvider"),
@@ -623,9 +622,9 @@ fn near_limit(account: &ClaudeAccount, floors: (f64, f64), now: f64) -> Option<&
 }
 
 /// The Accounts panel (PAR-288–291, the TUI's accounts screen).
-pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
+pub fn accounts(model: &Model, _conv: Option<&str>, now: Instant) -> Built {
     let p = theme::p();
-    let now = now_ms() as f64;
+    let now = clock::wall_ms(model, now);
     let mut rows = Vec::new();
     let Some(snapshot) = &model.ops.usage.accounts else {
         rows.push(panel::note(if model.ready {
@@ -821,7 +820,8 @@ pub fn connection_state(model: &Model) -> (&'static str, u32) {
 }
 
 /// The connection rows (Settings → Connection and the diagnostics panel).
-pub fn connection_rows(model: &Model, detailed: bool) -> Vec<Row> {
+pub fn connection_rows(model: &Model, detailed: bool, now: Instant) -> Vec<Row> {
+    let now_ms = clock::wall_ms(model, now);
     let p = theme::p();
     let link = &model.ops.usage.link;
     let (label, color) = connection_state(model);
@@ -847,13 +847,13 @@ pub fn connection_rows(model: &Model, detailed: bool) -> Vec<Row> {
             .map(|ms| format!("{ms} ms")),
     }];
     if let Some(since) = link.since {
-        let at = clock::format_due_time(since as f64, now_ms() as f64);
+        let at = clock::format_due_time(since as f64, now_ms);
         rows.push(if detailed {
             panel::kv(
                 "Up since",
                 format!(
                     "{at} ({})",
-                    clock::format_task_elapsed(since as f64, now_ms() as f64)
+                    clock::format_task_elapsed(since as f64, now_ms)
                 ),
             )
         } else {
@@ -869,7 +869,7 @@ pub fn connection_rows(model: &Model, detailed: bool) -> Vec<Row> {
             "Last pong",
             link.last_pong.map_or_else(
                 || "—".into(),
-                |at| clock::format_due_time(at as f64, now_ms() as f64),
+                |at| clock::format_due_time(at as f64, now_ms),
             ),
         ));
         rows.push(panel::kv("Connections", link.connects.to_string()));
@@ -879,10 +879,7 @@ pub fn connection_rows(model: &Model, detailed: bool) -> Vec<Row> {
             match link.online {
                 Some(true) => "online".into(),
                 Some(false) => match link.offline_since {
-                    Some(at) => format!(
-                        "offline since {}",
-                        clock::format_due_time(at, now_ms() as f64)
-                    ),
+                    Some(at) => format!("offline since {}", clock::format_due_time(at, now_ms)),
                     None => "offline".into(),
                 },
                 None => "unknown".into(),
@@ -913,7 +910,7 @@ pub fn connection_rows(model: &Model, detailed: bool) -> Vec<Row> {
 pub fn connection(model: &Model, now: Instant) -> Built {
     Built {
         title: "Connection".into(),
-        rows: connection_rows(model, true),
+        rows: connection_rows(model, true, now),
         wake: Some(now + std::time::Duration::from_secs(1)),
     }
 }
