@@ -34,11 +34,13 @@ const GAP: f32 = 14.0;
 /// The usage chip's bars.
 const BAR_W: f32 = 78.0;
 const BAR_H: f32 = 8.0;
-/// The shadow's blur and its drop: compact, as the jump button's (the
-/// iPhone's 14 pt blur barely shows on the dark themes, and every row and
-/// column it reaches is drawn and sent again on every frame of a scroll).
-const SHADOW: f32 = 14.0;
-const SHADOW_DY: f32 = 5.0;
+/// The shadow's blur and its drop: none. The iPhone's (`0 4px 14px` of 35 %
+/// black) barely shows on the dark themes, and every pixel it reaches is
+/// blended again over the page in every frame of a scroll (+3 % of EXO's
+/// scroll frame even at the jump button's compact 14 px); the face's
+/// border sets the chips off.
+const SHADOW: f32 = 0.0;
+const SHADOW_DY: f32 = 0.0;
 
 /// What a chip shows.
 #[derive(Debug, Clone, PartialEq, Hash)]
@@ -644,44 +646,42 @@ mod tests {
             now,
         );
         {
-            let t = Instant::now();
-            for _ in 0..400 {
-                std::hint::black_box(super::chips(&model));
-            }
-            println!("chips(): {:.1} µs", t.elapsed().as_secs_f64() * 1e6 / 400.0);
+            // The chips drawn once, and blended again over a moved page.
             let overlay = ChatChips {
                 shown: ChatChips::place(super::chips(&model)),
                 ..ChatChips::default()
             };
             let t = Instant::now();
-            for _ in 0..400 {
-                std::hint::black_box(overlay.look());
+            for _ in 0..100 {
+                overlay.sprite.replace(None);
+                std::hint::black_box(overlay.sprite());
             }
-            println!("look(): {:.1} µs", t.elapsed().as_secs_f64() * 1e6 / 400.0);
-            let t = Instant::now();
-            for _ in 0..400 {
-                std::hint::black_box(ChatChips::place(super::chips(&model)));
-            }
-            println!(
-                "place(chips()): {:.1} µs",
-                t.elapsed().as_secs_f64() * 1e6 / 400.0
-            );
-            let mut canvas = Canvas::new(SIZE.0, SIZE.1);
-            overlay.layer.paint(&mut canvas, &overlay.sprite().unwrap());
+            println!("drawn: {:.1} µs", t.elapsed().as_secs_f64() * 1e6 / 100.0);
             let sprite = overlay.sprite().unwrap();
+            let mut canvas = Canvas::new(SIZE.0, SIZE.1);
+            overlay.layer.paint(&mut canvas, &sprite);
             let t = Instant::now();
             for n in 0..400 {
-                let dy = if n % 2 == 0 { 23 } else { -23 };
+                let dy: i32 = if n % 2 == 0 { 23 } else { -23 };
+                // The strip the move uncovered.
+                let rows = [if dy > 0 {
+                    (100, 100 + dy)
+                } else {
+                    (1900 + dy, 1900)
+                }];
                 std::hint::black_box(overlay.layer.repaint(
                     &mut canvas,
                     &sprite,
-                    Some((250, 1900, dy)),
-                    &[],
+                    Some((100, 1900, dy)),
+                    &rows,
                     &[],
                 ));
             }
-            println!("repaint: {:.1} µs", t.elapsed().as_secs_f64() * 1e6 / 400.0);
-            println!("sprite: {}", sprite.stats());
+            println!(
+                "repainted: {:.1} µs; {}",
+                t.elapsed().as_secs_f64() * 1e6 / 400.0,
+                sprite.stats()
+            );
         }
         for chips in [false, true, false, true] {
             let mut view = ViewState::new();

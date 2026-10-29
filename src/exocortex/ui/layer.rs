@@ -31,8 +31,9 @@ pub struct Sprite {
     keep: Vec<u32>,
     /// Each row's runs of one kind: `x0, x1` (relative), kind.
     runs: Vec<Vec<(i32, i32, Kind)>>,
-    /// A hash of each row (two equal rows look the same over the same page).
-    rows: Vec<u64>,
+    /// Each row's class: rows of one class are alike and adjacent (alike
+    /// rows look the same over the same page).
+    rows: Vec<u32>,
 }
 
 impl Sprite {
@@ -46,22 +47,28 @@ impl Sprite {
         white.clear(0xff_ffff);
         draw(&mut black, rect.0 as f32, rect.1 as f32);
         draw(&mut white, rect.0 as f32, rect.1 as f32);
-        let mut keep = Vec::with_capacity(black.pixels.len());
-        for (&b, &wt) in black.pixels.iter().zip(&white.pixels) {
-            let channel = |shift: u32| ((wt >> shift) & 0xff).saturating_sub((b >> shift) & 0xff);
-            let shows = channel(16).min(channel(8)).min(channel(0));
-            // Floor, so a blend never carries into the next channel.
-            keep.push(shows * 256 / 255);
-        }
-        let mut runs = Vec::with_capacity(h as usize);
-        for y in 0..h as usize {
+        let (w, h) = (w as usize, h as usize);
+        let mut keep = vec![256u32; w * h];
+        let mut runs = Vec::with_capacity(h);
+        let mut rows = Vec::with_capacity(h);
+        for y in 0..h {
+            let at = y * w;
+            let (base, over) = (&black.pixels[at..at + w], &white.pixels[at..at + w]);
+            let keep = &mut keep[at..at + w];
             let mut row: Vec<(i32, i32, Kind)> = Vec::new();
-            for x in 0..w as usize {
-                let i = y * w as usize + x;
-                let kind = match (keep[i], black.pixels[i]) {
-                    (256, 0) => Kind::Clear,
-                    (0, _) => Kind::Solid,
-                    _ => Kind::Blend,
+            for x in 0..w {
+                let (b, wt) = (base[x], over[x]);
+                let kind = if b == wt {
+                    keep[x] = 0;
+                    Kind::Solid
+                } else if b == 0 && wt == 0xff_ffff {
+                    Kind::Clear
+                } else {
+                    let channel =
+                        |shift: u32| ((wt >> shift) & 0xff).saturating_sub((b >> shift) & 0xff);
+                    // Floor, so a blend never carries into the next channel.
+                    keep[x] = channel(16).min(channel(8)).min(channel(0)) * 256 / 255;
+                    Kind::Blend
                 };
                 match row.last_mut() {
                     Some(last) if last.2 == kind => last.1 += 1,
@@ -70,17 +77,16 @@ impl Sprite {
             }
             runs.push(row);
         }
-        let rows = (0..h as usize)
-            .map(|y| {
-                let at = y * w as usize..(y + 1) * w as usize;
-                black.pixels[at.clone()]
-                    .iter()
-                    .chain(&keep[at])
-                    .fold(0xcbf2_9ce4_8422_2325_u64, |hash, v| {
-                        (hash ^ u64::from(*v)).wrapping_mul(0x0100_0000_01b3)
-                    })
-            })
-            .collect();
+        for y in 0..h {
+            let alike = y > 0 && {
+                let (a, b) = ((y - 1) * w..y * w, y * w..(y + 1) * w);
+                black.pixels[a.clone()] == black.pixels[b.clone()] && keep[a] == keep[b]
+            };
+            let class = rows
+                .last()
+                .map_or(0, |&c: &u32| if alike { c } else { c + 1 });
+            rows.push(class);
+        }
         Self {
             rect,
             base: black.pixels,
@@ -101,12 +107,8 @@ impl Sprite {
                 count[kind as usize] += b - a;
             }
         }
-        let faint: Vec<usize> = [240, 248, 250, 252, 254]
-            .iter()
-            .map(|t| self.keep.iter().filter(|k| **k >= *t && **k < 256).count())
-            .collect();
         format!(
-            "{:?}: clear {}, solid {}, blend {}, {runs} runs; keep >= 240/248/250/252/254: {faint:?}",
+            "{:?}: clear {}, solid {}, blend {}, {runs} runs",
             self.rect, count[0], count[1], count[2]
         )
     }
