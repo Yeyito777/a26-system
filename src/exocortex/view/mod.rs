@@ -665,6 +665,16 @@ pub fn long_press(
 ) -> Option<Action> {
     match model.page {
         Page::List => list::long_press(model, view, height, x, y, now),
+        Page::Chat => composer::long_press(model, height, view.keyboard, x, y),
+        Page::Settings => None,
+    }
+}
+
+/// After a long press, the finger moving to (`x`, `y`): what that does
+/// (the composer's selection follows it), if anything.
+pub fn long_press_move(model: &Model, view: &ViewState, height: f32, x: f32, y: f32) -> Option<Action> {
+    match model.page {
+        Page::Chat => composer::long_press_move(model, height, view.keyboard, x, y),
         _ => None,
     }
 }
@@ -885,7 +895,10 @@ mod tests {
                 (geometry.island.y + 20.0) as i16,
                 now
             ),
-            Some(Hit::Composer)
+            Some(Hit::Action(Action::Composer(composer_act::Act::Place {
+                index: 0,
+                focused: false
+            })))
         );
         model.composer.text = "x".into();
         assert_eq!(

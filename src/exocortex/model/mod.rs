@@ -98,6 +98,8 @@ pub enum Effect {
     OpenUrl(String),
     ShowKeyboard(KeyboardPurpose),
     HideKeyboard,
+    /// Paste the clipboard into the composer (`Model::paste_text`).
+    Paste,
 }
 
 /// What the model asks of the interface: overlays to open or close and
@@ -277,6 +279,7 @@ impl Model {
         self.offline = self.quiet_until.is_none();
         // Nothing in flight will be answered.
         self.requests.clear();
+        self.composer_disconnected();
         self.chat_disconnected(self.quiet_until.is_some());
     }
 
@@ -296,7 +299,7 @@ impl Model {
         let offline = !self.connected && self.quiet_until.is_none_or(|until| now >= until);
         let changed = offline != self.offline;
         self.offline = offline;
-        changed
+        self.composer_tick(now) || changed
     }
 
     pub fn handle(&mut self, action: Action) -> Vec<Value> {
@@ -473,7 +476,11 @@ impl Model {
 
     /// When `expire` next has something to do.
     pub fn answer_deadline(&self) -> Option<Instant> {
-        self.requests.deadline()
+        let drafts = self.composer_deadline();
+        match (self.requests.deadline(), drafts) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// A request of an area that did not handle its timeout itself: say so
@@ -1051,8 +1058,13 @@ mod tests {
             now,
         );
         assert!(model.ready);
+        // A running turn: Send asks when the message joins it.
+        assert!(model.handle(Action::Composer(composer::Act::Send)).is_empty());
+        assert_eq!(opened(&mut model), vec!["Deliver message"]);
         assert_eq!(
-            model.handle(Action::Composer(composer::Act::Send))[0]["type"],
+            model.handle(Action::Composer(composer::Act::Deliver(
+                composer::Timing::MessageEnd
+            )))[0]["type"],
             "queue_message",
             "a running turn: queued"
         );
