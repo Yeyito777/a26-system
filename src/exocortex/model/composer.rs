@@ -170,6 +170,8 @@ impl Model {
                 if let Some(folder) = self.current_folder() {
                     command["folderId"] = Value::String(folder.to_owned());
                 }
+                // Only the draft's explicit model overrides (E, PAR-277).
+                self.new_conversation_fields(&mut command);
                 self.chat = Chat {
                     id: Some(id),
                     loaded: true,

@@ -1,122 +1,256 @@
-//! The model sheet (WP-E's inspector to be, PAR-275): the conversation's
-//! effort as a segmented control, then the models of every signed-in
-//! provider, the current one checked. Tapping one sets it (or, for a new
-//! conversation, chooses it).
+//! The model inspector (WP-E; PAR-276–281, `real-05-model-sheet`,
+//! `fake-12-model-inspector`): opened from the chat title or the new
+//! chat's model box. GENERATION: Provider, Model and Effort pickers (each
+//! opens its choices as an action list) and Speed as a segmented control,
+//! then "Apply configuration" (a conversation) or "Use for this draft".
+//! DAEMON DEFAULTS shows the daemon's snapshot; ACTIVITY the connection
+//! and the context.
+//!
+//! The form is the model's (`ops::Form`), so the pickers' choices, made in
+//! a sheet over this one, land in it.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::gfx::{Canvas, RectF};
+use crate::text::Weight;
 
 use super::super::model::{Action, Model, ops};
-use super::super::theme::{self, HAIRLINE, T_BODY, T_SECTION, T_SMALL, TARGET};
+use super::super::proto::Speed;
+use super::super::theme::{self, HAIRLINE, T_BODY, T_CAPTION, T_NOTE, T_SECTION, TARGET, W};
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::overlay::Cx;
 use super::super::ui::sheet::{Reply, Sheet, SheetContent};
-use super::super::ui::widgets;
+use super::super::ui::widgets::{self, Button, ButtonKind};
 
+/// A section title: 44 above, its line, 17 below.
 const SECTION: f32 = 101.0;
+/// A picker or value row.
 const ROW: f32 = 133.0;
+/// The speed row: the segmented control and 19 above and below.
+const SPEED_ROW: f32 = 160.0;
+/// Space above the buttons and between them.
+const BUTTON_GAP: f32 = 34.0;
+/// A segment's padding around its label.
+const SEGMENT_PAD: f32 = 32.0;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 enum Item {
-    Section(String),
-    Efforts(Vec<String>),
-    Model {
-        provider: String,
-        id: String,
-        label: String,
+    Section(&'static str),
+    Pick {
+        field: ops::Field,
+        label: &'static str,
+        value: String,
+        disabled: bool,
     },
+    Speed {
+        speeds: Vec<Speed>,
+        selected: Speed,
+    },
+    Button {
+        label: &'static str,
+        /// Primary (else secondary).
+        primary: bool,
+        act: ops::Act,
+        disabled: bool,
+    },
+    /// Wrapped lines in `T_CAPTION` `muted`.
+    Note(Vec<String>),
+    /// The defaults: lines in `T_NOTE`.
+    Text(Vec<String>),
+    /// A read-only row: label, value.
+    Value(&'static str, String),
+    Gap(i32),
 }
 
-/// What the sheet shows, laid out top to bottom.
-fn items(model: &Model) -> Vec<(f32, Item)> {
-    let mut items = Vec::new();
-    let mut y = 0.0;
-    let selection = model.selection();
-    let efforts: Vec<String> = model
-        .ops
-        .providers
-        .iter()
-        .find(|p| p.id == selection.provider)
-        .and_then(|p| p.models.iter().find(|m| m.id == selection.model))
-        .map(|m| {
-            m.supported_efforts
-                .iter()
-                .map(|e| e.effort.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    if !efforts.is_empty() {
-        items.push((y, Item::Section("Effort".into())));
-        y += SECTION;
-        items.push((y, Item::Efforts(efforts)));
-        y += TARGET + 22.0;
-    }
-    // The conversation's own provider first.
-    let mut providers = model.usable_providers();
-    providers.sort_by_key(|p| p.id != selection.provider);
-    for provider in providers {
-        items.push((y, Item::Section(provider.label.clone())));
-        y += SECTION;
-        for m in &provider.models {
-            items.push((
-                y,
-                Item::Model {
-                    provider: provider.id.clone(),
-                    id: m.id.clone(),
-                    label: m.label.clone(),
-                },
-            ));
-            y += ROW;
+impl Item {
+    fn height(&self) -> f32 {
+        match self {
+            Item::Section(_) => SECTION,
+            Item::Pick { .. } | Item::Value(..) => ROW,
+            Item::Speed { .. } => SPEED_ROW,
+            Item::Button { .. } => TARGET,
+            Item::Note(lines) => 16.0 + lines.len() as f32 * T_CAPTION.line() + 6.0,
+            Item::Text(lines) => 11.0 + lines.len() as f32 * T_NOTE.line(),
+            Item::Gap(px) => *px as f32,
         }
     }
-    items.push((y, Item::Section(String::new())));
+}
+
+/// What the inspector shows for `model`, top to bottom.
+fn items(model: &Model, width: f32) -> Vec<Item> {
+    let form = model.form();
+    let providers = &model.ops.providers;
+    let provider = ops::provider_info(providers, &form.provider);
+    let info = ops::model_info(providers, &form.provider, &form.model);
+    let none = |s: &str| {
+        if s.is_empty() {
+            "Daemon default".to_owned()
+        } else {
+            s.to_owned()
+        }
+    };
+    let mut items = vec![
+        Item::Section("Generation"),
+        Item::Pick {
+            field: ops::Field::Provider,
+            label: "Provider",
+            value: provider.map_or_else(|| none(&form.provider), |p| p.label.clone()),
+            disabled: false,
+        },
+        Item::Pick {
+            field: ops::Field::Model,
+            label: "Model",
+            value: info.map_or_else(|| none(&form.model), |m| m.label.clone()),
+            disabled: false,
+        },
+        Item::Pick {
+            field: ops::Field::Effort,
+            label: "Effort",
+            value: none(&form.effort),
+            disabled: false,
+        },
+        Item::Speed {
+            speeds: ops::speeds(providers, &form.provider, &form.model, form.speed),
+            selected: form.speed,
+        },
+        Item::Gap(BUTTON_GAP as i32),
+    ];
+    let blocked = model.apply_blocked(&form);
+    let unchanged = model.form_unchanged(&form);
+    let draft = form.conv.is_none();
+    items.push(Item::Button {
+        label: if draft {
+            "Use for this draft"
+        } else {
+            "Apply configuration"
+        },
+        primary: true,
+        act: ops::Act::Apply,
+        disabled: blocked.is_some() || unchanged,
+    });
+    if draft && !model.resolve().inherited {
+        items.push(Item::Gap(22));
+        items.push(Item::Button {
+            label: "Use daemon defaults for this draft",
+            primary: false,
+            act: ops::Act::InheritDefaults,
+            disabled: false,
+        });
+    }
+    if let Some(reason) = blocked.filter(|_| !draft) {
+        items.push(Item::Note(widgets::wrap_plain(reason, T_CAPTION, width)));
+    }
+    items.push(Item::Section("Daemon defaults"));
+    match &model.ops.defaults {
+        Some(snapshot) => items.push(Item::Text(
+            ops::format_defaults(snapshot)
+                .lines()
+                .flat_map(|line| widgets::wrap_plain(line, T_NOTE, width))
+                .collect(),
+        )),
+        None => items.push(Item::Note(widgets::wrap_plain(
+            "Waiting for defaults from the connected daemon.",
+            T_CAPTION,
+            width,
+        ))),
+    }
+    if !draft {
+        items.push(Item::Section("Activity"));
+        let connection = if model.ready {
+            "Connected"
+        } else if model.connected {
+            "Syncing…"
+        } else {
+            "Connecting…"
+        };
+        items.push(Item::Value("Connection", connection.into()));
+        let r = model.resolve();
+        let max = ops::model_info(providers, &r.provider, &r.model)
+            .map(|m| m.max_context)
+            .filter(|max| *max > 0);
+        let fmt = |n: Option<u64>| n.map_or_else(|| "?".to_owned(), ops::grouped);
+        items.push(Item::Value(
+            "Context",
+            format!("{} / Max {}", fmt(model.context_tokens()), fmt(max)),
+        ));
+    }
+    items.push(Item::Gap(34));
     items
 }
 
-/// The model sheet's content.
+/// The inspector's content.
 pub struct Inspector {
     items: Vec<(f32, Item)>,
-    selection: (String, String, String),
     width: f32,
     title: String,
 }
 
-/// The model sheet.
+/// The model inspector.
 pub fn inspector() -> Sheet<Inspector> {
     Sheet::new(Inspector {
         items: Vec::new(),
-        selection: Default::default(),
         width: 0.0,
-        title: "Model".into(),
+        title: "Model & effort".into(),
     })
 }
 
+/// What a tap on part of the inspector does.
+#[derive(Debug, Clone, PartialEq)]
+enum Target {
+    Pick(ops::Field),
+    Speed(Speed),
+    Button(ops::Act),
+}
+
 impl Inspector {
-    /// What is at content index `index`: an effort segment or a model.
-    fn targets(&self) -> Vec<(RectF, Action)> {
+    /// The tappable parts, in item order: their rects (content
+    /// coordinates) and what they do.
+    fn targets(&self) -> Vec<(RectF, Target)> {
         let mut targets = Vec::new();
         for (y, item) in &self.items {
             match item {
-                Item::Efforts(efforts) => {
-                    let w = self.width / efforts.len() as f32;
-                    for (index, effort) in efforts.iter().enumerate() {
+                Item::Pick {
+                    field,
+                    disabled: false,
+                    ..
+                } => targets.push((RectF::new(0.0, *y, self.width, ROW), Target::Pick(*field))),
+                Item::Speed { speeds, .. } => {
+                    let rect = speed_rect(speeds, self.width, *y);
+                    let w = rect.w / speeds.len() as f32;
+                    for (index, speed) in speeds.iter().enumerate() {
                         targets.push((
-                            RectF::new(index as f32 * w, *y, w, TARGET),
-                            Action::Ops(ops::Act::PickEffort(effort.clone())),
+                            RectF::new(rect.x + index as f32 * w, rect.y, w, rect.h),
+                            Target::Speed(*speed),
                         ));
                     }
                 }
-                Item::Model { provider, id, .. } => targets.push((
-                    RectF::new(0.0, *y, self.width, ROW),
-                    Action::Ops(ops::Act::PickModel(provider.clone(), id.clone())),
+                Item::Button {
+                    act,
+                    disabled: false,
+                    ..
+                } => targets.push((
+                    RectF::new(0.0, *y, self.width, TARGET),
+                    Target::Button(act.clone()),
                 )),
-                Item::Section(_) => {}
+                _ => {}
             }
         }
         targets
     }
+}
+
+/// The segmented control's rect in a speed row at `y`: right-aligned, each
+/// segment as wide as the widest label needs.
+fn speed_rect(speeds: &[Speed], width: f32, y: f32) -> RectF {
+    let ty = T_NOTE.weight(Weight::MonoBold);
+    let segment = speeds
+        .iter()
+        .map(|s| widgets::measure(s.label(), ty))
+        .fold(0.0, f32::max)
+        + 2.0 * SEGMENT_PAD;
+    let w = (segment * speeds.len() as f32 + 2.0 * HAIRLINE).round();
+    RectF::new(width - w, y + (SPEED_ROW - TARGET) / 2.0, w, TARGET)
 }
 
 impl SheetContent for Inspector {
@@ -126,108 +260,169 @@ impl SheetContent for Inspector {
 
     fn layout(&mut self, cx: &Cx, width: f32) -> f32 {
         self.width = width;
-        let selection = cx.model.selection();
-        self.selection = (selection.provider, selection.model, selection.effort);
-        self.title = match cx.model.open_summary() {
-            Some(summary) => format!("{} model", summary.display_title()),
-            None => "New chat model".into(),
+        self.title = if cx.model.chat.id.is_some() {
+            "Model & effort".into()
+        } else {
+            "New chat model".into()
         };
-        self.items = items(cx.model);
-        self.items.last().map_or(0.0, |(y, _)| *y)
+        let mut y = 0.0;
+        self.items = items(cx.model, width)
+            .into_iter()
+            .map(|item| {
+                let at = y;
+                y += item.height();
+                (at, item)
+            })
+            .collect();
+        y
     }
 
     fn draw(&self, canvas: &mut Canvas, _cx: &Cx, x: f32, top: f32, pressed: Option<usize>) {
         let p = theme::p();
         let c = theme::c();
-        let (provider, model, effort) = &self.selection;
-        let mut target = 0;
+        let background = p.sidebar_background;
+        let pressed = pressed
+            .and_then(|index| self.targets().into_iter().nth(index))
+            .map(|(_, target)| target);
+        let right = x + self.width;
         for (y, item) in &self.items {
             let y = top + y;
+            if !widgets::shows(canvas, y, y + item.height()) {
+                continue;
+            }
             match item {
                 Item::Section(title) => {
-                    if !title.is_empty() {
-                        widgets::text(
-                            canvas,
-                            title,
-                            x,
-                            T_SECTION.baseline(y + 44.0),
-                            T_SECTION,
-                            p.accent,
-                            1.0,
-                        );
-                    }
-                }
-                Item::Efforts(efforts) => {
-                    let labels: Vec<&str> = efforts.iter().map(String::as_str).collect();
-                    let selected = efforts
-                        .iter()
-                        .position(|e| e == effort)
-                        .unwrap_or(usize::MAX);
-                    let pressed_segment = pressed
-                        .filter(|index| (target..target + efforts.len()).contains(index))
-                        .map(|index| index - target);
-                    widgets::segmented(
-                        canvas,
-                        RectF::new(x, y, self.width, TARGET),
-                        &labels,
-                        selected,
-                        pressed_segment,
-                    );
-                    target += efforts.len();
-                }
-                Item::Model {
-                    provider: p_id,
-                    id,
-                    label,
-                } => {
-                    if pressed == Some(target) {
-                        widgets::fill(
-                            canvas,
-                            RectF::new(0.0, y, x * 2.0 + self.width, ROW),
-                            c.row_pressed,
-                        );
-                    }
-                    let current = p_id == provider && id == model;
-                    let label = widgets::fit(label, T_BODY, self.width * 0.55);
                     widgets::text(
                         canvas,
-                        &label,
+                        title,
                         x,
-                        T_BODY.baseline(y + (ROW - T_BODY.line()) / 2.0),
+                        T_SECTION.baseline(y + 44.0),
+                        T_SECTION,
+                        p.accent,
+                        1.0,
+                    );
+                }
+                Item::Pick {
+                    field,
+                    label,
+                    value,
+                    disabled,
+                } => {
+                    if pressed.as_ref() == Some(&Target::Pick(*field)) {
+                        widgets::fill(
+                            canvas,
+                            RectF::new(0.0, y, W, ROW - HAIRLINE),
+                            p.selection_background,
+                        );
+                    }
+                    let alpha = if *disabled { 0.5 } else { 1.0 };
+                    let baseline = T_BODY.baseline(y + (ROW - T_BODY.line()) / 2.0);
+                    let label_w = widgets::text(canvas, label, x, baseline, T_BODY, p.text, alpha);
+                    let value_right = right - 73.0;
+                    let value = widgets::fit(value, T_BODY, value_right - x - label_w - 34.0);
+                    widgets::text_right(
+                        canvas,
+                        &value,
+                        value_right,
+                        baseline,
+                        T_BODY,
+                        p.secondary_accent,
+                        alpha,
+                    );
+                    icons::draw(
+                        canvas,
+                        Icon::ChevronDown,
+                        right - 22.0,
+                        y + ROW / 2.0,
+                        39.0,
+                        p.muted,
+                        alpha,
+                    );
+                    widgets::hairline(canvas, x, right, y + ROW - HAIRLINE, c.rule_field_row);
+                }
+                Item::Speed { speeds, selected } => {
+                    widgets::text(
+                        canvas,
+                        "Speed",
+                        x,
+                        T_BODY.baseline(y + (SPEED_ROW - T_BODY.line()) / 2.0),
                         T_BODY,
                         p.text,
                         1.0,
                     );
-                    let id_text = widgets::fit(id, T_SMALL, self.width * 0.4 - 70.0);
-                    widgets::text_right(
+                    let rect = speed_rect(speeds, self.width, y);
+                    let rect = RectF::new(rect.x + x, rect.y, rect.w, rect.h);
+                    let labels: Vec<&str> = speeds.iter().map(|s| s.label()).collect();
+                    let on = speeds.iter().position(|s| s == selected).unwrap_or(0);
+                    let down = match &pressed {
+                        Some(Target::Speed(speed)) => speeds.iter().position(|s| s == speed),
+                        _ => None,
+                    };
+                    widgets::segmented(canvas, rect, &labels, on, down);
+                    widgets::hairline(canvas, x, right, y + SPEED_ROW - HAIRLINE, c.rule_field_row);
+                }
+                Item::Button {
+                    label,
+                    primary,
+                    act,
+                    disabled,
+                } => {
+                    let down = pressed.as_ref() == Some(&Target::Button(act.clone()));
+                    let kind = if *primary {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Secondary
+                    };
+                    widgets::button(
                         canvas,
-                        &id_text,
-                        x + self.width - 76.0,
-                        T_SMALL.baseline(y + (ROW - T_SMALL.line()) / 2.0),
-                        T_SMALL,
-                        p.muted,
-                        1.0,
+                        RectF::new(x, y, self.width, TARGET),
+                        &Button::new(label, kind).pressed(down).disabled(*disabled),
+                        background,
                     );
-                    if current {
-                        icons::draw(
+                }
+                Item::Note(lines) => {
+                    for (index, line) in lines.iter().enumerate() {
+                        widgets::text(
                             canvas,
-                            Icon::Check,
-                            x + self.width - 30.0,
-                            y + ROW / 2.0,
-                            52.0,
-                            p.accent,
+                            line,
+                            x,
+                            T_CAPTION.baseline(y + 16.0 + index as f32 * T_CAPTION.line()),
+                            T_CAPTION,
+                            p.muted,
                             1.0,
                         );
                     }
-                    widgets::hairline(
-                        canvas,
-                        x,
-                        x + self.width,
-                        y + ROW - HAIRLINE,
-                        c.rule_field_row,
-                    );
-                    target += 1;
                 }
+                Item::Text(lines) => {
+                    let color = theme::mix(p.text, 85, background);
+                    for (index, line) in lines.iter().enumerate() {
+                        widgets::text(
+                            canvas,
+                            line,
+                            x,
+                            T_NOTE.baseline(y + 11.0 + index as f32 * T_NOTE.line()),
+                            T_NOTE,
+                            color,
+                            1.0,
+                        );
+                    }
+                }
+                Item::Value(label, value) => {
+                    let baseline = T_BODY.baseline(y + (ROW - T_BODY.line()) / 2.0);
+                    let label_w = widgets::text(canvas, label, x, baseline, T_BODY, p.text, 1.0);
+                    let value = widgets::fit(value, T_BODY, self.width - label_w - 34.0);
+                    widgets::text_right(
+                        canvas,
+                        &value,
+                        right,
+                        baseline,
+                        T_BODY,
+                        p.secondary_accent,
+                        1.0,
+                    );
+                    widgets::hairline(canvas, x, right, y + ROW - HAIRLINE, c.rule_field_row);
+                }
+                Item::Gap(_) => {}
             }
         }
     }
@@ -240,16 +435,25 @@ impl SheetContent for Inspector {
 
     fn activate(&mut self, _cx: &Cx, index: usize) -> Reply {
         match self.targets().into_iter().nth(index) {
-            // Picking an effort keeps the sheet; a model closes it.
-            Some((_, action @ Action::Ops(ops::Act::PickEffort(_)))) => Reply::Action(action),
-            Some((_, action)) => Reply::CloseWith(action),
+            Some((_, Target::Pick(field))) => Reply::Action(Action::Ops(ops::Act::Choose(field))),
+            Some((_, Target::Speed(speed))) => {
+                Reply::Action(Action::Ops(ops::Act::FormSpeed(speed)))
+            }
+            // Applying closes the inspector; going back to the defaults
+            // keeps it, showing them.
+            Some((_, Target::Button(act @ ops::Act::Apply))) => Reply::CloseWith(Action::Ops(act)),
+            Some((_, Target::Button(act))) => Reply::Action(Action::Ops(act)),
             None => Reply::None,
         }
     }
 
     fn key(&self, _cx: &Cx) -> u64 {
         let mut hasher = DefaultHasher::new();
-        (&self.selection, format!("{:?}", self.items), &self.title).hash(&mut hasher);
+        self.title.hash(&mut hasher);
+        for (y, item) in &self.items {
+            ((*y as i32), item).hash(&mut hasher);
+        }
+        theme::generation().hash(&mut hasher);
         hasher.finish()
     }
 
@@ -261,53 +465,161 @@ impl SheetContent for Inspector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exocortex::model::Nav;
     use crate::exocortex::proto::parse_event;
     use std::time::Instant;
 
-    #[test]
-    fn the_model_sheet_lists_signed_in_providers_and_picks() {
-        let mut model = Model::new();
-        model.on_connected();
-        model.apply(
-            parse_event(r#"{"type":"tools_available","providers":[{"id":"anthropic","label":"Anthropic","defaultModel":"m","models":[{"id":"m","label":"Haiku","defaultEffort":"high","supportedEfforts":[{"effort":"low"},{"effort":"high"}]}]},{"id":"openai","label":"OpenAI","defaultModel":"g","models":[{"id":"g","label":"GPT","defaultEffort":"low","supportedEfforts":[]}]}],"authByProvider":{"anthropic":true,"openai":false},"tools":[],"conversationDefaults":{"defaults":{"provider":"anthropic","model":"m","effort":"high"}}}"#),
-            Instant::now(),
-        );
-        let listed = items(&model);
-        assert!(
-            listed
-                .iter()
-                .any(|(_, item)| matches!(item, Item::Model { id, .. } if id == "m"))
-        );
-        assert!(
-            !listed
-                .iter()
-                .any(|(_, item)| matches!(item, Item::Model { id, .. } if id == "g")),
-            "not signed in"
-        );
-        let mut sheet = inspector();
-        let cx = Cx {
-            model: &model,
+    const CATALOG: &str = r#"{"type":"tools_available","providers":[{"id":"anthropic","label":"Anthropic","defaultModel":"m","supportsFastMode":true,"models":[{"id":"m","label":"Haiku","defaultEffort":"high","supportedEfforts":[{"effort":"low"},{"effort":"high"}],"maxContext":200000}]},{"id":"openai","label":"OpenAI","defaultModel":"g","models":[{"id":"g","label":"GPT","defaultEffort":"low","supportedEfforts":[{"effort":"low"}]}]}],"authByProvider":{"anthropic":true,"openai":false},"tools":[],"conversationDefaults":{"defaults":{"provider":"anthropic","model":"m","effort":"high"},"configured":true}}"#;
+
+    fn cx(model: &Model) -> Cx<'_> {
+        Cx {
+            model,
             width: 1080.0,
             height: 2216.0,
             keyboard: false,
             now: Instant::now(),
+        }
+    }
+
+    fn laid(model: &Model) -> Inspector {
+        let mut content = inspector().content;
+        content.layout(&cx(model), 992.0);
+        content
+    }
+
+    /// The target whose rect holds content point (`x`, `y`).
+    fn tap(content: &mut Inspector, model: &Model, x: f32, y: f32) -> Reply {
+        let index = content.item_at(&cx(model), x, y).expect("a target");
+        content.activate(&cx(model), index)
+    }
+
+    fn y_of(content: &Inspector, wanted: impl Fn(&Item) -> bool) -> f32 {
+        content
+            .items
+            .iter()
+            .find(|(_, item)| wanted(item))
+            .map(|(y, _)| *y)
+            .unwrap()
+    }
+
+    #[test]
+    fn the_inspector_picks_through_its_rows_and_applies() {
+        let mut model = Model::new();
+        model.on_connected();
+        model.ready = true;
+        model.apply(parse_event(CATALOG), Instant::now());
+        model.handle(Action::Nav(Nav::NewConversation));
+        model.handle(Action::Ops(ops::Act::OpenInspector));
+        let mut content = laid(&model);
+        assert_eq!(content.title, "New chat model");
+        // Provider row → its choices.
+        let provider_y = y_of(&content, |i| {
+            matches!(
+                i,
+                Item::Pick {
+                    label: "Provider",
+                    ..
+                }
+            )
+        });
+        assert_eq!(
+            tap(&mut content, &model, 300.0, provider_y + 10.0),
+            Reply::Action(Action::Ops(ops::Act::Choose(ops::Field::Provider)))
+        );
+        // Speed: Standard and Fast (the provider's fast tier).
+        let speed_y = y_of(&content, |i| matches!(i, Item::Speed { .. }));
+        let Some((_, Item::Speed { speeds, .. })) = content
+            .items
+            .iter()
+            .find(|(_, i)| matches!(i, Item::Speed { .. }))
+        else {
+            panic!()
         };
-        let content = &mut sheet.content;
-        content.layout(&cx, 992.0);
-        // The second effort segment, then the model row.
-        let high = content.item_at(&cx, 600.0, SECTION + 20.0).unwrap();
+        assert_eq!(speeds, &[Speed::Standard, Speed::Fast]);
         assert_eq!(
-            content.activate(&cx, high),
-            Reply::Action(Action::Ops(ops::Act::PickEffort("high".into())))
+            tap(&mut content, &model, 980.0, speed_y + SPEED_ROW / 2.0),
+            Reply::Action(Action::Ops(ops::Act::FormSpeed(Speed::Fast)))
         );
-        let row_y = SECTION + TARGET + 22.0 + SECTION + 10.0;
-        let row = content.item_at(&cx, 300.0, row_y).unwrap();
+        // Unchanged: Use for this draft is disabled (no target).
+        let button_y = y_of(&content, |i| matches!(i, Item::Button { .. }));
+        assert!(
+            content
+                .item_at(&cx(&model), 400.0, button_y + 20.0)
+                .is_none()
+        );
+        model.handle(Action::Ops(ops::Act::FormSpeed(Speed::Fast)));
+        let mut content = laid(&model);
         assert_eq!(
-            content.activate(&cx, row),
-            Reply::CloseWith(Action::Ops(ops::Act::PickModel(
-                "anthropic".into(),
-                "m".into()
-            )))
+            tap(&mut content, &model, 400.0, button_y + 20.0),
+            Reply::CloseWith(Action::Ops(ops::Act::Apply))
         );
+        // A draft shows the defaults, no activity.
+        assert!(
+            content
+                .items
+                .iter()
+                .any(|(_, i)| matches!(i, Item::Text(lines) if lines[0] == "User default:"))
+        );
+        assert!(
+            !content
+                .items
+                .iter()
+                .any(|(_, i)| *i == Item::Section("Activity"))
+        );
+    }
+
+    #[test]
+    fn a_conversations_inspector_shows_its_context_and_waits_while_streaming() {
+        let mut model = Model::new();
+        model.on_connected();
+        model.ready = true;
+        let now = Instant::now();
+        model.apply(parse_event(CATALOG), now);
+        model.apply(
+            parse_event(r#"{"type":"conversation_updated","summary":{"id":"c","title":"T","provider":"anthropic","model":"m","effort":"low","streaming":true}}"#),
+            now,
+        );
+        model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        model.apply(
+            parse_event(r#"{"type":"context_update","convId":"c","contextTokens":123456}"#),
+            now,
+        );
+        model.handle(Action::Ops(ops::Act::OpenInspector));
+        let content = laid(&model);
+        assert_eq!(content.title, "Model & effort");
+        assert!(
+            content
+                .items
+                .iter()
+                .any(|(_, i)| *i == Item::Value("Context", "123,456 / Max 200,000".into()))
+        );
+        assert!(content.items.iter().any(
+            |(_, i)| matches!(i, Item::Note(lines) if lines[0].starts_with("Stop generation"))
+        ));
+        assert!(content.items.iter().any(|(_, i)| matches!(
+            i,
+            Item::Button {
+                label: "Apply configuration",
+                disabled: true,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn choices_list_every_provider_and_check_the_current() {
+        let mut model = Model::new();
+        model.on_connected();
+        model.ready = true;
+        model.apply(parse_event(CATALOG), Instant::now());
+        model.handle(Action::Nav(Nav::NewConversation));
+        model.handle(Action::Ops(ops::Act::OpenInspector));
+        model.ui.opening.clear();
+        model.handle(Action::Ops(ops::Act::Choose(ops::Field::Provider)));
+        assert_eq!(model.ui.opening.len(), 1);
+        assert_eq!(model.ui.opening[0].label(), "Provider");
+        model.handle(Action::Ops(ops::Act::FormProvider("openai".into())));
+        let form = model.form();
+        assert_eq!((form.model.as_str(), form.effort.as_str()), ("g", "low"));
     }
 }

@@ -395,8 +395,11 @@ pub static TONIKAWA: Theme = Theme::new(
 );
 pub static THEMES: [&Theme; 3] = [&WHALE, &CERBERUS, &TONIKAWA];
 
-/// The colour Moon draws its status bar in over the app (app-services.md).
-pub const STATUS_BAR: &str = "#00050f";
+/// The colour Moon draws its status bar in over the app (app-services.md):
+/// the theme's background.
+pub fn status_bar() -> String {
+    format!("#{:06x}", p().app_background)
+}
 
 thread_local! {
     static CURRENT: Cell<&'static Theme> = const { Cell::new(&WHALE) };
