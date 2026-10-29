@@ -103,6 +103,9 @@ pub enum Effect {
     HideKeyboard,
     /// Paste the clipboard into the composer (`Model::paste_text`).
     Paste,
+    /// Moon's status bar takes the theme's background again (E: a theme
+    /// change).
+    StatusBar,
 }
 
 /// What the model asks of the interface: overlays to open or close and
@@ -286,6 +289,7 @@ impl Model {
         // Nothing in flight will be answered.
         self.requests.clear();
         self.composer_disconnected();
+        self.ops_disconnected();
         self.chat_disconnected(self.quiet_until.is_some());
     }
 

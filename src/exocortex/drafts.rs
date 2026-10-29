@@ -3,7 +3,7 @@
 //! across restarts.
 //!
 //! A draft's key is the conversation's id, or `draft:<folder id>` /
-//! `draft:root` for a new chat (the iPhone's `newDraftId`). The file is
+//! `draft:root` for a new chat (the iPhone's `newDraftId`; `Model::draft_key`). The file is
 //! `{"drafts": {"<key>": {"text": "…", "updatedAt": ms}}}`; entries this
 //! build cannot read are kept as they are. `store.rs` writes it atomically
 //! and never over a file it could not parse (the app says so at start, and
@@ -17,11 +17,6 @@ use super::store::{DRAFTS, Persist};
 
 /// The section of `drafts.json` holding the drafts.
 const SECTION: &str = "drafts";
-
-/// The draft key of a new chat in `folder` (None: the top of the list).
-pub fn new_chat_key(folder: Option<&str>) -> String {
-    format!("draft:{}", folder.unwrap_or("root"))
-}
 
 /// The kept drafts, read once from `drafts.json`.
 #[derive(Debug, Default)]
@@ -142,7 +137,7 @@ mod tests {
         let mut drafts = Drafts::default();
         drafts.load(&persist);
         assert!(drafts.set("c1", "half a thought", 5));
-        assert!(drafts.set(&new_chat_key(Some("f1")), "new idea", 6));
+        assert!(drafts.set("draft:f1", "new idea", 6));
         assert!(!drafts.set("c1", "half a thought", 7), "unchanged");
         drafts.save(&mut persist);
         store.take(&mut persist, Instant::now());

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::super::drafts::{self, Drafts};
+use super::super::drafts::Drafts;
 use super::super::editor::{self, Cursor};
 use super::super::proto::{self, Entry, Event, Queued};
 use super::super::requests::{self, Owner, Pending};
@@ -314,11 +314,12 @@ pub enum Act {
 }
 
 impl Model {
-    /// The draft key of what the composer shows now.
-    pub fn draft_key(&self) -> String {
+    /// The draft key of what the composer shows now: the open
+    /// conversation's, or the new chat's (`draft_key`, E).
+    pub fn shown_draft_key(&self) -> String {
         match &self.chat.id {
             Some(id) => id.clone(),
-            None => drafts::new_chat_key(self.current_folder()),
+            None => self.draft_key(),
         }
     }
 
@@ -368,7 +369,7 @@ impl Model {
     /// Shows the draft of what is open now (a conversation, or a new chat
     /// in the list's folder).
     pub(super) fn restore_draft(&mut self) {
-        let key = self.draft_key();
+        let key = self.shown_draft_key();
         if self.composer.key.as_deref() == Some(key.as_str()) {
             return;
         }
@@ -491,7 +492,7 @@ impl Model {
                 Vec::new()
             }
             Act::RestoreDraft { conv, text } => {
-                let key = conv.unwrap_or_else(|| drafts::new_chat_key(self.current_folder()));
+                let key = conv.unwrap_or_else(|| self.draft_key());
                 self.restore_into(&key, &text);
                 Vec::new()
             }
@@ -782,7 +783,7 @@ impl Model {
     /// conversation's first message.
     pub(super) fn submit(&mut self, timing: Option<Timing>) -> Vec<Value> {
         let text = self.composer.text.trim().to_owned();
-        let key = self.draft_key();
+        let key = self.shown_draft_key();
         if text.is_empty() || !self.ready || self.composer.submitting(&key) {
             return Vec::new();
         }
@@ -892,16 +893,16 @@ impl Model {
                     now,
                 );
                 // Only what the user chose for this draft: the daemon applies
-                // its defaults to the rest (PAR-277).
-                let overrides = self.ops.draft_selection.clone();
-                let command = proto::new_conversation(
+                // its defaults to the rest (E's overrides, PAR-277).
+                let mut command = proto::new_conversation(
                     &request,
                     &id,
-                    overrides.as_ref(),
+                    None,
                     self.current_folder(),
                     &text,
                     started_at,
                 );
+                self.new_conversation_fields(&mut command);
                 self.composer.inflight.insert(
                     request,
                     Submission {
@@ -1144,7 +1145,7 @@ impl Model {
                         loaded: true,
                         ..Chat::default()
                     };
-                    self.composer.key = Some(self.draft_key());
+                    self.composer.key = Some(self.shown_draft_key());
                 }
             }
         }
