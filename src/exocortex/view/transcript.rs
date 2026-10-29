@@ -735,8 +735,10 @@ impl ViewState {
                     h += gap;
                     let open = open_at(key);
                     let growing = context.live && *end == blocks.len();
-                    let (_, text) = merged_thinking(blocks, *index);
+                    // Its text merged only when laid out (a cached piece
+                    // needs none of it).
                     let piece = self.piece(hash_of((hash, open, growing, stamp)), || {
+                        let (_, text) = merged_thinking(blocks, *index);
                         lay_thinking(&text, key, stamp, open, growing)
                     });
                     put(layout, &mut h, piece);
@@ -2203,6 +2205,51 @@ mod tests {
         assert!(damage.moved.is_none());
         assert!(rows(&damage) <= 122 + 2 * 44 + 11 + 4, "{damage:?}");
         assert!(jump_alpha(&view, t + JUMP_SETTLE + JUMP_FADE) == 32);
+    }
+
+    #[test]
+    fn tool_outputs_are_fetched_only_once_the_transcript_is_still() {
+        let calls: Vec<String> = (0..4)
+            .map(|i| format!(r#"{{"type":"tool_call","toolCallId":"t{i}","toolName":"Bash","input":{{}},"summary":"ls {i}"}},{{"type":"tool_result","toolCallId":"t{i}","toolName":"Bash","output":"","isError":false}},{{"type":"text","text":"step {i}"}}"#))
+            .collect();
+        let mut model = open_with(&format!(
+            r#"{{"type":"ai","blocks":[{}]}}"#,
+            calls.join(",")
+        ));
+        let mut view = ViewState::new();
+        let t0 = Instant::now();
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
+        let outputs = |commands: Vec<Value>| {
+            commands
+                .iter()
+                .filter(|c| c["type"] == "load_tool_outputs")
+                .count()
+        };
+        // Not yet still long enough; then asked for, once.
+        assert_eq!(outputs(requests(&mut model, &mut view, HEIGHT, t0)), 0);
+        let later = t0 + PREFETCH_AFTER;
+        assert_eq!(outputs(requests(&mut model, &mut view, HEIGHT, later)), 1);
+        assert_eq!(outputs(requests(&mut model, &mut view, HEIGHT, later)), 0);
+        // Their answer changes nothing on screen: no layout pass.
+        let version = model.chat.version;
+        let request = model.chat.outputs_inflight.keys().next().unwrap().clone();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"tool_outputs_loaded","reqId":"{request}","convId":"c","outputs":[{{"toolCallId":"t0","output":"a"}},{{"toolCallId":"t1","output":"b"}},{{"toolCallId":"t2","output":"c"}},{{"toolCallId":"t3","output":"d"}}]}}"#
+            )),
+            Instant::now(),
+        );
+        assert_eq!(model.chat.version, version);
+        assert_eq!(model.chat.output_of("t2"), Some("c"));
+        // While it moves, nothing is asked for.
+        let mut model = open_with(&format!(
+            r#"{{"type":"ai","blocks":[{}]}}"#,
+            calls.join(",")
+        ));
+        let mut view = ViewState::new();
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
+        view.chat_scroll.begin(500.0, later);
+        assert_eq!(outputs(requests(&mut model, &mut view, HEIGHT, later)), 0);
     }
 
     #[test]
