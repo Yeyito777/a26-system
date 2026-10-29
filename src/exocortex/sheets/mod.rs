@@ -5,6 +5,7 @@ pub mod activity;
 pub mod btw;
 pub mod chrono;
 pub mod clock;
+pub mod find;
 pub mod goal;
 pub mod inspector;
 pub mod panel;

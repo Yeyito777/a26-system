@@ -300,6 +300,7 @@ pub enum Panel {
     Btw(String),
     Connection,
     Tokens,
+    Find(String),
 }
 
 impl Panel {
@@ -314,6 +315,7 @@ impl Panel {
             Panel::Btw(conv) => super::btw::build(model, conv),
             Panel::Connection => super::usage::connection(model, now),
             Panel::Tokens => super::usage::tokens(model),
+            Panel::Find(conv) => super::find::build(model, conv),
         }
     }
 
@@ -325,6 +327,7 @@ impl Panel {
                 | Panel::Activity(_)
                 | Panel::Chrono(_)
                 | Panel::Btw(_)
+                | Panel::Find(_)
                 | Panel::SystemPrompt(Some(_))
         )
     }
@@ -763,6 +766,23 @@ pub fn nav(label: impl Into<String>, detail: Option<String>, icon: Option<Icon>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exocortex::model::ops;
+    use crate::exocortex::ui::overlay::{Overlay, OverlayStack};
+
+    #[test]
+    fn the_accounts_panel_says_farewell_once_gone() {
+        let mut stack = OverlayStack::default();
+        stack.push(Box::new(sheet(Panel::Accounts(None))));
+        let now = Instant::now();
+        assert!(stack.close_top(now));
+        assert!(stack.sweep(now + std::time::Duration::from_secs(1)));
+        assert_eq!(
+            stack.take_farewells(),
+            vec![Action::Ops(ops::Act::AccountsClosed)]
+        );
+        let mut usage = sheet(Panel::Usage);
+        assert_eq!(usage.farewell(), None);
+    }
 
     #[test]
     fn long_words_break_and_buttons_wrap() {

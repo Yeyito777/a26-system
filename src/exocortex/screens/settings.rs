@@ -7,15 +7,17 @@
 //! shows the daemon's defaults. Changes go to `settings.json` through
 //! `ops::Act` (`Persist::update_settings`).
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::gfx::{Canvas, RectF};
 use crate::text::Weight;
 
 use super::super::anim::{Animator, Tween};
-use super::super::model::{Action, Model, Nav, ops};
+use super::super::model::{Action, Model, Nav, now_ms, ops};
 use super::super::proto;
 use super::super::sheets::{panel, usage};
 use super::super::store;
@@ -134,7 +136,67 @@ fn note_row(text: &str) -> Row {
 
 /// The page's rows, top to bottom (content coordinates: 0 is under the
 /// top bar), in the iPhone's order.
-fn rows(model: &Model, now: Instant) -> Vec<(f32, Row)> {
+/// The page's rows, made again only when what they show changes (a frame
+/// asks for them several times: its record, its drawing, hits, scrolls).
+fn rows(model: &Model, now: Instant) -> Rc<Vec<(f32, Row)>> {
+    cached(model, now).0
+}
+
+/// Rows made for a key of their inputs, and a hash of them.
+type Cached = (u64, Rc<Vec<(f32, Row)>>, u64);
+
+/// The rows and a hash of them (the frame's key).
+fn cached(model: &Model, now: Instant) -> (Rc<Vec<(f32, Row)>>, u64) {
+    thread_local! {
+        static CACHE: RefCell<Option<Cached>> = const { RefCell::new(None) };
+    }
+    let mut hasher = DefaultHasher::new();
+    let usage = &model.ops.usage;
+    (
+        theme::generation(),
+        model.ready,
+        model.connected,
+        model.was_connected,
+        format!(
+            "{:?}",
+            usage.usage.values().map(|(u, _)| u).collect::<Vec<_>>()
+        ),
+        usage.usage.keys().collect::<Vec<_>>(),
+        format!("{:?}", usage.link),
+        usage
+            .tokens
+            .as_ref()
+            .map(|t| t["today"]["totalTokens"].to_string()),
+        model.accounts_likely(),
+    )
+        .hash(&mut hasher);
+    (
+        format!("{:?}", model.ops.defaults),
+        format!("{:?}", model.persist.settings()),
+        model.sidebar.version,
+        model.persist.problems().len(),
+        now_ms() / 60_000,
+    )
+        .hash(&mut hasher);
+    let key = hasher.finish();
+    CACHE.with(|cache| {
+        if let Some((k, rows, hash)) = &*cache.borrow()
+            && *k == key
+        {
+            return (rows.clone(), *hash);
+        }
+        let rows = Rc::new(build_rows(model, now));
+        let mut hasher = DefaultHasher::new();
+        for (y, row) in rows.iter() {
+            (*y as i32, format!("{row:?}")).hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        *cache.borrow_mut() = Some((key, rows.clone(), hash));
+        (rows, hash)
+    })
+}
+
+fn build_rows(model: &Model, now: Instant) -> Vec<(f32, Row)> {
     let p = theme::p();
     let detail_w = width() - SWITCH.0 - 34.0;
     let mut list = vec![Row::Section("Usage limits")];
@@ -295,10 +357,12 @@ pub fn settings_frame(
     now: Instant,
 ) -> SettingsFrame {
     let mut hasher = DefaultHasher::new();
-    (&model.persist.settings().theme, theme::generation()).hash(&mut hasher);
-    for (y, row) in rows(model, now) {
-        (y as i32, format!("{row:?}")).hash(&mut hasher);
-    }
+    (
+        &model.persist.settings().theme,
+        theme::generation(),
+        cached(model, now).1,
+    )
+        .hash(&mut hasher);
     SettingsFrame {
         offset: view.settings_scroll.value(now).round() as i32,
         key: hasher.finish(),
@@ -422,10 +486,10 @@ pub fn draw(
         canvas,
         RectF::new(0.0, CONTENT_TOP, W, height - CONTENT_TOP),
         |canvas| {
-            for (y, row) in rows(model, now) {
+            for (y, row) in rows(model, now).iter() {
                 let y = top + y;
                 if widgets::shows(canvas, y, y + row.height()) {
-                    draw_row(canvas, model, &row, y, pressed, now);
+                    draw_row(canvas, model, row, y, pressed, now);
                 }
             }
         },
@@ -648,8 +712,9 @@ pub fn hit(model: &Model, view: &ViewState, x: f32, y: f32, now: Instant) -> Opt
     let offset = view.settings_scroll.value(now).round();
     let cy = y - CONTENT_TOP + offset;
     let (row_y, row) = rows(model, now)
-        .into_iter()
-        .find(|(top, row)| cy >= *top && cy < top + row.height())?;
+        .iter()
+        .find(|(top, row)| cy >= *top && cy < top + row.height())
+        .cloned()?;
     match row {
         Row::Themes(card) => {
             let w = card_width();
@@ -793,9 +858,9 @@ mod tests {
         ];
         // The Whale card previews Whale: leave it out.
         let themes = rows(&model, now)
-            .into_iter()
+            .iter()
             .find(|(_, r)| matches!(r, Row::Themes(_)))
-            .map(|(y, _)| y)
+            .map(|(y, _)| *y)
             .unwrap();
         let card_top = (CONTENT_TOP + themes + GRID_PAD.0) as usize;
         let card_bottom = card_top + card_height() as usize;
@@ -842,7 +907,7 @@ mod tests {
 
     fn at(model: &Model, wanted: impl Fn(&Row) -> bool) -> f32 {
         rows(model, Instant::now())
-            .into_iter()
+            .iter()
             .find(|(_, row)| wanted(row))
             .map(|(y, _)| y + CONTENT_TOP)
             .unwrap()

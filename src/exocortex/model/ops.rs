@@ -61,6 +61,8 @@ pub struct Ops {
     pub usage: sheets::usage::State,
     pub system: sheets::system::State,
     pub btw: sheets::btw::State,
+    /// The last phrase found in the chat.
+    pub find: Option<String>,
 }
 
 /// A conversation's state as the header shows it, from its stream.
@@ -288,6 +290,7 @@ pub enum Act {
     Chrono(sheets::chrono::Act),
     System(sheets::system::Act),
     Btw(sheets::btw::Act),
+    Find(sheets::find::Act),
 }
 
 // ----- The catalog (PAR-275; the iPhone's `state/models.ts`) ---------------------
@@ -849,8 +852,11 @@ impl Model {
                 commands
             }
             Act::OpenFind => {
-                self.ui.toast("Coming soon.");
-                Vec::new()
+                if self.chat.id.is_none() {
+                    return Vec::new();
+                }
+                self.ui.effect(Effect::HideKeyboard);
+                self.handle_find(sheets::find::Act::Ask)
             }
             Act::FormDelegation | Act::FormLegacy | Act::FormDefault => {
                 let mut form = self.form();
@@ -867,7 +873,7 @@ impl Model {
                 self.ui.open(Box::new(super::super::ui::menu::Confirm::new(
                     "Reset daemon default?",
                     "New chats will use the app default chosen by exocortexd.",
-                    "Reset to app default",
+                    "Reset",
                     super::Action::Ops(Act::ResetDefaultsConfirmed),
                 )));
                 Vec::new()
@@ -911,6 +917,7 @@ impl Model {
             Act::Chrono(a) => self.handle_chrono(a),
             Act::System(a) => self.handle_system(a),
             Act::Btw(a) => self.handle_btw(a),
+            Act::Find(a) => self.handle_find(a),
         }
     }
 
@@ -1122,22 +1129,23 @@ impl Model {
             self.ui.error_toast(reason);
             return Vec::new();
         }
-        let mut commands = Vec::new();
-        if form.make_default {
-            commands.extend(self.set_defaults(
-                &Selection {
+        let defaults = form.make_default.then(|| {
+            (
+                Selection {
                     provider: form.provider.clone(),
                     model: form.model.clone(),
                     effort: form.effort.clone(),
                     fast_mode: form.speed.value(),
                 },
-                &form.draft,
-            ));
-            if commands.is_empty() {
-                return commands;
-            }
+                form.draft.clone(),
+            )
+        });
+        // The draft first: the defaults' answer then finds it unchanged and
+        // drops the overrides it made redundant.
+        let mut commands = self.apply_selection(form);
+        if let Some((selection, draft)) = defaults {
+            commands.extend(self.set_defaults(&selection, &draft));
         }
-        commands.extend(self.apply_selection(form));
         commands
     }
 
@@ -1795,6 +1803,83 @@ mod tests {
         assert_eq!(theme::current().id, "cerberus");
         assert!(model.ui.effects.contains(&Effect::StatusBar));
         theme::set_current(&theme::WHALE);
+    }
+
+    #[test]
+    fn daemon_defaults_are_confirmed_only_by_their_own_answer() {
+        let mut model = ready();
+        model.handle(Action::Nav(Nav::NewConversation));
+        model.handle(Action::Ops(Act::OpenInspector));
+        model.handle(Action::Ops(Act::FormModel("haiku".into())));
+        model.handle(Action::Ops(Act::FormDefault));
+        assert!(model.can_apply(&model.form()));
+        let sent = model.handle(Action::Ops(Act::Apply));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["type"], "set_conversation_defaults");
+        assert_eq!(sent[0]["defaults"]["model"], "haiku");
+        let id = sent[0]["reqId"].as_str().unwrap().to_owned();
+        assert!(!model.resolve().inherited, "the draft has its overrides");
+        // A broadcast, or an answer to someone else, confirms nothing.
+        let now = Instant::now();
+        model.apply(
+            parse_event(r#"{"type":"conversation_defaults","defaults":{"provider":"anthropic","model":"haiku","effort":"medium","fastMode":false},"configured":true}"#),
+            now,
+        );
+        assert!(model.ops.defaults_request.is_some());
+        model.apply(
+            parse_event(r#"{"type":"conversation_defaults","reqId":"other","defaults":{"provider":"anthropic","model":"haiku","effort":"medium","fastMode":false},"configured":true}"#),
+            now,
+        );
+        assert!(model.ops.defaults_request.is_some());
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_defaults","reqId":"{id}","defaults":{{"provider":"anthropic","model":"haiku","effort":"medium","fastMode":false}},"configured":true,"message":"Default model saved"}}"#
+            )),
+            now,
+        );
+        assert!(model.ops.defaults_request.is_none());
+        assert!(
+            model.resolve().inherited,
+            "overrides equal to the new defaults go"
+        );
+        assert!(
+            model
+                .ui
+                .opening
+                .iter()
+                .any(|o| o.label() == "Default model saved")
+        );
+        // Never while disconnected.
+        model.on_disconnected();
+        assert!(
+            model
+                .handle(Action::Ops(Act::ResetDefaultsConfirmed))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_created_conversation_takes_its_drafts_overrides() {
+        let mut model = ready();
+        model.handle(Action::Nav(Nav::NewConversation));
+        model.handle(Action::Ops(Act::PickModel(
+            "anthropic".into(),
+            "haiku".into(),
+        )));
+        assert!(!model.resolve().inherited);
+        model.composer.text = "Hi".into();
+        let sent = model.handle(Action::Ops(Act::Apply));
+        assert!(sent.is_empty());
+        let sent = model.handle(Action::Composer(composer::Act::Send));
+        assert_eq!(sent[0]["model"], "haiku");
+        let conv = sent[0]["convId"].as_str().unwrap().to_owned();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_created","convId":"{conv}","provider":"anthropic","model":"haiku","effort":"medium"}}"#
+            )),
+            Instant::now(),
+        );
+        assert_eq!(model.draft_config("draft:root"), DraftConfig::default());
     }
 
     #[test]

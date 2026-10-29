@@ -776,13 +776,17 @@ pub fn connection_rows(model: &Model, detailed: bool) -> Vec<Row> {
     }
     let mut rows = vec![Row::Rail { color, lines: card }];
     if let Some(since) = link.since {
+        let at = clock::format_due_time(since as f64, now_ms() as f64);
         rows.push(panel::kv(
             "Up since",
-            format!(
-                "{} ({})",
-                clock::format_due_time(since as f64, now_ms() as f64),
-                clock::format_task_elapsed(since as f64, now_ms() as f64)
-            ),
+            if detailed {
+                format!(
+                    "{at} ({})",
+                    clock::format_task_elapsed(since as f64, now_ms() as f64)
+                )
+            } else {
+                at
+            },
         ));
     }
     if detailed {

@@ -289,6 +289,7 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
         );
     }
     items.push(model_item);
+    items.push(ActionItem::new("Find in chat", Action::Ops(ops::Act::OpenFind)).icon(Icon::Search));
     let tasks = model.activity_count(&id);
     items.push(
         ActionItem::new("Activity & tasks", Action::Ops(ops::Act::OpenActivity))
@@ -582,6 +583,7 @@ mod tests {
                 "Stop",
                 "Retry opening conversation",
                 "Model, effort & speed…",
+                "Find in chat",
                 "Activity & tasks",
                 "Goal",
                 "Chrono schedules",
