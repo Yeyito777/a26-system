@@ -492,6 +492,28 @@ pub fn draw_chat_update(
         );
     }
     damage.rows = merged;
+    // Fold marks that changed in place: their column.
+    let marks =
+        transcript::gutter_damage(&old.transcript, &new.transcript, new.offset, (top, bottom));
+    for rows in frame::merge(marks) {
+        for rows in transcript::subtract_rows(rows, &damage.rows) {
+            let x1 = transcript::gutter_columns();
+            let outer = canvas.clip();
+            canvas.set_clip(0, outer.1, x1, outer.3);
+            transcript::draw_band(
+                canvas,
+                model,
+                view,
+                new.pressed.as_ref(),
+                rows,
+                0,
+                new.offset,
+                now,
+            );
+            canvas.set_clip(outer.0, outer.1, outer.2, outer.3);
+            damage.areas.push((0, rows.0, x1, rows.1));
+        }
+    }
     // The jump button floats: the rows under it in its columns.
     if let Some((y0, y1)) =
         transcript::jump_damage(&old.transcript, &new.transcript, shift, (top, bottom))

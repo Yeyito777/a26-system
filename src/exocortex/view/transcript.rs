@@ -1881,8 +1881,9 @@ pub fn requests(model: &mut Model, view: &mut ViewState, height: f32, now: Insta
 pub struct TranscriptFrame {
     marks: Vec<(i32, i32, u64)>,
     /// Fold marks on screen: their rows and how they show (closed, open,
-    /// pressed).
+    /// pressed), and the content rows on screen.
     gutters: Vec<(i32, i32, u8)>,
+    range: (i32, i32),
     /// The jump button's opacity in 32nds (0: not drawn).
     jump: u32,
     jump_rows: (i32, i32),
@@ -1999,6 +2000,7 @@ pub(crate) fn frame(
     TranscriptFrame {
         marks,
         gutters,
+        range: (lo.floor() as i32, hi.ceil() as i32),
         jump,
         jump_rows,
     }
@@ -2030,19 +2032,47 @@ pub(crate) fn mark_damage(
             rows.push(screen((*y0, *y1)));
         }
     }
-    // Fold marks that came, went or changed (a press, Fold markers).
-    for (y0, y1, state) in &new.gutters {
-        if !old.gutters.contains(&(*y0, *y1, *state)) {
-            rows.push(screen((*y0, *y1)));
-        }
-    }
-    for (y0, y1, state) in &old.gutters {
-        if !new.gutters.contains(&(*y0, *y1, *state)) {
-            rows.push(screen((*y0, *y1)));
-        }
-    }
     rows.retain(|(y0, y1)| y1 > y0);
     rows
+}
+
+/// Rows (on screen) of the fold marks' column to draw again: marks that
+/// came, went or changed (a press, Fold markers) where the other frame
+/// showed that part of the transcript too. One that only scrolled into view
+/// is drawn with the rows it uncovers.
+pub(crate) fn gutter_damage(
+    old: &TranscriptFrame,
+    new: &TranscriptFrame,
+    offset: f32,
+    (top, bottom): (i32, i32),
+) -> Vec<(i32, i32)> {
+    let base = CHAT_TOP - offset;
+    let mut rows = Vec::new();
+    let mut changed = |(y0, y1, _): &(i32, i32, u8), shown: (i32, i32)| {
+        if y1 > &shown.0 && y0 < &shown.1 {
+            let from = ((base + *y0 as f32).floor() as i32).max(top);
+            let to = ((base + *y1 as f32).ceil() as i32).min(bottom);
+            if to > from {
+                rows.push((from, to));
+            }
+        }
+    };
+    for gutter in &new.gutters {
+        if !old.gutters.contains(gutter) {
+            changed(gutter, old.range);
+        }
+    }
+    for gutter in &old.gutters {
+        if !new.gutters.contains(gutter) {
+            changed(gutter, new.range);
+        }
+    }
+    rows
+}
+
+/// The fold marks' columns.
+pub(crate) fn gutter_columns() -> i32 {
+    GUTTER_W as i32
 }
 
 /// Rows of the jump button's columns to draw again: where it is when it
@@ -3185,6 +3215,51 @@ mod tests {
         assert!(view.reveal(&mut model, wake, HEIGHT));
         assert!(model.chat.expanded.contains("group:u:3"));
         assert!(view.layout.items.iter().any(|item| item.stamp == wake));
+    }
+
+    #[test]
+    fn fold_marks_cost_nothing_while_scrolling_and_a_press_only_their_column() {
+        let entries: Vec<String> = (0..12)
+            .map(|i| format!(r#"{{"type":"user","text":"Question {i}","metadata":{{"startedAt":{},"model":"m","tokens":0}}}},{{"type":"ai","blocks":[{{"type":"tool_call","toolCallId":"t{i}","toolName":"bash","input":{{}},"summary":"ls"}},{{"type":"tool_result","toolCallId":"t{i}","toolName":"bash","output":"","isError":false}},{{"type":"text","text":"{}"}}],"metadata":{{"startedAt":{},"endedAt":{},"model":"claude-opus-5-5","tokens":10}}}}"#, 1000 + i * 10, "An answer long enough to wrap a few times. ".repeat(12), 1001 + i * 10, 1005 + i * 10))
+            .collect();
+        let mut model = open_folded(&entries.join(","));
+        let mut view = ViewState::new();
+        let t = Instant::now();
+        view.chat_max(&model, HEIGHT);
+        assert!(view.layout.gutters.len() >= 12);
+        view.follow = false;
+        view.chat_scroll.offset = 0.0;
+        for step in [37.0, 400.0, 600.0, -250.0] {
+            let damage = update(&mut model, &mut view, (t, t), |_, view| {
+                view.chat_scroll.offset += step;
+            });
+            assert!(rows(&damage) <= step.abs() as i32 + 2, "{damage:?}");
+            assert!(damage.areas.is_empty(), "{damage:?}");
+        }
+        // A press on a mark: its column, its rows.
+        let mark = view
+            .layout
+            .gutters
+            .iter()
+            .find(|g| g.y0 > view.chat_scroll.offset + 100.0)
+            .unwrap()
+            .clone();
+        let mut canvas = Canvas::new(1080, HEIGHT as i32);
+        canvas.clear(0);
+        let old = chat_frame(&model, &mut view, None, HEIGHT, t).unwrap();
+        draw(&mut canvas, &mut model, &mut view, None, t);
+        let pressed = Hit::Action(mark.action());
+        let new = chat_frame(&model, &mut view, Some(&pressed), HEIGHT, t).unwrap();
+        let damage = draw_chat_update(&mut canvas, &model, &view, &old, &new, t).unwrap();
+        assert!(damage.rows.is_empty(), "{damage:?}");
+        assert!(!damage.areas.is_empty());
+        assert!(
+            damage
+                .areas
+                .iter()
+                .all(|a| a.0 == 0 && a.2 == GUTTER_W as i32),
+            "{damage:?}"
+        );
     }
 
     #[test]
