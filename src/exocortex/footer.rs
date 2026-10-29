@@ -246,7 +246,8 @@ pub fn format_finish_time(ended_at: f64, now: f64) -> Option<String> {
 
 /// The footer's line (before the type token uppercases it): the model, the
 /// throughput, and the live duration (`active`) or the finish clock.
-pub fn text(metadata: &Metadata, now: f64, active: bool) -> String {
+/// `tokens`: "| N tokens" at its end (Settings → Show token counts).
+pub fn text(metadata: &Metadata, now: f64, active: bool, tokens: bool) -> String {
     let throughput = metadata
         .generation_throughput
         .as_ref()
@@ -278,7 +279,25 @@ pub fn text(metadata: &Metadata, now: f64, active: bool) -> String {
             .and_then(|ended| format_finish_time(ended, now))
             .unwrap_or(duration)
     };
-    format!("{model} | {rate} tok/s | {when}")
+    if tokens {
+        let count = token_count(metadata.tokens);
+        format!("{model} | {rate} tok/s | {when} | {count} tokens")
+    } else {
+        format!("{model} | {rate} tok/s | {when}")
+    }
+}
+
+/// `12,345` (the iPhone's `formatTokenCount`).
+pub fn token_count(tokens: u64) -> String {
+    let digits = tokens.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -405,19 +424,22 @@ mod tests {
         m.started_at = 1_000_000.0;
         m.work_timer_started_at = Some(1_000_000.0 - 60_000.0);
         let now = 1_000_000.0 + 35_000.0;
-        assert_eq!(text(&m, now, true), "Opus-5.5 | 0.0 tok/s | 1m 35s");
+        assert_eq!(text(&m, now, true, false), "Opus-5.5 | 0.0 tok/s | 1m 35s");
         m.ended_at = Some(now);
         m.generation_throughput = Some(Throughput {
             provider: "anthropic".into(),
             model: "claude-opus-5-5".into(),
             rates: vec![76.2],
         });
-        let line = text(&m, now, false);
+        let line = text(&m, now, false, false);
         assert!(line.starts_with("Opus-5.5 | 76.2 tok/s | "), "{line}");
         assert!(line.ends_with("am") || line.ends_with("pm"), "{line}");
         // Another model's rate is not this one's.
         m.generation_throughput.as_mut().unwrap().model = "other".into();
-        assert!(text(&m, now, false).contains("| — tok/s |"));
+        assert!(text(&m, now, false, false).contains("| — tok/s |"));
+        assert!(text(&m, now, false, true).ends_with("| 0 tokens"));
+        assert_eq!(token_count(999), "999");
+        assert_eq!(token_count(1_234_567), "1,234,567");
     }
 
     #[test]

@@ -16,6 +16,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -136,7 +137,7 @@ enum Fallback {
 
 struct Typefaces {
     fallbacks: Vec<Fallback>,
-    glyphs: HashMap<(Weight, u16, Cluster), Rc<Glyph>>,
+    glyphs: HashMap<(Weight, u16, Cluster), Rc<Glyph>, BuildHasherDefault<GlyphHasher>>,
     gamma: [u8; 256],
 }
 
@@ -226,6 +227,44 @@ fn pictographic(character: char) -> bool {
 /// pictograph (or a keycap base) with its selectors, skin tone, tags and
 /// ZWJ-joined parts, or a pair of regional indicators (a flag). Lazy, so a
 /// caller that stops early (`fit`) never looks at the rest.
+/// The glyph cache's hasher: a multiply-rotate over the key's words (the
+/// default SipHash cost more than drawing a cached glyph; the keys are the
+/// app's own text, not an attacker's).
+#[derive(Default)]
+struct GlyphHasher(u64);
+
+impl Hasher for GlyphHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+
+    fn write_u8(&mut self, n: u8) {
+        self.write_u64(u64::from(n));
+    }
+
+    fn write_u16(&mut self, n: u16) {
+        self.write_u64(u64::from(n));
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(u64::from(n));
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
 fn clusters(text: &str) -> Clusters<'_> {
     Clusters {
         characters: text.chars().peekable(),
@@ -491,7 +530,7 @@ impl Typefaces {
         }
         Self {
             fallbacks: FALLBACK_FILES.iter().map(|_| Fallback::Unloaded).collect(),
-            glyphs: HashMap::new(),
+            glyphs: HashMap::default(),
             gamma,
         }
     }

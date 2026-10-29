@@ -16,6 +16,11 @@ use super::super::model::attach::{self, Browser};
 use super::super::model::composer::Act;
 use super::super::model::{Action, Model};
 use super::super::theme::{self, ACTION_ICON, ACTION_ITEM, HAIRLINE, T_META, T_ROW, W};
+
+/// A row: its label and its line under it grow with the text size.
+fn row_h() -> f32 {
+    theme::grown(ACTION_ITEM, 100.0)
+}
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::overlay::Cx;
 use super::super::ui::sheet::{Reply, Sheet, SheetContent};
@@ -156,7 +161,7 @@ impl SheetContent for FileSheet {
             self.moves = browser.moves;
             self.reset = true;
         }
-        HEAD + self.rows.len() as f32 * ACTION_ITEM
+        HEAD + self.rows.len() as f32 * row_h()
     }
 
     fn scroll_reset(&mut self) -> bool {
@@ -178,9 +183,9 @@ impl SheetContent for FileSheet {
                 1.0,
             );
         }
-        let first = ((-top - HEAD) / ACTION_ITEM).floor().max(0.0) as usize;
+        let first = ((-top - HEAD) / row_h()).floor().max(0.0) as usize;
         for (index, row) in self.rows.iter().enumerate().skip(first) {
-            let y = top + HEAD + index as f32 * ACTION_ITEM;
+            let y = top + HEAD + index as f32 * row_h();
             if y > cx.height {
                 break;
             }
@@ -188,7 +193,7 @@ impl SheetContent for FileSheet {
             if pressed == Some(index) && !matches!(row, Row::Note(_)) {
                 widgets::fill(
                     canvas,
-                    RectF::new(0.0, y + HAIRLINE, W, ACTION_ITEM - HAIRLINE),
+                    RectF::new(0.0, y + HAIRLINE, W, row_h() - HAIRLINE),
                     p.selection_background,
                 );
             }
@@ -232,7 +237,7 @@ impl SheetContent for FileSheet {
                     canvas,
                     icon,
                     x + ACTION_ICON / 2.0,
-                    y + ACTION_ITEM / 2.0,
+                    y + row_h() / 2.0,
                     ACTION_ICON,
                     if matches!(row, Row::Folder(..)) {
                         p.accent
@@ -245,8 +250,8 @@ impl SheetContent for FileSheet {
             }
             let right = W - x;
             let label_top = match &detail {
-                Some(_) => y + (ACTION_ITEM - T_ROW.line() - T_META.line()) / 2.0,
-                None => y + (ACTION_ITEM - T_ROW.line()) / 2.0,
+                Some(_) => y + (row_h() - T_ROW.line() - T_META.line()) / 2.0,
+                None => y + (row_h() - T_ROW.line()) / 2.0,
             };
             widgets::text(
                 canvas,
@@ -276,7 +281,7 @@ impl SheetContent for FileSheet {
         if y < 0.0 {
             return None;
         }
-        let index = (y / ACTION_ITEM).floor() as usize;
+        let index = (y / row_h()).floor() as usize;
         (index < self.rows.len()).then_some(index)
     }
 

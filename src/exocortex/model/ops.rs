@@ -172,6 +172,7 @@ pub enum Toggle {
     ShowAllWork,
     FoldMarkers,
     Haptics,
+    ShowTokenCounts,
 }
 
 impl Toggle {
@@ -182,6 +183,16 @@ impl Toggle {
         Toggle::FoldMarkers,
         Toggle::Haptics,
     ];
+    /// Text & transcript's (after the text size).
+    pub const TEXT: [Toggle; 1] = [Toggle::ShowTokenCounts];
+    pub const ALL: [Toggle; 6] = [
+        Toggle::ExpandThinking,
+        Toggle::ExpandToolCalls,
+        Toggle::ShowAllWork,
+        Toggle::FoldMarkers,
+        Toggle::Haptics,
+        Toggle::ShowTokenCounts,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -190,6 +201,7 @@ impl Toggle {
             Toggle::ShowAllWork => "Show all work",
             Toggle::FoldMarkers => "Fold markers",
             Toggle::Haptics => "Haptics",
+            Toggle::ShowTokenCounts => "Show token counts",
         }
     }
 
@@ -204,6 +216,7 @@ impl Toggle {
                 "A thin mark at the left edge where work is folded; tap it to open that spot"
             }
             Toggle::Haptics => "",
+            Toggle::ShowTokenCounts => "Adds \u{201c}| N tokens\u{201d} to response metadata",
         }
     }
 
@@ -214,6 +227,7 @@ impl Toggle {
             Toggle::ShowAllWork => settings.show_all_work,
             Toggle::FoldMarkers => settings.fold_markers,
             Toggle::Haptics => settings.haptics,
+            Toggle::ShowTokenCounts => settings.show_token_counts,
         }
     }
 
@@ -224,6 +238,7 @@ impl Toggle {
             Toggle::ShowAllWork => &mut settings.show_all_work,
             Toggle::FoldMarkers => &mut settings.fold_markers,
             Toggle::Haptics => &mut settings.haptics,
+            Toggle::ShowTokenCounts => &mut settings.show_token_counts,
         }
     }
 }

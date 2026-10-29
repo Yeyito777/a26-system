@@ -66,6 +66,23 @@ pub struct LiveFold {
     pub revealed: Option<(usize, usize)>,
 }
 
+/// The live turn's plan without its streaming blocks (`plan_turns`): what
+/// its committed part folded, so that `live_fold` makes the live plan from
+/// the blocks as they stream, without planning the history again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveBase {
+    pub turn: String,
+    pub open: bool,
+    /// The notifications that lead its working row.
+    pub label: Option<String>,
+    /// Committed work folded so far (the reveal step not counted).
+    pub tool_calls: usize,
+    pub texts: usize,
+    /// The newest committed step, shown under the working row while the
+    /// live blocks have none, and whether it is a tool call (else text).
+    pub reveal: Option<(usize, usize, bool)>,
+}
+
 /// A notification (or notice) folded into a turn's work.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergedFold {
@@ -97,7 +114,11 @@ pub struct GutterEntry {
 #[derive(Debug, Default)]
 pub struct FoldPlan {
     pub by_msg: HashMap<usize, AssistantFold>,
+    /// The live turn's plan (`plan`), or what `live_fold` makes it from
+    /// (`plan_turns`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub live: Option<LiveFold>,
+    pub live_base: Option<LiveBase>,
     pub gutter: HashMap<usize, GutterEntry>,
     pub merged: HashMap<usize, MergedFold>,
 }
@@ -590,7 +611,10 @@ impl View<'_> {
 }
 
 /// Plans every assistant message of `msgs` (keyed `keys`, for disclosure
-/// keys) and the live tail (`live`, when a turn streams).
+/// keys) and the live tail (`live`, when a turn streams): the iPhone's
+/// `planFold` (the transcript plans in two parts: `plan_turns`,
+/// `live_fold`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn plan(
     msgs: &[Msg],
     keys: &[String],
@@ -600,6 +624,79 @@ pub fn plan(
     run_started_at: Option<f64>,
     own_subagent: &dyn Fn(&str) -> bool,
 ) -> FoldPlan {
+    let mut out = plan_turns(
+        msgs,
+        keys,
+        live.is_some(),
+        is_open,
+        marks,
+        run_started_at,
+        own_subagent,
+    );
+    if let (Some(base), Some(blocks)) = (&out.live_base, live) {
+        out.live = Some(live_fold(base, blocks));
+    }
+    out
+}
+
+/// The live turn's plan from its base and its blocks so far: they fold but
+/// for the newest step, which the committed one stands for until there is
+/// one.
+pub fn live_fold(base: &LiveBase, blocks: &[Block]) -> LiveFold {
+    let latest = latest_step(blocks);
+    let (mut tool_calls, mut texts) = (base.tool_calls, base.texts);
+    let reveal = match (latest, base.reveal) {
+        (None, Some((msg, block, _))) => Some((msg, block)),
+        // A step of its own: the committed one counts as folded work.
+        (Some(_), Some((_, _, call))) => {
+            if call {
+                tool_calls += 1;
+            } else {
+                texts += 1;
+            }
+            None
+        }
+        _ => None,
+    };
+    let mut hidden = HashSet::new();
+    for (bi, block) in blocks.iter().enumerate() {
+        if Some(bi) == latest {
+            continue;
+        }
+        hidden.insert(bi);
+        if matches!(block, Block::ToolCall { .. }) {
+            tool_calls += 1;
+        } else if has_text(block) {
+            texts += 1;
+        }
+    }
+    let summary = [base.label.clone(), work_summary(tool_calls, texts)]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    LiveFold {
+        hidden: (!base.open).then_some(hidden),
+        summary: (!summary.is_empty()).then_some(summary),
+        turn: base.turn.clone(),
+        open: base.open,
+        revealed: if base.open { None } else { reveal },
+    }
+}
+
+/// `plan` without the live turn's blocks (`live`: a turn streams): the
+/// history's folds and the live turn's base, the same however its reply
+/// grows.
+pub fn plan_turns(
+    msgs: &[Msg],
+    keys: &[String],
+    live: bool,
+    is_open: &dyn Fn(&str) -> bool,
+    marks: bool,
+    run_started_at: Option<f64>,
+    own_subagent: &dyn Fn(&str) -> bool,
+) -> FoldPlan {
+    let live: Option<&[Block]> = live.then_some(&[]);
     debug_assert_eq!(msgs.len(), keys.len());
     let view = View {
         msgs,
@@ -643,6 +740,7 @@ pub fn plan(
                 .filter(|&j| view.blocks(j).is_some())
                 .collect();
             let mut reveal: Option<(usize, usize)> = None;
+            debug_assert!(live_latest.is_none());
             if in_progress && live_latest.is_none() {
                 for &j in assistants.iter().rev() {
                     if let Some(b) = latest_step(view.blocks(j).unwrap_or_default()) {
@@ -730,22 +828,6 @@ pub fn plan(
                     earlier.summary = None;
                 }
             }
-            let mut live_hidden: Option<HashSet<usize>> = None;
-            if in_progress {
-                let mut set = HashSet::new();
-                for (bi, block) in live.unwrap_or_default().iter().enumerate() {
-                    if Some(bi) == live_latest {
-                        continue;
-                    }
-                    set.insert(bi);
-                    if matches!(block, Block::ToolCall { .. }) {
-                        tool_calls += 1;
-                    } else if has_text(block) {
-                        texts += 1;
-                    }
-                }
-                live_hidden = Some(set);
-            }
             let answered = !assistants.is_empty() || in_progress;
             let own_merged = head_label.is_some() && answered;
             let absorbed = !orphans.is_empty() && answered;
@@ -830,12 +912,17 @@ pub fn plan(
                 );
             }
             if in_progress {
-                out.live = Some(LiveFold {
-                    hidden: if open { None } else { live_hidden },
-                    summary,
+                let call = |(msg, block): (usize, usize)| {
+                    view.blocks(msg)
+                        .is_some_and(|b| matches!(b[block], Block::ToolCall { .. }))
+                };
+                out.live_base = Some(LiveBase {
                     turn,
                     open,
-                    revealed: if open { None } else { reveal },
+                    label: row_label,
+                    tool_calls,
+                    texts,
+                    reveal: reveal.map(|r| (r.0, r.1, call(r))),
                 });
             }
         }

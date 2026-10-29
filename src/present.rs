@@ -31,6 +31,27 @@ const BAND_ROWS: i32 = 16;
 const SHM_FROM_BYTES: usize = 2 * 1024 * 1024;
 const CHUNK: usize = 64;
 
+/// Whether two runs of pixels are the same, 16 at a time (vectorised): a
+/// slice's `==` is musl's `memcmp`, which compares one byte at a time, and
+/// a row the frame drew again unchanged (most of a page's background) cost
+/// 13,000 instructions.
+fn same(a: &[u32], b: &[u32]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let (mut x, mut y) = (a.chunks_exact(16), b.chunks_exact(16));
+    for (x, y) in (&mut x).zip(&mut y) {
+        let mut diff = 0;
+        for i in 0..16 {
+            diff |= x[i] ^ y[i];
+        }
+        if diff != 0 {
+            return false;
+        }
+    }
+    x.remainder().iter().zip(y.remainder()).all(|(p, q)| p == q)
+}
+
 pub struct Presenter {
     window: Window,
     pixmap: Pixmap,
@@ -308,7 +329,7 @@ impl Presenter {
                         let start = y as usize * width;
                         let new = &canvas.pixels[start..start + width];
                         let old = &self.shadow[start..start + width];
-                        if new == old {
+                        if same(new, old) {
                             continue;
                         }
                         for (chunk, flag) in dirty.iter_mut().enumerate() {
@@ -317,7 +338,7 @@ impl Presenter {
                             }
                             let a = chunk * CHUNK;
                             let b = (a + CHUNK).min(width);
-                            *flag = new[a..b] != old[a..b];
+                            *flag = !same(&new[a..b], &old[a..b]);
                         }
                     }
                 }
@@ -552,4 +573,23 @@ fn pixel_bytes(pixels: &[u32]) -> &[u8] {
     // SAFETY: u32 has no padding or invalid bit patterns, u8 has alignment 1,
     // and the byte length covers exactly the same allocation.
     unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), pixels.len() * 4) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same;
+
+    #[test]
+    fn rows_compare_like_slices() {
+        let a: Vec<u32> = (0..1080).collect();
+        let mut b = a.clone();
+        assert!(same(&a, &b));
+        for at in [0, 15, 16, 1070, 1079] {
+            b[at] ^= 1;
+            assert!(!same(&a, &b), "{at}");
+            b[at] ^= 1;
+        }
+        assert!(!same(&a, &b[..1079]));
+        assert!(same(&a[3..40], &b[3..40]));
+    }
 }
