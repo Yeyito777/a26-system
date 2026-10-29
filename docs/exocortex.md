@@ -293,7 +293,11 @@ are discarded.
   are visited. The reader's place, when not following the newest message, is
   a piece (entry stamp and index) and its distance from the top; it is kept
   when anything changes above it (older history, a fresh window).
-  Following resumes within 12 pt of the end.
+  Following resumes within 12 pt of the end. A frame lines the two
+  frames' pieces up by identity and place (`draw_chat_update`'s
+  `line_up`), not by their place in the list: a page of older history
+  loading above the reader, who stays put, draws nothing again. Entries
+  start on whole pixels so that what moves keeps its pixels.
 - **Streaming costs what grew.** A chunk, a block, a tool call or result
   and a tokens update change only the live reply (`Chat::live_version`, not
   `Chat::version`): the layout keeps the history's part (`History`: its
