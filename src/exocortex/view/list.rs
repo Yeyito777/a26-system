@@ -22,7 +22,7 @@ use crate::text::Weight;
 use super::super::anim::{self, Animator};
 use super::super::list::activity::{self, Activity, Kind};
 use super::super::list::search::Search;
-use super::super::model::sidebar::{Act, Aggregates, Key, Layout};
+use super::super::model::sidebar::{Act, Aggregates, Drag, DropTarget, Key, Layout};
 use super::super::model::{self, Action, Model, Page, Row};
 use super::super::theme::{
     self, FOLDER_ICON, FOLDER_INDENT, GESTURE_RESERVE, HAIRLINE, LIST_PAD, LIST_ROW, S1, SPINNER,
@@ -223,6 +223,8 @@ struct ConversationLook {
     face: Face,
     /// In select mode: whether it is selected.
     check: Option<bool>,
+    /// A drag's reorder line at its top (false) or bottom (true).
+    edge: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -244,6 +246,8 @@ struct FolderLook {
     face: Face,
     plus: bool,
     check: Option<bool>,
+    /// A drag would drop into it.
+    drop: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -295,6 +299,8 @@ struct Ctx<'a> {
     turning: Option<(String, f32)>,
     /// Select mode's selection.
     selection: Option<BTreeSet<Key>>,
+    /// A drag under way: what is dragged and where it would land.
+    drag: Option<(Key, Option<DropTarget>)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -321,6 +327,12 @@ impl<'a> Ctx<'a> {
                 (id.clone(), anim::ease_out(t))
             }),
             selection: model.sidebar.selection.clone(),
+            drag: model
+                .sidebar
+                .drag
+                .as_ref()
+                .filter(|drag| drag.active)
+                .map(|drag| (drag.key.clone(), drag.target.clone())),
         }
     }
 
@@ -329,6 +341,13 @@ impl<'a> Ctx<'a> {
         self.selection
             .as_ref()
             .map(|selection| selection.contains(&key))
+    }
+
+    /// The dragged item shows lifted.
+    fn dragged(&self, key: Key) -> bool {
+        self.drag
+            .as_ref()
+            .is_some_and(|(dragged, _)| *dragged == key)
     }
 
     fn face(&self, action: &Action) -> Face {
@@ -406,6 +425,14 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
             }
             let action = row_action(row, searching, selecting).expect("a conversation's");
             let check = ctx.check(Key::Conv(id.clone()));
+            let edge = match &ctx.drag {
+                Some((_, Some(DropTarget::Reorder { key, after })))
+                    if *key == Key::Conv(id.clone()) =>
+                {
+                    Some(*after)
+                }
+                _ => None,
+            };
             Look::Conversation(ConversationLook {
                 depth: *depth,
                 title,
@@ -422,6 +449,7 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
                 },
                 activity,
                 face: match ctx.face(&action) {
+                    _ if ctx.dragged(Key::Conv(id.clone())) => Face::Lifted,
                     Face::Plain if check == Some(true) => Face::Checked,
                     Face::Plain
                         if check.is_none() && ctx.selected.as_deref() == Some(id.as_str()) =>
@@ -431,6 +459,7 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
                     face => face,
                 },
                 check,
+                edge,
             })
         }
         Row::Folder { id, depth, open } => {
@@ -462,9 +491,11 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
             let action = row_action(row, searching, selecting).expect("a folder's");
             let check = ctx.check(Key::Folder(id.clone()));
             let face = match ctx.face(&action) {
+                _ if ctx.dragged(Key::Folder(id.clone())) => Face::Lifted,
                 Face::Plain if check == Some(true) => Face::Checked,
                 face => face,
             };
+            let drop = matches!(&ctx.drag, Some((_, Some(DropTarget::Folder(f)))) if f == id);
             let progress = match &ctx.turning {
                 Some((turning, progress)) if turning == id => *progress,
                 _ => 1.0,
@@ -494,6 +525,7 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
                 face,
                 plus: ctx.pressed == Some(&Action::List(Act::NewChatIn(id.clone()))),
                 check,
+                drop,
             })
         }
     }
@@ -727,6 +759,12 @@ fn draw_conversation(canvas: &mut Canvas, c: &ConversationLook, y: f32) {
     }
     let meta = widgets::fit(&c.meta, T_META, (RIGHT - x).max(0.0));
     widgets::text(canvas, &meta, x, y + 124.0, T_META, p.muted, 1.0);
+    // A drag's reorder line (§3.6.3): an 8 px capsule at the edge it
+    // would land on, inside the row.
+    if let Some(after) = c.edge {
+        let ly = if after { y + ROW_H - 8.0 } else { y };
+        canvas.fill_rrect(RectF::new(22.0, ly, W - 44.0, 8.0), 4.0, p.accent, 1.0);
+    }
 }
 
 /// The chevron (`Icon::ChevronRight`'s stroke) turned `turn` steps of 90°.
@@ -764,8 +802,15 @@ fn draw_check(canvas: &mut Canvas, x: f32, cy: f32, checked: bool) -> f32 {
 fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
     let p = theme::p();
     let c = theme::c();
-    let background = face_color(f.face);
+    let background = if f.drop {
+        c.drop_target
+    } else {
+        face_color(f.face)
+    };
     widgets::fill(canvas, RectF::new(0.0, y, W, ROW_H), background);
+    if f.drop {
+        widgets::border(canvas, RectF::new(0.0, y, W, ROW_H), 6.0, p.accent);
+    }
     // 8 pt in, 14 pt a level.
     let mut base = 22.0 + FOLDER_INDENT * f.depth as f32;
     let cy = y + ROW_H / 2.0;
@@ -1294,6 +1339,8 @@ pub struct ListFrame {
     pub(crate) lifted: Option<(i32, i32)>,
     /// A pull past the top: the gap it opens and how the indicator shows.
     pub(crate) pull: Option<(i32, u64)>,
+    /// A dragged row's preview: its rows and what it shows.
+    pub(crate) preview: Option<(i32, i32, u64)>,
 }
 
 /// The rows of `layout` reaching into `y0..y1` (from the list's top).
@@ -1370,6 +1417,13 @@ pub fn list_frame(
         bar: select_bar_key(model, pressed),
         lifted: lifted_row,
         pull: pull(model, offset, now),
+        preview: preview_rect(model, height).map(|(rect, title, folder)| {
+            (
+                rect.y as i32,
+                (rect.y + rect.h) as i32,
+                super::hash_of((rect.x as i32, rect.w as i32, title, folder)),
+            )
+        }),
     })
 }
 
@@ -1475,6 +1529,15 @@ pub fn animate(model: &Model, now: Instant, animator: &mut Animator) {
     if let Some(due) = model.sidebar.search.due() {
         animator.request(due);
     }
+    // A dragged row scrolling the list.
+    if model
+        .sidebar
+        .drag
+        .as_ref()
+        .is_some_and(|drag| drag.active && drag.speed != 0.0)
+    {
+        animator.frame(now);
+    }
     // A folder's chevron turning.
     if let Some((_, at)) = &model.sidebar.toggled
         && now.saturating_duration_since(*at).as_secs_f32() < TURN_FOR
@@ -1568,6 +1631,14 @@ pub fn draw_list_update(
             .map_or(0, |(g, _)| g)
             .max(new.pull.map_or(0, |(g, _)| g));
         redraw.push(on_screen(top, top + gap + theme::S1 as i32 + 2));
+    }
+    // A dragged row's preview: where it was and is (a scroll moved its
+    // pixels with the rows).
+    if old.preview != new.preview || (shift != 0 && new.preview.is_some()) {
+        for (y0, y1, _) in [old.preview, new.preview].into_iter().flatten() {
+            redraw.push(on_screen(y0, y1));
+            redraw.push(on_screen(y0 - shift, y1 - shift));
+        }
     }
     // Select mode's bar.
     if old.bar != new.bar {
@@ -1664,6 +1735,7 @@ fn draw_list_with(
             if offset < 0.0 {
                 draw_pull(canvas, model, top, -offset, now);
             }
+            draw_preview(canvas, model, height);
             if let Some(label) = footer(model)
                 && !layout.rows.is_empty()
             {
@@ -1813,11 +1885,242 @@ pub fn long_press(
     liftable(model, view, height, x, y, now)?;
     let (row, row_y) = row_at(model, view, height, y, now)?;
     let rect = RectF::new(0.0, row_y.round(), W, ROW_H);
+    let key = row_key(&row)?;
+    // Held: the menu opens; moved on far enough, it becomes a drag.
+    model.sidebar.drag = Some(Drag {
+        key,
+        start: (x, y),
+        at: (x, y),
+        active: false,
+        target: None,
+        speed: 0.0,
+        stepped: None,
+    });
     match row {
         Row::Conversation { id, .. } => Some(Action::List(Act::RowMenu { id, rect })),
         Row::Folder { id, .. } => Some(Action::List(Act::FolderMenu { id, rect })),
         _ => None,
     }
+}
+
+// ----- Dragging a row (PAR-070, 071) ------------------------------------------
+
+/// How far a held row moves before its menu gives way to a drag (16 pt).
+const DRAG_START: f32 = 44.0;
+/// The edge zones that scroll the list under a dragged row (76 pt), and
+/// the fastest they scroll (1,240 pt/s).
+const EDGE_ZONE: f32 = 210.0;
+const EDGE_SPEED: f32 = 3434.0;
+
+/// Where a dragged `key` would land with the finger at window `y`: a folder
+/// it is not in (and not itself or below itself), or next to a conversation
+/// of its pinned group (never while searching).
+fn drop_target(
+    model: &mut Model,
+    view: &ViewState,
+    height: f32,
+    key: &Key,
+    y: f32,
+    now: Instant,
+) -> Option<DropTarget> {
+    let (row, row_y) = row_at(model, view, height, y, now)?;
+    if row_key(&row).as_ref() == Some(key) {
+        return None;
+    }
+    let sidebar = &model.sidebar;
+    let source_parent = sidebar.parent_of(key)?;
+    let source_pinned = sidebar.pinned_of(key)?;
+    let below_source = |folder: Option<&str>| match (key, folder) {
+        (Key::Folder(source), Some(folder)) => sidebar.descendant_folders(source).contains(folder),
+        _ => false,
+    };
+    match row {
+        Row::Folder { id, .. } => {
+            if source_parent.as_deref() == Some(id.as_str()) || below_source(Some(&id)) {
+                return None;
+            }
+            Some(DropTarget::Folder(id))
+        }
+        Row::Conversation { id, .. } => {
+            if sidebar.search.active() {
+                return None;
+            }
+            let c = sidebar.conversations.get(&id)?;
+            if c.pinned != source_pinned || below_source(c.folder_id.as_deref()) {
+                return None;
+            }
+            Some(DropTarget::Reorder {
+                key: Key::Conv(id),
+                after: y >= row_y + ROW_H / 2.0,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The dragged row's drop target again (the finger or the rows moved);
+/// a selection haptic when it changes to another.
+fn retarget(model: &mut Model, view: &ViewState, height: f32, now: Instant) {
+    let Some(drag) = model.sidebar.drag.clone().filter(|drag| drag.active) else {
+        return;
+    };
+    let target = drop_target(model, view, height, &drag.key, drag.at.1, now);
+    if target != drag.target {
+        if target.is_some() {
+            model.ui.haptic(super::super::ui::Haptic::Selection);
+        }
+        if let Some(drag) = &mut model.sidebar.drag {
+            drag.target = target;
+        }
+        model.sidebar.changed();
+    }
+}
+
+/// A held row's gesture after its long press: moved, it is dragged (the
+/// menu closes); let go over a target, it moves there. None when the
+/// gesture is not a drag's (let go without moving: the menu stays).
+/// Returns whether anything shows differently, and commands to send.
+pub fn drag(
+    model: &mut Model,
+    view: &mut ViewState,
+    height: f32,
+    gesture: &super::super::gesture::Gesture,
+    now: Instant,
+) -> Option<(bool, Vec<serde_json::Value>)> {
+    use super::super::gesture::Gesture;
+    match *gesture {
+        Gesture::LongPressMove { x, y } => {
+            let drag = model.sidebar.drag.as_mut()?;
+            drag.at = (x, y);
+            if !drag.active {
+                let (dx, dy) = (x - drag.start.0, y - drag.start.1);
+                if (dx * dx + dy * dy).sqrt() < DRAG_START {
+                    return Some((false, Vec::new()));
+                }
+                // The menu gives way to the dragged row.
+                drag.active = true;
+                model.ui.close_all = true;
+            }
+            // Near an edge, the list scrolls under the finger.
+            let (top, bottom) = bounds(model, height);
+            let near_top = ((top + EDGE_ZONE - y) / EDGE_ZONE).clamp(0.0, 1.0);
+            let near_bottom = ((y - (bottom - EDGE_ZONE)) / EDGE_ZONE).clamp(0.0, 1.0);
+            let speed = EDGE_SPEED * (near_bottom.powf(1.45) - near_top.powf(1.45));
+            if let Some(drag) = &mut model.sidebar.drag {
+                drag.speed = speed;
+                if drag.stepped.is_none() || speed == 0.0 {
+                    drag.stepped = Some(now);
+                }
+            }
+            retarget(model, view, height, now);
+            model.sidebar.changed();
+            Some((true, Vec::new()))
+        }
+        Gesture::LongPressEnd { .. } | Gesture::Cancel => {
+            let drag = model.sidebar.drag.take()?;
+            if !drag.active {
+                return None;
+            }
+            view.lifted = None;
+            model.sidebar.changed();
+            let commands = match (drag.target, gesture) {
+                (Some(target), Gesture::LongPressEnd { .. }) => model.list_drop(drag.key, target),
+                _ => Vec::new(),
+            };
+            Some((true, commands))
+        }
+        _ => None,
+    }
+}
+
+/// The dragged row's preview: an icon and its title in a chip 24 pt above
+/// the finger, inside the list.
+fn preview_rect(model: &Model, height: f32) -> Option<(RectF, String, bool)> {
+    let drag = model.sidebar.drag.as_ref().filter(|drag| drag.active)?;
+    let (title, folder) = match &drag.key {
+        Key::Conv(id) => (
+            model
+                .sidebar
+                .conversations
+                .get(id)
+                .and_then(activity::row_title)
+                .unwrap_or("Untitled chat")
+                .to_owned(),
+            false,
+        ),
+        Key::Folder(id) => (model.sidebar.folders.get(id)?.name.clone(), true),
+    };
+    let (top, bottom) = bounds(model, height);
+    let ty = T_ROW.weight(Weight::MonoSemiBold);
+    let w = (widgets::measure(&title, ty) + 44.0 + 60.0 + 28.0)
+        .min(637.0)
+        .round();
+    let h = 110.0;
+    let cx = drag.at.0.clamp(w / 2.0 + 34.0, W - w / 2.0 - 34.0);
+    let cy = (drag.at.1 - 66.0).clamp(top + h / 2.0 + 11.0, bottom - h / 2.0 - 11.0);
+    let rect = RectF::new((cx - w / 2.0).round(), (cy - h / 2.0).round(), w, h);
+    Some((rect, title, folder))
+}
+
+fn draw_preview(canvas: &mut Canvas, model: &Model, height: f32) {
+    let Some((rect, title, folder)) = preview_rect(model, height) else {
+        return;
+    };
+    if !widgets::shows(canvas, rect.y, rect.y + rect.h) {
+        return;
+    }
+    let p = theme::p();
+    widgets::boxed(canvas, rect, p.surface_background, p.accent);
+    let icon = if folder { Icon::FolderFill } else { Icon::Chat };
+    icons::draw(
+        canvas,
+        icon,
+        rect.x + 22.0 + 30.0,
+        rect.y + rect.h / 2.0,
+        44.0,
+        p.secondary_accent,
+        1.0,
+    );
+    let ty = T_ROW.weight(Weight::MonoSemiBold);
+    let x = rect.x + 22.0 + 60.0 + 17.0;
+    let shown = widgets::fit(&title, ty, rect.x + rect.w - 22.0 - x);
+    widgets::text(
+        canvas,
+        &shown,
+        x,
+        ty.baseline(rect.y + (rect.h - ty.line()) / 2.0),
+        ty,
+        p.text,
+        1.0,
+    );
+}
+
+/// A drag near an edge scrolls the list, a frame at a time; true when it
+/// moved.
+fn auto_scroll(model: &mut Model, view: &mut ViewState, height: f32, now: Instant) -> bool {
+    let Some(drag) = model.sidebar.drag.as_mut().filter(|drag| drag.active) else {
+        return false;
+    };
+    if drag.speed == 0.0 {
+        return false;
+    }
+    let last = drag.stepped.replace(now).unwrap_or(now);
+    let dt = now
+        .saturating_duration_since(last)
+        .as_secs_f32()
+        .clamp(1.0 / 120.0, 1.0 / 30.0);
+    let step = drag.speed * dt;
+    let max = list_max(model, height);
+    let offset = view.list_scroll.value(now);
+    let next = (offset + step).clamp(0.0, max).round();
+    if next == offset.round() {
+        return false;
+    }
+    view.list_scroll.reset();
+    view.list_scroll.offset = next;
+    // The rows moved under a resting finger.
+    retarget(model, view, height, now);
+    true
 }
 
 /// Before a frame: the search follows the typing, its results start at
@@ -1849,6 +2152,7 @@ fn settle_scroll(model: &mut Model, view: &mut ViewState, height: f32, now: Inst
     if model.page != Page::List {
         return changed;
     }
+    changed |= auto_scroll(model, view, height, now);
     let max = list_max(model, height);
     // Search results start at their top; the tree comes back where it was.
     if std::mem::take(&mut model.sidebar.scroll_top) {
@@ -2484,6 +2788,225 @@ mod tests {
         assert_eq!(found.len(), expected.len(), "items answered: {found:?}");
     }
 
+    /// Drags `from` (window y) to each of `to` and lets go; returns the
+    /// commands and the drag's target before the end.
+    fn drag_to(
+        model: &mut Model,
+        view: &mut ViewState,
+        from: f32,
+        to: &[f32],
+        now: Instant,
+    ) -> (Option<DropTarget>, Vec<serde_json::Value>) {
+        use crate::exocortex::gesture::Gesture;
+        let menu = long_press(model, view, H, 300.0, from, now).expect("a row's menu");
+        model.handle(menu);
+        view.take_ui(model, now);
+        for &y in to {
+            drag(model, view, H, &Gesture::LongPressMove { x: 300.0, y }, now);
+        }
+        let target = model.sidebar.drag.as_ref().and_then(|d| d.target.clone());
+        let end = drag(
+            model,
+            view,
+            H,
+            &Gesture::LongPressEnd {
+                x: 300.0,
+                y: *to.last().unwrap(),
+            },
+            now,
+        );
+        (
+            target,
+            end.map(|(_, commands)| commands).unwrap_or_default(),
+        )
+    }
+
+    fn row_y(model: &mut Model, row: impl Fn(&Row) -> bool) -> f32 {
+        let layout = model.sidebar.layout();
+        let index = layout.index_of(row).unwrap();
+        list_top(model) + layout.tops[index]
+    }
+
+    #[test]
+    fn a_held_row_dragged_onto_a_folder_moves_into_it() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let from = row_y(
+            &mut model,
+            |r| matches!(r, Row::Conversation { id, .. } if id == "c4"),
+        ) + 80.0;
+        let folder = row_y(
+            &mut model,
+            |r| matches!(r, Row::Folder { id, .. } if id == "f"),
+        ) + 80.0;
+        // A small move keeps the menu (no drag yet).
+        let (target, commands) = drag_to(&mut model, &mut view, from, &[from + 20.0], now);
+        assert_eq!((target, commands.len()), (None, 0));
+        assert!(model.sidebar.drag.is_none());
+        let (target, commands) = drag_to(&mut model, &mut view, from, &[from + 60.0, folder], now);
+        assert_eq!(target, Some(DropTarget::Folder("f".into())));
+        assert_eq!(commands[0]["type"], "move_sidebar_items");
+        assert_eq!(commands[0]["parentId"], "f");
+        assert!(commands[0].get("before").is_none());
+        // Shown there at once, the folder opened.
+        assert_eq!(
+            model.sidebar.conversations["c4"].folder_id.as_deref(),
+            Some("f")
+        );
+        assert!(model.sidebar.expanded.contains("f"));
+    }
+
+    #[test]
+    fn a_held_row_dragged_between_rows_reorders_in_its_group() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let from = row_y(
+            &mut model,
+            |r| matches!(r, Row::Conversation { id, .. } if id == "c9"),
+        ) + 80.0;
+        let c4 = row_y(
+            &mut model,
+            |r| matches!(r, Row::Conversation { id, .. } if id == "c4"),
+        );
+        // The top half of c4: before it.
+        let (target, commands) =
+            drag_to(&mut model, &mut view, from, &[from - 60.0, c4 + 30.0], now);
+        assert_eq!(
+            target,
+            Some(DropTarget::Reorder {
+                key: Key::Conv("c4".into()),
+                after: false
+            })
+        );
+        assert_eq!(commands[0]["before"]["id"], "c4");
+        assert_eq!(commands[0]["preservePinned"], true);
+        let (c3, c4s, c9) = (
+            model.sidebar.conversations["c3"].sort_order,
+            model.sidebar.conversations["c4"].sort_order,
+            model.sidebar.conversations["c9"].sort_order,
+        );
+        assert!(c3 < c9 && c9 < c4s, "between c3 and c4: {c3} {c9} {c4s}");
+        // A pinned row takes no unpinned reorder; the bottom half: after.
+        let c0 = row_y(
+            &mut model,
+            |r| matches!(r, Row::Conversation { id, .. } if id == "c0"),
+        );
+        let from = row_y(
+            &mut model,
+            |r| matches!(r, Row::Conversation { id, .. } if id == "c6"),
+        ) + 80.0;
+        let (target, _) = drag_to(&mut model, &mut view, from, &[from - 60.0, c0 + 120.0], now);
+        assert_eq!(target, None);
+        let c7 = row_y(
+            &mut model,
+            |r| matches!(r, Row::Conversation { id, .. } if id == "c7"),
+        );
+        let (target, commands) =
+            drag_to(&mut model, &mut view, from, &[from + 60.0, c7 + 120.0], now);
+        assert_eq!(
+            target,
+            Some(DropTarget::Reorder {
+                key: Key::Conv("c7".into()),
+                after: true
+            })
+        );
+        // After c7: before the one after it.
+        assert_eq!(commands[0]["before"]["id"], "c8");
+    }
+
+    #[test]
+    fn a_drag_near_the_bottom_scrolls_the_list() {
+        use crate::exocortex::gesture::Gesture;
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let from = row_y(
+            &mut model,
+            |r| matches!(r, Row::Conversation { id, .. } if id == "c4"),
+        ) + 80.0;
+        let menu = long_press(&mut model, &view, H, 300.0, from, now).unwrap();
+        model.handle(menu);
+        let (_, bottom) = bounds(&model, H);
+        drag(
+            &mut model,
+            &mut view,
+            H,
+            &Gesture::LongPressMove {
+                x: 300.0,
+                y: bottom - 20.0,
+            },
+            now,
+        );
+        assert!(model.sidebar.drag.as_ref().unwrap().speed > 2000.0);
+        let mut at = now;
+        for _ in 0..30 {
+            at += Duration::from_millis(16);
+            let _ = settle(&mut model, &mut view, H, at);
+        }
+        assert!(
+            view.list_scroll.offset > 500.0,
+            "scrolled to {}",
+            view.list_scroll.offset
+        );
+        // Back in the middle: it stops.
+        drag(
+            &mut model,
+            &mut view,
+            H,
+            &Gesture::LongPressMove {
+                x: 300.0,
+                y: H / 2.0,
+            },
+            at,
+        );
+        let still = view.list_scroll.offset;
+        let _ = settle(&mut model, &mut view, H, at + Duration::from_millis(16));
+        assert_eq!(view.list_scroll.offset, still);
+        drag(&mut model, &mut view, H, &Gesture::Cancel, at);
+        assert!(model.sidebar.drag.is_none());
+    }
+
+    #[test]
+    fn drag_frames_draw_only_what_moved() {
+        use crate::exocortex::gesture::Gesture;
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let from = row_y(
+            &mut model,
+            |r| matches!(r, Row::Conversation { id, .. } if id == "c4"),
+        ) + 80.0;
+        let menu = long_press(&mut model, &view, H, 300.0, from, now).unwrap();
+        model.handle(menu);
+        // Under way (the menu gone).
+        drag(
+            &mut model,
+            &mut view,
+            H,
+            &Gesture::LongPressMove {
+                x: 300.0,
+                y: from + 80.0,
+            },
+            now,
+        );
+        model.ui.close_all = false;
+        for step in 1..=6 {
+            let y = from + 80.0 + step as f32 * 47.0;
+            let damage = update_matches(
+                &mut model,
+                &mut view,
+                (None, None),
+                (now, now),
+                |model, view| {
+                    drag(model, view, H, &Gesture::LongPressMove { x: 300.0, y }, now);
+                },
+            );
+            assert!(drawn(&damage) < 900, "step {step}: {damage:?}");
+        }
+    }
+
     #[test]
     fn rows_hit_and_long_press_where_they_are() {
         let mut model = model();
@@ -2580,6 +3103,26 @@ mod tests {
         model.handle(Action::Nav(crate::exocortex::model::Nav::Back));
         let _ = settle(&mut model, &mut view, H, t);
         assert_eq!(view.list_scroll.offset, 900.0);
+    }
+
+    #[test]
+    fn the_update_status_shows_under_the_last_row() {
+        let mut model = Model::new();
+        model.on_connected();
+        let now = Instant::now();
+        model.apply(
+            parse_event(r#"{"type":"conversations_list","conversations":[{"id":"a","title":"A"}],"folders":[]}"#),
+            now,
+        );
+        let mut view = ViewState::new();
+        let last = list_top(&model) + model.sidebar.layout().height;
+        let below = |canvas: &Canvas| ink(canvas, last, last + 80.0, theme::p().accent);
+        assert!(below(&full(&mut model, &mut view, None, now)).is_empty());
+        model.apply(
+            parse_event(r#"{"type":"update_status","status":"restart_needed"}"#),
+            now,
+        );
+        assert!(!below(&full(&mut model, &mut view, None, now)).is_empty());
     }
 
     #[test]

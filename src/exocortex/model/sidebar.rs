@@ -29,6 +29,31 @@ use super::super::list::sheets::{FolderSheet, InstructionsEditor};
 use super::super::requests::Owner;
 use super::super::ui::sheet::Sheet;
 
+/// A row held after its long press, perhaps dragged (PAR-070, 071).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drag {
+    /// What is dragged.
+    pub key: Key,
+    /// Where the long press was, and where the finger is (window).
+    pub start: (f32, f32),
+    pub at: (f32, f32),
+    /// Moved far enough: the menu gave way to the preview.
+    pub active: bool,
+    pub target: Option<DropTarget>,
+    /// The edge auto-scroll's speed (px/s) and its last step.
+    pub speed: f32,
+    pub stepped: Option<Instant>,
+}
+
+/// Where a dragged item would land.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DropTarget {
+    /// Into this folder.
+    Folder(String),
+    /// Next to this conversation (before, or `after` it), in its level.
+    Reorder { key: Key, after: bool },
+}
+
 /// A folder's own instructions (its AGENTS.md).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instructions {
@@ -278,6 +303,8 @@ pub struct Sidebar {
     /// `now` through it, so a frame and its redraw agree whatever the real
     /// clock does meanwhile (and tests are deterministic).
     pub clock: Option<(Instant, u64)>,
+    /// A held row being dragged (PAR-070).
+    pub drag: Option<Drag>,
     /// The daemon's update status (`update_status`, a pong's
     /// `updateStatus`): `update_available`, `restart_needed`, … (PAR-086).
     pub update_status: Option<String>,

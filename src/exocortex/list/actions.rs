@@ -19,13 +19,13 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::super::model::Model;
-use super::super::model::sidebar::{Act, Row, Sidebar};
+use super::super::model::sidebar::{Act, DropTarget, Row, Sidebar};
 use super::super::proto::{self, Event, Summary};
 use super::super::requests::{self, Owner, Pending};
 use super::super::ui::Haptic;
 use super::super::ui::toast::Snackbar;
 use super::activity;
-use super::pending::{Answer, Expect, Key, top_unpinned};
+use super::pending::{Answer, Expect, Key, Place, top_unpinned};
 
 /// The daemon did not make a change it was asked for.
 pub const NOT_APPLIED: &str =
@@ -357,19 +357,35 @@ impl Model {
     /// Items into a folder (or the top level), at the top of its unpinned
     /// section (PAR-073).
     pub(crate) fn list_move(&mut self, keys: Vec<Key>, parent: Option<String>) -> Vec<Value> {
-        let Some(expected) = self.sidebar.project_move(&keys, parent.as_deref()) else {
+        self.list_move_to(keys, parent, Place::Top)
+    }
+
+    /// Items into `parent` where `place` says (a drag's reorder keeps their
+    /// pins).
+    pub(crate) fn list_move_to(
+        &mut self,
+        keys: Vec<Key>,
+        parent: Option<String>,
+        place: Place,
+    ) -> Vec<Value> {
+        let Some(expected) = self
+            .sidebar
+            .project_move(&keys, parent.as_deref(), place.clone())
+        else {
             return Vec::new();
         };
-        // Nothing to do when every item already sits there.
+        // Nothing to do when every item already sits exactly there.
         let changed = expected.iter().any(|(key, expect)| {
             self.sidebar.parent_of(key) != expect.parent
                 || self.sidebar.pinned_of(key) != expect.pinned
+                || self.sidebar.sort_order_of(key) != expect.sort_order
         });
         if !changed {
             return Vec::new();
         }
         let moving: Vec<Key> = expected.iter().map(|(key, _)| key.clone()).collect();
         let label = label_for(&self.sidebar, &moving);
+        let parent = expected[0].1.parent.clone().flatten();
         if let Some(parent) = &parent {
             self.sidebar.expanded.insert(parent.clone());
             self.keep_list();
@@ -380,12 +396,63 @@ impl Model {
             label,
         };
         self.mutate(mutation, Some((expected, answer)), |id| {
-            vec![proto::move_sidebar_items(
+            let mut command = proto::move_sidebar_items(
                 id,
                 moving.iter().map(Key::item_ref).collect(),
                 parent.as_deref(),
-            )]
+            );
+            match &place {
+                Place::Top => {}
+                Place::Before(before) => {
+                    command["before"] = before.item_ref();
+                    command["preservePinned"] = true.into();
+                }
+                Place::Bottom => {
+                    command["preservePinned"] = true.into();
+                    command["placement"] = "bottom".into();
+                }
+            }
+            vec![command]
         })
+    }
+
+    /// A drag let go over `target` (PAR-070): into a folder (opened to
+    /// show it), or next to a conversation, keeping its pin.
+    pub(crate) fn list_drop(&mut self, key: Key, target: DropTarget) -> Vec<Value> {
+        self.ui.haptic(Haptic::Light);
+        match target {
+            DropTarget::Folder(folder) => {
+                self.sidebar.expanded.insert(folder.clone());
+                self.keep_list();
+                self.list_move_to(vec![key], Some(folder), Place::Top)
+            }
+            DropTarget::Reorder { key: anchor, after } => {
+                let parent = self.sidebar.parent_of(&anchor).flatten();
+                if !after {
+                    return self.list_move_to(vec![key], parent, Place::Before(anchor));
+                }
+                // After it: before the next one of its pinned group, else
+                // that group's bottom.
+                let siblings: Vec<(Key, bool, f64)> = self
+                    .sidebar
+                    .placement_entries(parent.as_deref())
+                    .into_iter()
+                    .filter(|(k, _, _)| *k != key)
+                    .collect();
+                let index = siblings.iter().position(|(k, _, _)| *k == anchor);
+                let next = index.and_then(|i| {
+                    let pinned = siblings[i].1;
+                    siblings.get(i + 1).filter(|(_, p, _)| *p == pinned)
+                });
+                match next {
+                    Some((next, _, _)) => {
+                        let next = next.clone();
+                        self.list_move_to(vec![key], parent, Place::Before(next))
+                    }
+                    None => self.list_move_to(vec![key], parent, Place::Bottom),
+                }
+            }
+        }
     }
 
     /// Conversations and folders to the trash (folders `recursive`ly, or
