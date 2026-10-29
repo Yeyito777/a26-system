@@ -7,15 +7,20 @@
 //! shows the daemon's defaults. Changes go to `settings.json` through
 //! `ops::Act` (`Persist::update_settings`).
 
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::gfx::{Canvas, RectF};
 use crate::text::Weight;
 
 use super::super::anim::{Animator, Tween};
-use super::super::model::{Action, Model, Nav, ops};
+use super::super::model::{Action, Model, Nav, now_ms, ops};
+use super::super::proto;
+use super::super::sheets::{panel, usage};
+use super::super::store;
 use super::super::theme::{
     self, HAIRLINE, SETTINGS_PAD, SWITCH, T_BODY, T_EYEBROW, T_META, T_NOTE, T_PAGE_TITLE,
     T_SECTION, T_SMALL, TOGGLE_ROW, TOP_BAR, Theme, W,
@@ -54,7 +59,7 @@ fn width() -> f32 {
 }
 
 /// Something on the page.
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 enum Row {
     /// A section's title and rule.
     Section(&'static str),
@@ -68,6 +73,8 @@ enum Row {
     Field(&'static str, Vec<String>),
     /// Wrapped lines in `T_META` `muted`.
     Note(Vec<String>),
+    /// A panel's row (usage, connection, …), laid out at the page's width.
+    Panel(Box<panel::Laid>),
 }
 
 impl Row {
@@ -83,6 +90,7 @@ impl Row {
                 20.0 + T_EYEBROW.line() + 8.0 + lines.len() as f32 * T_SMALL.line() + 20.0
             }
             Row::Note(lines) => 22.0 + lines.len() as f32 * T_META.line() + 11.0,
+            Row::Panel(laid) => laid.height,
         }
     }
 
@@ -117,14 +125,89 @@ fn card_height() -> f32 {
         .round()
 }
 
+/// A panel row laid out at the page's width.
+fn panel_row(row: panel::Row) -> Row {
+    Row::Panel(Box::new(panel::lay(row, 0.0, width())))
+}
+
+fn note_row(text: &str) -> Row {
+    Row::Note(widgets::wrap_plain(text, T_META, width()))
+}
+
 /// The page's rows, top to bottom (content coordinates: 0 is under the
-/// top bar).
-fn rows(model: &Model) -> Vec<(f32, Row)> {
+/// top bar), in the iPhone's order.
+/// The page's rows, made again only when what they show changes (a frame
+/// asks for them several times: its record, its drawing, hits, scrolls).
+fn rows(model: &Model, now: Instant) -> Rc<Vec<(f32, Row)>> {
+    cached(model, now).0
+}
+
+/// Rows made for a key of their inputs, and a hash of them.
+type Cached = (u64, Rc<Vec<(f32, Row)>>, u64);
+
+/// The rows and a hash of them (the frame's key).
+fn cached(model: &Model, now: Instant) -> (Rc<Vec<(f32, Row)>>, u64) {
+    thread_local! {
+        static CACHE: RefCell<Option<Cached>> = const { RefCell::new(None) };
+    }
+    let mut hasher = DefaultHasher::new();
+    let usage = &model.ops.usage;
+    (
+        theme::generation(),
+        model.ready,
+        model.connected,
+        model.was_connected,
+        format!(
+            "{:?}",
+            usage.usage.values().map(|(u, _)| u).collect::<Vec<_>>()
+        ),
+        usage.usage.keys().collect::<Vec<_>>(),
+        format!("{:?}", usage.link),
+        usage
+            .tokens
+            .as_ref()
+            .map(|t| t["today"]["totalTokens"].to_string()),
+        model.accounts_likely(),
+    )
+        .hash(&mut hasher);
+    (
+        format!("{:?}", model.ops.defaults),
+        format!("{:?}", model.persist.settings()),
+        model.sidebar.version,
+        model.persist.problems().len(),
+        now_ms() / 60_000,
+    )
+        .hash(&mut hasher);
+    let key = hasher.finish();
+    CACHE.with(|cache| {
+        if let Some((k, rows, hash)) = &*cache.borrow()
+            && *k == key
+        {
+            return (rows.clone(), *hash);
+        }
+        let rows = Rc::new(build_rows(model, now));
+        let mut hasher = DefaultHasher::new();
+        for (y, row) in rows.iter() {
+            (*y as i32, format!("{row:?}")).hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        *cache.borrow_mut() = Some((key, rows.clone(), hash));
+        (rows, hash)
+    })
+}
+
+fn build_rows(model: &Model, now: Instant) -> Vec<(f32, Row)> {
+    let p = theme::p();
     let detail_w = width() - SWITCH.0 - 34.0;
-    let mut list = vec![
-        Row::Section("Appearance"),
-        Row::Themes(card_height() as i32),
-    ];
+    let mut list = vec![Row::Section("Usage limits")];
+    list.extend(
+        usage::usage_rows(model, true, now)
+            .into_iter()
+            .map(panel_row),
+    );
+    list.push(Row::End);
+    list.push(Row::Section("Appearance"));
+    list.push(Row::Themes(card_height() as i32));
     for toggle in ops::Toggle::APPEARANCE {
         let detail = if toggle.detail().is_empty() {
             Vec::new()
@@ -143,11 +226,67 @@ fn rows(model: &Model) -> Vec<(f32, Row)> {
         None => vec!["Waiting for defaults from the connected daemon.".to_owned()],
     };
     list.push(Row::Field("Daemon default", defaults));
-    list.push(Row::Note(widgets::wrap_plain(
+    list.push(note_row(
         "Change them from a chat's model inspector (\"Use as daemon default\") or /default-model.",
-        T_META,
-        width(),
+    ));
+    list.push(Row::End);
+    list.push(Row::Section("Notifications"));
+    list.push(note_row(
+        "When a chat you started finishes and it isn't on screen, exocortex-notify posts \
+         it to Moon's notifications (one per chat, withdrawn once read anywhere). Mute a chat \
+         or a folder from its menu in the list to silence it. While any chat works, the \
+         phone stays awake for it.",
+    ));
+    let muted = model
+        .sidebar
+        .conversations
+        .values()
+        .filter(|s| s.notifications_muted)
+        .count();
+    if muted > 0 {
+        list.push(panel_row(panel::kv("Muted chats", muted.to_string())));
+    }
+    list.push(Row::End);
+    list.push(Row::Section("Connection"));
+    list.extend(
+        usage::connection_rows(model, false)
+            .into_iter()
+            .map(panel_row),
+    );
+    list.push(Row::End);
+    list.push(Row::Section("Local storage"));
+    list.push(note_row(&format!(
+        "Drafts, settings and the list's folders are kept on this phone in {}. \
+         Clearing cached chats does not erase them.",
+        store::dir().display()
     )));
+    for (name, error) in model.persist.problems() {
+        list.push(panel_row(panel::text(
+            format!(
+                "{name} could not be read ({error}): it is left untouched and changes are not kept."
+            ),
+            panel::Style::Caption,
+            p.error,
+        )));
+    }
+    list.push(panel_row(panel::Row::Buttons(vec![panel::Btn::new(
+        "Clear cached chats",
+        panel::Kind::Secondary,
+        Some(panel::Tap::Stay(Action::Ops(ops::Act::ClearCache))),
+    )])));
+    list.push(Row::End);
+    list.push(Row::Section("About"));
+    for (key, value) in [
+        ("App", "Exocortex for OSS Phone (a26-system)".to_owned()),
+        ("Version", env!("CARGO_PKG_VERSION").to_owned()),
+        ("Daemon", proto::socket_path().display().to_string()),
+        ("Device", "Samsung Galaxy A26 · Moon".to_owned()),
+    ] {
+        list.push(panel_row(panel::kv(key, value)));
+    }
+    list.push(note_row(
+        "The app updates with a26-system; Exocortex itself updates on the daemon's side.",
+    ));
     list.push(Row::End);
     let mut y = 0.0;
     let mut out = Vec::with_capacity(list.len());
@@ -170,7 +309,9 @@ fn content_height(rows: &[(f32, Row)]) -> f32 {
 /// home gesture.
 pub fn max_scroll(model: &Model, height: f32) -> f32 {
     let visible = height - CONTENT_TOP - theme::GESTURE_RESERVE;
-    (content_height(&rows(model)) - visible).max(0.0).round()
+    (content_height(&rows(model, Instant::now())) - visible)
+        .max(0.0)
+        .round()
 }
 
 /// Where a switch's knob is at `now`: 0 off … 1 on, sliding for 220 ms
@@ -216,10 +357,12 @@ pub fn settings_frame(
     now: Instant,
 ) -> SettingsFrame {
     let mut hasher = DefaultHasher::new();
-    (&model.persist.settings().theme, theme::generation()).hash(&mut hasher);
-    for (y, row) in rows(model) {
-        (y as i32, row).hash(&mut hasher);
-    }
+    (
+        &model.persist.settings().theme,
+        theme::generation(),
+        cached(model, now).1,
+    )
+        .hash(&mut hasher);
     SettingsFrame {
         offset: view.settings_scroll.value(now).round() as i32,
         key: hasher.finish(),
@@ -269,7 +412,7 @@ pub fn draw_settings_update(
         }
         damage.moved = Some((top, bottom, -shift));
     }
-    let list = rows(model);
+    let list = rows(model, now);
     let band = |wanted: &dyn Fn(&Row) -> bool| {
         list.iter().find(|(_, row)| wanted(row)).map(|(y, row)| {
             let y0 = (CONTENT_TOP - new.offset as f32 + y).floor() as i32;
@@ -293,7 +436,13 @@ pub fn draw_settings_update(
                     redraw.extend(band(&|row| matches!(row, Row::Themes(_))));
                 }
                 Action::Nav(Nav::CloseSettings) => redraw.push((0, top)),
-                _ => {}
+                // A panel row's target (a navigation row, a button).
+                action => redraw.extend(band(&|row| match row {
+                    Row::Panel(laid) => panel::targets(laid, width())
+                        .iter()
+                        .any(|(_, tap)| panel::tap_action(tap) == action),
+                    _ => false,
+                })),
             }
         }
     }
@@ -313,6 +462,8 @@ pub fn animate(model: &Model, now: Instant, animator: &mut Animator) {
     if let Some(tween) = sliding(model, now) {
         animator.follow(&tween, now);
     }
+    // Usage resets and times read in minutes.
+    animator.request(now + Duration::from_secs(60));
 }
 
 pub fn draw(
@@ -335,10 +486,10 @@ pub fn draw(
         canvas,
         RectF::new(0.0, CONTENT_TOP, W, height - CONTENT_TOP),
         |canvas| {
-            for (y, row) in rows(model) {
+            for (y, row) in rows(model, now).iter() {
                 let y = top + y;
                 if widgets::shows(canvas, y, y + row.height()) {
-                    draw_row(canvas, model, &row, y, pressed, now);
+                    draw_row(canvas, model, row, y, pressed, now);
                 }
             }
         },
@@ -481,6 +632,7 @@ fn draw_row(
                 );
             }
         }
+        Row::Panel(laid) => panel::draw_row(canvas, laid, x, y, width(), pressed),
     }
 }
 
@@ -559,9 +711,10 @@ pub fn hit(model: &Model, view: &ViewState, x: f32, y: f32, now: Instant) -> Opt
     }
     let offset = view.settings_scroll.value(now).round();
     let cy = y - CONTENT_TOP + offset;
-    let (row_y, row) = rows(model)
-        .into_iter()
-        .find(|(top, row)| cy >= *top && cy < top + row.height())?;
+    let (row_y, row) = rows(model, now)
+        .iter()
+        .find(|(top, row)| cy >= *top && cy < top + row.height())
+        .cloned()?;
     match row {
         Row::Themes(card) => {
             let w = card_width();
@@ -579,6 +732,14 @@ pub fn hit(model: &Model, view: &ViewState, x: f32, y: f32, now: Instant) -> Opt
                 .map(|t| Action::Ops(ops::Act::SetTheme(t.id)))
         }
         Row::Switch(toggle, _) => Some(Action::Ops(ops::Act::Toggle(toggle))),
+        Row::Panel(laid) => {
+            let mut laid = *laid;
+            laid.top = row_y;
+            panel::targets(&laid, width())
+                .into_iter()
+                .find(|(rect, _)| rect.contains(x - SETTINGS_PAD.1, cy))
+                .map(|(_, tap)| panel::tap_action(&tap).clone())
+        }
         _ => None,
     }
 }
@@ -696,7 +857,12 @@ mod tests {
             w.secondary_accent,
         ];
         // The Whale card previews Whale: leave it out.
-        let card_top = (CONTENT_TOP + SECTION_HEAD + GRID_PAD.0) as usize;
+        let themes = rows(&model, now)
+            .iter()
+            .find(|(_, r)| matches!(r, Row::Themes(_)))
+            .map(|(y, _)| *y)
+            .unwrap();
+        let card_top = (CONTENT_TOP + themes + GRID_PAD.0) as usize;
         let card_bottom = card_top + card_height() as usize;
         let card_right = (SETTINGS_PAD.1 + card_width()) as usize + 1;
         let width = SIZE.0 as usize;
@@ -740,8 +906,8 @@ mod tests {
     }
 
     fn at(model: &Model, wanted: impl Fn(&Row) -> bool) -> f32 {
-        rows(model)
-            .into_iter()
+        rows(model, Instant::now())
+            .iter()
             .find(|(_, row)| wanted(row))
             .map(|(y, _)| y + CONTENT_TOP)
             .unwrap()
@@ -785,7 +951,7 @@ mod tests {
     #[test]
     fn rows_are_as_tall_as_the_iphones() {
         let model = Model::new();
-        let rows = rows(&model);
+        let rows = rows(&model, Instant::now());
         // Two-line details need more than the 144 minimum.
         let height = |toggle| {
             rows.iter()
@@ -797,9 +963,9 @@ mod tests {
         assert_eq!(height(ops::Toggle::ExpandThinking), TOGGLE_ROW);
         assert!(height(ops::Toggle::ShowAllWork) > TOGGLE_ROW);
         assert!((270.0..300.0).contains(&card_height()), "{}", card_height());
-        // It fits the window today: nothing to scroll.
-        assert_eq!(max_scroll(&model, 2216.0), 0.0);
-        assert!(max_scroll(&model, 1000.0) > 0.0);
+        // Taller than the window: it scrolls.
+        assert!(max_scroll(&model, 2216.0) > 0.0);
+        assert!(max_scroll(&model, 1000.0) > max_scroll(&model, 2216.0));
     }
 
     #[test]
@@ -822,6 +988,10 @@ mod tests {
         animate(&model, start, &mut animator);
         assert!(animator.take().is_some());
         animate(&model, start + SLIDE, &mut animator);
-        assert!(animator.take().is_none());
+        assert_eq!(
+            animator.take(),
+            Some(start + SLIDE + Duration::from_secs(60)),
+            "then only the minute's"
+        );
     }
 }

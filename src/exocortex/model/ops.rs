@@ -16,6 +16,8 @@ use super::super::proto::{
     ops::Model as ModelInfo,
 };
 use super::super::requests::{self, Owner, Pending};
+use super::super::sheets;
+use super::super::sheets::panel::{self, Panel};
 use super::super::store::{self, Settings};
 use super::super::theme;
 use super::super::ui::Haptic;
@@ -43,6 +45,24 @@ pub struct Ops {
     pub live: HashMap<String, LiveStatus>,
     /// The switch flipped last and when (its knob slides).
     pub flipped: Option<(Toggle, Instant)>,
+    /// New conversations sent from a draft and not yet created: their
+    /// draft's key (its overrides go once it is, PAR-277).
+    pub creating: HashMap<String, String>,
+    /// A daemon defaults change in flight (its reqId and the draft's
+    /// revision then), and what the daemon answered.
+    pub defaults_request: Option<(String, String, u64)>,
+    pub defaults_notice: Option<(String, bool)>,
+    /// Bumped on every change of a draft's overrides.
+    pub draft_revision: u64,
+    /// The operations panels' state.
+    pub goal: sheets::goal::State,
+    pub activity: sheets::activity::State,
+    pub chrono: sheets::chrono::State,
+    pub usage: sheets::usage::State,
+    pub system: sheets::system::State,
+    pub btw: sheets::btw::State,
+    /// The last phrase found in the chat.
+    pub find: Option<String>,
 }
 
 /// A conversation's state as the header shows it, from its stream.
@@ -129,6 +149,11 @@ pub struct Form {
     pub model: String,
     pub effort: String,
     pub speed: Speed,
+    /// A draft's switches, sent with its first message (PAR-282).
+    pub delegation: bool,
+    pub legacy: bool,
+    /// "Use as daemon default": Apply also saves it on the daemon.
+    pub make_default: bool,
 }
 
 /// The inspector's pickers.
@@ -238,6 +263,34 @@ pub enum Act {
     OpenAccounts,
     OpenSystemPrompt,
     OpenFind,
+    OpenUsage,
+    OpenConnection,
+    OpenTokens,
+    /// The Accounts panel went (its watch stops).
+    AccountsClosed,
+    /// The inspector's switches (drafts: Delegation, Allow legacy; and Use
+    /// as daemon default).
+    FormDelegation,
+    FormLegacy,
+    FormDefault,
+    /// "Reset daemon default to app default", then confirmed.
+    ResetDefaults,
+    ResetDefaultsConfirmed,
+    /// The chat menu's "Show all work" / "Fold finished work".
+    ToggleAllWork,
+    /// The chat menu: the newest reply, the loaded transcript, in the
+    /// reader.
+    ReadLastReply,
+    Export,
+    /// Settings → Local storage: forget the kept conversations.
+    ClearCache,
+    /// The panels' own actions.
+    Goal(sheets::goal::Act),
+    Activity(sheets::activity::Act),
+    Chrono(sheets::chrono::Act),
+    System(sheets::system::Act),
+    Btw(sheets::btw::Act),
+    Find(sheets::find::Act),
 }
 
 // ----- The catalog (PAR-275; the iPhone's `state/models.ts`) ---------------------
@@ -396,6 +449,7 @@ impl Model {
     }
 
     fn set_draft_config(&mut self, key: &str, config: DraftConfig) {
+        self.ops.draft_revision += 1;
         let mut kept: Kept = self.persist.section(store::UI, KEPT);
         kept.schema_version = 2;
         if config.is_empty() {
@@ -541,7 +595,10 @@ impl Model {
     /// The model fields of a `new_conversation` for the draft: only its
     /// explicit overrides (PAR-192, 277), so a blank draft gets the
     /// daemon's defaults. Replaces whatever `command` had for them.
-    pub fn new_conversation_fields(&self, command: &mut Value) {
+    pub fn new_conversation_fields(&mut self, command: &mut Value) {
+        if let Some(conv) = command["convId"].as_str() {
+            self.ops.creating.insert(conv.to_owned(), self.draft_key());
+        }
         let Some(object) = command.as_object_mut() else {
             return;
         };
@@ -588,13 +645,19 @@ impl Model {
     /// The inspector's form as it opens: what runs now.
     fn initial_form(&self) -> Form {
         let r = self.resolve();
+        let draft = self.draft_key();
+        let config = self.draft_config(&draft);
+        let own = self.chat.id.is_none();
         Form {
             conv: self.chat.id.clone(),
-            draft: self.draft_key(),
+            draft,
             provider: r.provider,
             model: r.model,
             effort: r.effort,
             speed: r.speed,
+            delegation: own && config.delegation,
+            legacy: own && config.legacy,
+            make_default: false,
         }
     }
 
@@ -625,10 +688,23 @@ impl Model {
     /// Whether the form says what already runs.
     pub fn form_unchanged(&self, form: &Form) -> bool {
         let r = self.resolve();
+        let switches = form.conv.is_some() || {
+            let config = self.draft_config(&form.draft);
+            config.delegation == form.delegation && config.legacy == form.legacy
+        };
         form.provider == r.provider
             && form.model == r.model
             && form.effort == r.effort
             && form.speed == r.speed
+            && switches
+    }
+
+    /// Whether Apply can be pressed for the form.
+    pub fn can_apply(&self, form: &Form) -> bool {
+        self.apply_blocked(form).is_none()
+            && (!self.form_unchanged(form) || form.make_default)
+            && (!form.make_default || self.ready)
+            && self.ops.defaults_request.is_none()
     }
 
     // ----- Actions -------------------------------------------------------------------
@@ -731,16 +807,221 @@ impl Model {
                 Vec::new()
             }
             Act::OpenSettings => self.handle(super::Action::Nav(Nav::OpenSettings)),
-            Act::OpenGoal
-            | Act::OpenActivity
-            | Act::OpenChrono
-            | Act::OpenBtw
-            | Act::OpenAccounts
-            | Act::OpenSystemPrompt
-            | Act::OpenFind => {
-                self.ui.toast("Coming soon.");
+            Act::OpenGoal => self.open_panel_for(Panel::Goal, Vec::new),
+            Act::OpenActivity => {
+                let conv = self.chat.id.clone();
+                let commands = conv
+                    .as_deref()
+                    .map(|c| self.list_tasks(c))
+                    .unwrap_or_default();
+                self.open_panel_for(Panel::Activity, || commands)
+            }
+            Act::OpenChrono => {
+                let conv = self.chat.id.clone();
+                let commands = conv
+                    .as_deref()
+                    .map(|c| self.list_chrono(c))
+                    .unwrap_or_default();
+                self.open_panel_for(Panel::Chrono, || commands)
+            }
+            Act::OpenBtw => self.open_panel_for(Panel::Btw, Vec::new),
+            Act::OpenSystemPrompt => {
+                let conv = self.chat.id.clone();
+                let commands = self.load_system(conv.as_deref());
+                self.open_panel(Panel::SystemPrompt(conv));
+                commands
+            }
+            Act::OpenAccounts => {
+                let commands = self.watch_accounts();
+                self.open_panel(Panel::Accounts(self.chat.id.clone()));
+                commands
+            }
+            Act::AccountsClosed => self.unwatch_accounts(),
+            Act::OpenUsage => {
+                let commands = self.ask_token_stats();
+                self.open_panel(Panel::Usage);
+                commands
+            }
+            Act::OpenConnection => {
+                self.open_panel(Panel::Connection);
                 Vec::new()
             }
+            Act::OpenTokens => {
+                let commands = self.ask_token_stats();
+                self.open_panel(Panel::Tokens);
+                commands
+            }
+            Act::OpenFind => {
+                if self.chat.id.is_none() {
+                    return Vec::new();
+                }
+                self.ui.effect(Effect::HideKeyboard);
+                self.handle_find(sheets::find::Act::Ask)
+            }
+            Act::FormDelegation | Act::FormLegacy | Act::FormDefault => {
+                let mut form = self.form();
+                match act {
+                    Act::FormDelegation => form.delegation = !form.delegation,
+                    Act::FormLegacy => form.legacy = !form.legacy,
+                    _ => form.make_default = !form.make_default,
+                }
+                self.ui.haptic(Haptic::Selection);
+                self.ops.form = Some(form);
+                Vec::new()
+            }
+            Act::ResetDefaults => {
+                self.ui.open(Box::new(super::super::ui::menu::Confirm::new(
+                    "Reset daemon default?",
+                    "New chats will use the app default chosen by exocortexd.",
+                    "Reset",
+                    super::Action::Ops(Act::ResetDefaultsConfirmed),
+                )));
+                Vec::new()
+            }
+            Act::ResetDefaultsConfirmed => self.reset_defaults(),
+            Act::ToggleAllWork => {
+                self.persist
+                    .update_settings(|s| s.show_all_work = !s.show_all_work);
+                self.chat.touch();
+                Vec::new()
+            }
+            Act::ReadLastReply => {
+                if let Some(text) = super::super::view::chat_header::last_reply(self) {
+                    self.handle(super::Action::Ui(super::UiAct::Read {
+                        title: "Last reply".into(),
+                        text,
+                    }));
+                }
+                Vec::new()
+            }
+            Act::Export => {
+                let text = super::super::view::chat_header::export(self);
+                self.handle(super::Action::Ui(super::UiAct::Read {
+                    title: "Loaded transcript".into(),
+                    text: if text.is_empty() {
+                        "(nothing loaded)".into()
+                    } else {
+                        text
+                    },
+                }));
+                Vec::new()
+            }
+            Act::ClearCache => {
+                self.shelf = super::Shelf::default();
+                self.ui.haptic(Haptic::Light);
+                self.ui.toast("Cached chats cleared");
+                Vec::new()
+            }
+            Act::Goal(a) => self.handle_goal(a),
+            Act::Activity(a) => self.handle_activity(a),
+            Act::Chrono(a) => self.handle_chrono(a),
+            Act::System(a) => self.handle_system(a),
+            Act::Btw(a) => self.handle_btw(a),
+            Act::Find(a) => self.handle_find(a),
+        }
+    }
+
+    /// Opens a panel over the page.
+    pub(crate) fn open_panel(&mut self, panel: Panel) {
+        self.ui.effect(Effect::HideKeyboard);
+        self.ui.open(Box::new(panel::sheet(panel)));
+    }
+
+    /// Opens a conversation's panel (and sends what it asks for), or says
+    /// it needs one.
+    fn open_panel_for(
+        &mut self,
+        panel: impl FnOnce(String) -> Panel,
+        commands: impl FnOnce() -> Vec<Value>,
+    ) -> Vec<Value> {
+        match self.chat.id.clone() {
+            Some(conv) => {
+                self.open_panel(panel(conv));
+                commands()
+            }
+            None => {
+                self.ui
+                    .toast("Send a first message to start the conversation.");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Settings shows: what it needs from the daemon.
+    pub(crate) fn settings_opened(&mut self) -> Vec<Value> {
+        self.ask_token_stats()
+    }
+
+    /// `set_conversation_defaults`, confirmed only by a
+    /// `conversation_defaults` with its reqId (PAR-278); never queued.
+    fn set_defaults(&mut self, defaults: &Selection, draft: &str) -> Vec<Value> {
+        if !self.ready {
+            self.ui
+                .error_toast("Not connected to the daemon. Defaults were not changed.");
+            return Vec::new();
+        }
+        if self.ops.defaults_request.is_some() {
+            self.ui
+                .error_toast("A defaults change is already in progress.");
+            return Vec::new();
+        }
+        let request = self.requests.issue(
+            Owner::Ops,
+            "defaults",
+            None,
+            requests::DEFAULT_WITHIN,
+            Instant::now(),
+        );
+        self.ops.defaults_request =
+            Some((request.clone(), draft.to_owned(), self.ops.draft_revision));
+        vec![proto::set_conversation_defaults(&request, defaults)]
+    }
+
+    fn reset_defaults(&mut self) -> Vec<Value> {
+        if !self.ready {
+            self.ui
+                .error_toast("Not connected to the daemon. Defaults were not changed.");
+            return Vec::new();
+        }
+        if self.ops.defaults_request.is_some() {
+            self.ui
+                .error_toast("A defaults change is already in progress.");
+            return Vec::new();
+        }
+        let request = self.requests.issue(
+            Owner::Ops,
+            "defaults",
+            None,
+            requests::DEFAULT_WITHIN,
+            Instant::now(),
+        );
+        self.ops.defaults_request =
+            Some((request.clone(), self.draft_key(), self.ops.draft_revision));
+        vec![proto::reset_conversation_defaults(&request)]
+    }
+
+    /// After a confirmed save, a draft's overrides equal to the new
+    /// defaults are redundant: it inherits them.
+    fn clear_matching_overrides(&mut self, draft: &str, d: &Selection) {
+        let o = self.draft_config(draft);
+        if o.is_empty() {
+            return;
+        }
+        let mut next = o.clone();
+        if next.provider.as_deref() == Some(d.provider.as_str()) {
+            next.provider = None;
+        }
+        if next.model.as_deref() == Some(d.model.as_str()) && next.provider.is_none() {
+            next.model = None;
+        }
+        if next.effort.as_deref() == Some(d.effort.as_str()) && next.model.is_none() {
+            next.effort = None;
+        }
+        if next.speed() == Some(d.speed()) && next.model.is_none() {
+            next.fast_mode = None;
+        }
+        if next != o {
+            self.set_draft_config(draft, next);
         }
     }
 
@@ -848,6 +1129,28 @@ impl Model {
             self.ui.error_toast(reason);
             return Vec::new();
         }
+        let defaults = form.make_default.then(|| {
+            (
+                Selection {
+                    provider: form.provider.clone(),
+                    model: form.model.clone(),
+                    effort: form.effort.clone(),
+                    fast_mode: form.speed.value(),
+                },
+                form.draft.clone(),
+            )
+        });
+        // The draft first: the defaults' answer then finds it unchanged and
+        // drops the overrides it made redundant.
+        let mut commands = self.apply_selection(form);
+        if let Some((selection, draft)) = defaults {
+            commands.extend(self.set_defaults(&selection, &draft));
+        }
+        commands
+    }
+
+    /// The form applied to its conversation or draft.
+    fn apply_selection(&mut self, form: Form) -> Vec<Value> {
         let Some(id) = form.conv.clone() else {
             let same = self.ops.defaults.as_ref().is_some_and(|s| {
                 let d = &s.defaults;
@@ -857,11 +1160,10 @@ impl Model {
                     && d.speed() == form.speed
             });
             let key = form.draft.clone();
-            let kept = self.draft_config(&key);
             let config = if same {
                 DraftConfig {
-                    delegation: kept.delegation,
-                    legacy: kept.legacy,
+                    delegation: form.delegation,
+                    legacy: form.legacy,
                     ..DraftConfig::default()
                 }
             } else {
@@ -870,8 +1172,8 @@ impl Model {
                     model: Some(form.model),
                     effort: Some(form.effort),
                     fast_mode: Some(form.speed.value()),
-                    delegation: kept.delegation,
-                    legacy: kept.legacy,
+                    delegation: form.delegation,
+                    legacy: form.legacy,
                 }
             };
             self.set_draft_config(&key, config);
@@ -1015,7 +1317,25 @@ impl Model {
 
     // ----- Events --------------------------------------------------------------------
 
-    pub(super) fn apply_ops(&mut self, event: &Event, _now: Instant) -> Vec<Value> {
+    pub(super) fn apply_ops(&mut self, event: &Event, now: Instant) -> Vec<Value> {
+        let first_pong =
+            matches!(event, Event::Pong { .. }) && self.ops.usage.link.last_pong.is_none();
+        let mut commands = Vec::new();
+        self.apply_usage(event, now);
+        self.apply_goal(event, now);
+        self.apply_chrono(event);
+        commands.extend(self.apply_activity(event));
+        commands.extend(self.apply_system(event));
+        commands.extend(self.apply_btw(event));
+        // A connection is ready: an aside's unconfirmed write goes again.
+        if first_pong && self.ready {
+            commands.extend(self.ops.btw.unsettled.values().cloned());
+        }
+        commands.extend(self.apply_models(event));
+        commands
+    }
+
+    fn apply_models(&mut self, event: &Event) -> Vec<Value> {
         match event {
             Event::ToolsAvailable {
                 providers,
@@ -1044,14 +1364,40 @@ impl Model {
                 }
             }
             Event::ConversationDefaults {
+                req_id,
                 defaults,
                 configured,
-                ..
+                message,
             } => {
                 self.ops.defaults = Some(DefaultsSnapshot {
                     defaults: defaults.clone(),
                     configured: *configured,
                 });
+                // Only an answer carrying our reqId confirms (PAR-278).
+                if let Some((id, draft, revision)) = self.ops.defaults_request.clone()
+                    && req_id.as_deref() == Some(id.as_str())
+                {
+                    self.ops.defaults_request = None;
+                    if revision == self.ops.draft_revision {
+                        self.clear_matching_overrides(&draft, defaults);
+                    }
+                    let text = message.clone().unwrap_or_else(|| {
+                        if *configured {
+                            "Default model saved".into()
+                        } else {
+                            "Default model reset to app default".into()
+                        }
+                    });
+                    self.ops.defaults_notice = Some((text.clone(), false));
+                    self.ui.toast(text);
+                }
+            }
+            // The draft's overrides now live on the conversation: the next
+            // new chat inherits again.
+            Event::ConversationCreated { conv_id, .. } => {
+                if let Some(key) = self.ops.creating.remove(conv_id) {
+                    self.set_draft_config(&key, DraftConfig::default());
+                }
             }
             Event::ConversationLoaded {
                 conv_id,
@@ -1146,20 +1492,67 @@ impl Model {
     /// (PAR-023).
     pub(super) fn ops_disconnected(&mut self) {
         self.ops.defaults = None;
+        self.ops.defaults_request = None;
         self.ops.live.clear();
+        self.ops.goal.busy.clear();
+        self.ops.chrono.busy.clear();
+        self.ops.activity.listing.clear();
+        self.ops.activity.stops.clear();
+        self.ops.system.prompt_request = None;
+        self.ops.system.instructions_request = None;
+        self.ops.system.saving = None;
+        self.usage_disconnected();
     }
 
-    /// An error answering one of this area's requests; true when handled.
-    pub(super) fn ops_error(&mut self, _id: &str, _message: &str) -> bool {
-        false
+    pub(super) fn ops_connected(&mut self) {
+        self.usage_connected();
+    }
+
+    /// An error answering one of this area's requests; true when handled
+    /// (shown in its panel), false for the error toast.
+    pub(super) fn ops_error(&mut self, id: &str, message: &str) -> bool {
+        if let Some((request, _, _)) = &self.ops.defaults_request
+            && request == id
+        {
+            self.ops.defaults_request = None;
+            self.ops.defaults_notice = Some((message.to_owned(), true));
+            return false;
+        }
+        if self.goal_error(id, message) || self.chrono_error(id, message) {
+            return false;
+        }
+        if self.activity_error(id) {
+            return false;
+        }
+        self.system_error(id, message)
     }
 
     /// One of this area's requests was not answered in time.
-    pub(super) fn ops_timeout(&mut self, _id: &str, pending: &Pending) -> bool {
+    pub(super) fn ops_timeout(&mut self, id: &str, pending: &Pending) -> bool {
         match pending.kind {
-            "set_model" | "set_effort" | "set_fast_mode" => {
+            "set_model"
+            | "set_effort"
+            | "set_fast_mode"
+            | "set_goal"
+            | "chrono"
+            | "stop_task"
+            | "set_system_instructions" => {
+                self.ops_error(id, "Exocortex did not answer.");
                 self.ui
                     .error_toast("Exocortex did not confirm the change. Try again.");
+                true
+            }
+            "defaults" => {
+                self.ops.defaults_request = None;
+                self.ui
+                    .error_toast("The daemon did not confirm the defaults. Try again.");
+                true
+            }
+            "list_tasks" | "get_system_prompt" | "load_instructions" | "accounts"
+            | "token_stats" => {
+                self.ops_error(id, "Exocortex did not answer. Try again.");
+                self.ops.usage.accounts_request = None;
+                self.ops.usage.tokens_request = None;
                 true
             }
             _ => self.generic_timeout(),
@@ -1410,6 +1803,83 @@ mod tests {
         assert_eq!(theme::current().id, "cerberus");
         assert!(model.ui.effects.contains(&Effect::StatusBar));
         theme::set_current(&theme::WHALE);
+    }
+
+    #[test]
+    fn daemon_defaults_are_confirmed_only_by_their_own_answer() {
+        let mut model = ready();
+        model.handle(Action::Nav(Nav::NewConversation));
+        model.handle(Action::Ops(Act::OpenInspector));
+        model.handle(Action::Ops(Act::FormModel("haiku".into())));
+        model.handle(Action::Ops(Act::FormDefault));
+        assert!(model.can_apply(&model.form()));
+        let sent = model.handle(Action::Ops(Act::Apply));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["type"], "set_conversation_defaults");
+        assert_eq!(sent[0]["defaults"]["model"], "haiku");
+        let id = sent[0]["reqId"].as_str().unwrap().to_owned();
+        assert!(!model.resolve().inherited, "the draft has its overrides");
+        // A broadcast, or an answer to someone else, confirms nothing.
+        let now = Instant::now();
+        model.apply(
+            parse_event(r#"{"type":"conversation_defaults","defaults":{"provider":"anthropic","model":"haiku","effort":"medium","fastMode":false},"configured":true}"#),
+            now,
+        );
+        assert!(model.ops.defaults_request.is_some());
+        model.apply(
+            parse_event(r#"{"type":"conversation_defaults","reqId":"other","defaults":{"provider":"anthropic","model":"haiku","effort":"medium","fastMode":false},"configured":true}"#),
+            now,
+        );
+        assert!(model.ops.defaults_request.is_some());
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_defaults","reqId":"{id}","defaults":{{"provider":"anthropic","model":"haiku","effort":"medium","fastMode":false}},"configured":true,"message":"Default model saved"}}"#
+            )),
+            now,
+        );
+        assert!(model.ops.defaults_request.is_none());
+        assert!(
+            model.resolve().inherited,
+            "overrides equal to the new defaults go"
+        );
+        assert!(
+            model
+                .ui
+                .opening
+                .iter()
+                .any(|o| o.label() == "Default model saved")
+        );
+        // Never while disconnected.
+        model.on_disconnected();
+        assert!(
+            model
+                .handle(Action::Ops(Act::ResetDefaultsConfirmed))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_created_conversation_takes_its_drafts_overrides() {
+        let mut model = ready();
+        model.handle(Action::Nav(Nav::NewConversation));
+        model.handle(Action::Ops(Act::PickModel(
+            "anthropic".into(),
+            "haiku".into(),
+        )));
+        assert!(!model.resolve().inherited);
+        model.composer.text = "Hi".into();
+        let sent = model.handle(Action::Ops(Act::Apply));
+        assert!(sent.is_empty());
+        let sent = model.handle(Action::Composer(composer::Act::Send));
+        assert_eq!(sent[0]["model"], "haiku");
+        let conv = sent[0]["convId"].as_str().unwrap().to_owned();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_created","convId":"{conv}","provider":"anthropic","model":"haiku","effort":"medium"}}"#
+            )),
+            Instant::now(),
+        );
+        assert_eq!(model.draft_config("draft:root"), DraftConfig::default());
     }
 
     #[test]
