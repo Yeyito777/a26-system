@@ -405,3 +405,47 @@ impl Overlay for Snackbar {
         self.life.animate(cx.now, animator);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exocortex::model::{Model, Nav};
+    use crate::exocortex::ui::overlay::OverlayStack;
+
+    /// A tap on the snackbar's button performs its action (and closes it);
+    /// elsewhere on it, nothing; off it, the page's.
+    #[test]
+    fn the_snackbar_button_performs_its_action() {
+        let model = Model::new();
+        let now = Instant::now();
+        let cx = Cx {
+            model: &model,
+            width: 1080.0,
+            height: 2216.0,
+            keyboard: false,
+            now,
+        };
+        let action = Action::Nav(Nav::OpenSettings);
+        let mut stack = OverlayStack::default();
+        stack.push(Box::new(Snackbar::new(
+            "Moved to trash",
+            "Undo",
+            action.clone(),
+            0.0,
+        )));
+        stack.layout(&cx);
+        let (x, y) = (958.0, 1962.0);
+        assert_eq!(
+            stack.gesture(&Gesture::Down { x, y }, &cx),
+            Response::Handled
+        );
+        assert_eq!(
+            stack.gesture(&Gesture::Tap { x, y }, &cx),
+            Response::Action(action)
+        );
+        assert_eq!(
+            stack.gesture(&Gesture::Down { x: 500.0, y: 600.0 }, &cx),
+            Response::Pass
+        );
+    }
+}
