@@ -177,6 +177,9 @@ pub struct Composer {
     pub ping: Option<(String, Instant)>,
     /// What is typed is a command (the trailing button says Run).
     pub is_command: bool,
+    /// The text's valid commands, macros and arguments (byte ranges), drawn
+    /// in the command colour.
+    pub highlights: Vec<(usize, usize)>,
     /// User messages before each window start seen, by conversation: entry
     /// index → user message index (a rewind's `userMessageIndex`).
     user_index: HashMap<String, std::collections::BTreeMap<u64, u64>>,
@@ -625,6 +628,11 @@ impl Model {
         }
         self.composer.picker_state = state;
         self.composer.is_command = self.is_command_text();
+        self.composer.highlights = if self.composer.text.contains('/') {
+            super::super::commands::env::SlashEnv::new(self).highlights(&self.composer.text)
+        } else {
+            Vec::new()
+        };
     }
 
     /// Text put back into draft `key` after a command refused it.

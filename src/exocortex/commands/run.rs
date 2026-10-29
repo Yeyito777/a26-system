@@ -1428,6 +1428,42 @@ mod tests {
     }
 
     #[test]
+    fn valid_commands_are_highlighted() {
+        let mut model = ready(false);
+        let shown = |model: &mut Model, text: &str| -> Vec<String> {
+            model.composer.text.clear();
+            model.composer.cursor = Default::default();
+            type_text(model, text);
+            let text = model.composer.text.clone();
+            model
+                .composer
+                .highlights
+                .iter()
+                .map(|(a, b)| text[*a..*b].to_owned())
+                .collect()
+        };
+        assert_eq!(
+            shown(&mut model, "/model anthropic claude-haiku-5-5 hi"),
+            vec!["/model anthropic claude-haiku-5-5"]
+        );
+        assert_eq!(
+            shown(&mut model, "/model anthropic nosuch"),
+            vec!["/model anthropic"]
+        );
+        assert_eq!(
+            shown(&mut model, "please /effort low and /help"),
+            vec!["/effort low"],
+            "commands only lead; modifiers anywhere"
+        );
+        assert_eq!(shown(&mut model, "/consider this"), vec!["/consider"]);
+        assert_eq!(
+            shown(&mut model, "later /queue 5m check"),
+            vec!["/queue 5m"]
+        );
+        assert!(shown(&mut model, "no slashes here").is_empty());
+    }
+
+    #[test]
     fn a_draft_takes_model_commands_locally() {
         let mut model = ready(false);
         model.handle(Action::Nav(Nav::Back));

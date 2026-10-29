@@ -305,9 +305,7 @@ impl<'a> SlashEnv<'a> {
         })
     }
 
-    /// The typed shorthands submission expands ("/mod opus" → the full
-    /// command; inline modifiers' arguments).
-    pub fn resolve_shorthands(&self, text: &str) -> String {
+    fn shorthands(&self, text: &str) -> Vec<search::Shorthand> {
         let prompt = |raw: &str| self.leading(raw);
         let inline_args = |root: &str| self.with_macro_args(self.inline_args(root));
         let sources = search::ShorthandSources {
@@ -315,7 +313,96 @@ impl<'a> SlashEnv<'a> {
             inline_roots: &["/model", "/effort", "/fast", "/ultrafast"],
             inline_args: &inline_args,
         };
-        let shorthands = search::find_shorthands(text, &sources);
-        search::apply_shorthands(text, &shorthands)
+        search::find_shorthands(text, &sources)
+    }
+
+    /// The typed shorthands submission expands ("/mod opus" → the full
+    /// command; inline modifiers' arguments).
+    pub fn resolve_shorthands(&self, text: &str) -> String {
+        search::apply_shorthands(text, &self.shorthands(text))
+    }
+
+    /// What the editor shows in the command colour (PAR-210; the TUI's
+    /// `prompthighlight.ts`): a command at the start, macros and inline
+    /// modifiers anywhere, each with the arguments that are valid after it,
+    /// `/queue` with its target, and shorthands submission would resolve.
+    /// Byte ranges, in order.
+    pub fn highlights(&self, text: &str) -> Vec<(usize, usize)> {
+        if !text.contains('/') {
+            return Vec::new();
+        }
+        let words: Vec<(&str, usize, usize)> = text
+            .split_inclusive(char::is_whitespace)
+            .scan(0, |at, piece| {
+                let start = *at;
+                *at += piece.len();
+                let word = piece.trim_end();
+                Some((word, start, start + word.len()))
+            })
+            .filter(|(word, _, _)| !word.is_empty())
+            .collect();
+        let inline_names = inline::INLINE_NAMES;
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for (index, &(word, start, end)) in words.iter().enumerate() {
+            if !word.starts_with('/') {
+                continue;
+            }
+            let prompt = index == 0 && self.roots.iter().any(|r| r.name == word);
+            if !prompt && !self.is_macro(word) && !inline_names.contains(&word) {
+                continue;
+            }
+            if word == "/queue" {
+                let to = queue_targets::match_target(&self.targets(), text, end)
+                    .map_or(end, |(_, to)| to);
+                spans.push((start, to));
+                continue;
+            }
+            // Every name an argument goes by, below each key.
+            let mut registry = self.command_args(word);
+            registry.extend(self.inline_args(word));
+            let registry = self.with_macro_args(registry);
+            let valid = |key: &str, arg: &str| {
+                registry.get(key).is_some_and(|items| {
+                    items.iter().any(|i| {
+                        i.name == arg
+                            || i.insert_text.as_deref() == Some(arg)
+                            || i.aliases.iter().any(|a| a == arg)
+                    })
+                })
+            };
+            let custom = |provider: &str| {
+                provider_info(self.providers(), provider).is_some_and(|p| p.allows_custom_models)
+            };
+            let mut to = end;
+            let mut key = word.to_owned();
+            for &(next, _, next_end) in &words[index + 1..] {
+                let arg = if word == "/fast" || word == "/ultrafast" {
+                    next.to_lowercase()
+                } else {
+                    next.to_owned()
+                };
+                if valid(&key, &arg) {
+                    to = next_end;
+                    key = format!("{key} {arg}");
+                } else if let Some(provider) = key.strip_prefix("/model ")
+                    && custom(provider)
+                {
+                    to = next_end;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            spans.push((start, to));
+        }
+        // What Run or Send would resolve is valid too.
+        for s in self.shorthands(text) {
+            match spans.iter_mut().find(|(start, _)| *start == s.start) {
+                Some(span) => span.1 = span.1.max(s.end),
+                None => spans.push((s.start, s.end)),
+            }
+        }
+        spans.sort_unstable();
+        spans
     }
 }

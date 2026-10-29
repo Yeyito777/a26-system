@@ -749,18 +749,38 @@ fn draw_editor(
                 }
             }
         }
+        let highlights = &model.composer.highlights;
         for (row, l) in lines.iter().enumerate().take(last).skip(first) {
-            if l.end > l.start {
+            if l.end <= l.start {
+                continue;
+            }
+            // The line in runs: plain text, and valid commands in their
+            // colour (PAR-210).
+            let mut at = l.start;
+            while at < l.end {
+                let span = highlights.iter().find(|(a, b)| *b > at && *a < l.end);
+                let (until, color) = match span {
+                    Some(&(a, b)) if a <= at => (b.min(l.end), p.command),
+                    Some(&(a, _)) => (a, p.text),
+                    None => (l.end, p.text),
+                };
+                // Spans end on word boundaries; never an empty run.
+                let until = if until > at && text.is_char_boundary(until) {
+                    until
+                } else {
+                    l.end
+                };
                 crate::text::draw(
                     canvas,
-                    &text[l.start..l.end],
-                    editor.x,
+                    &text[at..until],
+                    editor.x + editor::x_of(text, l, at, &geometry.metrics),
                     T_COMPOSER.baseline(top_of(row)),
                     geometry.metrics.weight,
                     geometry.metrics.size,
-                    p.text,
+                    color,
                     1.0,
                 );
+                at = until;
             }
         }
         if !keyboard {
