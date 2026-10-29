@@ -20,8 +20,10 @@ socket, newline-delimited JSON; the wire spec is exocortex
 `shared/src/protocol.ts` and `docs/daemon-ipc.md`. The socket is
 `$EXOCORTEX_SOCKET`, else `/opt/exocortex/config/runtime/exocortexd.sock`
 (the phone's daemon runs as root in the chroot from `/opt/exocortex`).
-`src/exocortex/proto.rs` parses the events they use leniently: unknown events
-and fields are ignored, missing ones take defaults.
+`src/exocortex/proto/` parses the daemon's whole event surface leniently:
+unknown events and fields are ignored, missing ones take defaults
+(`proto/fixtures.jsonl` holds one example of every event, which the tests
+parse).
 
 The app declares `targeted-unwind`, `sidebar-reorder-delta`,
 `sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`
@@ -41,13 +43,20 @@ lands), and scrolling up asks for the older page again.
 | Model sheet | `tools_available`'s signed-in providers and their models and efforts; `set_model`, `set_effort` |
 | A tool row opened | `load_tool_outputs` for that call (history leaves outputs out) |
 
-Tool calls show as one row each (label as the TUI styles it, summary, ✕ when
-it failed); a run of three or more folds into one row ("7 tool calls · $,
-Read"). Thinking shows as a folded row. Replies are markdown
+The app has three pages, left to right as on the iPhone: Settings, the
+list, a conversation. Back (the top bar's chevron, Moon's Back, a swipe from
+the left edge) goes a page left, up a folder first; the list's ⋯ menu opens
+Settings too. Everything is drawn in the Whale theme and JetBrains Mono
+(roadmap §3); sheets, menus, dialogs, toasts and the reader open over the
+pages.
+
+Tool calls show as one row each (label as the TUI styles it, summary, ERR
+when it failed); a run of three or more folds into one row ("7 tool calls ·
+$, Read"). Thinking shows as a folded row. Replies are markdown
 (`src/exocortex/markdown.rs`): headings, paragraphs (a newline is a line
-break), bullet, numbered and task lists, quotes, rules, fenced code and tables
-(monospaced, JetBrains Mono), with bold, italic (Inter Italic), code and link
-spans. Automated prompts (subagent reports, notifications) are one gray line.
+break), bullet, numbered and task lists, quotes, rules, fenced code and
+tables, with bold, italic, code and link spans. Automated prompts (subagent
+reports, notifications) are one gray line.
 
 Sending `turns` matters: without it the daemon does not page at all. It
 sends the whole history on every open (790 KB for a long conversation) and
@@ -75,7 +84,7 @@ are discarded.
 ## Opening, laying out and drawing fast
 
 - **Kept conversations.** The last eight conversations opened are kept
-  (`Model::shelve`). Reopening one shows it at once; the daemon's fresh window
+  (`Shelf`, `model/chat.rs`). Reopening one shows it at once; the daemon's fresh window
   then replaces only what it covers when the two agree where they meet (the
   history before is the same: an unwind only cuts the end), or everything.
   A conversation opened with nothing to show waits up to 110 ms for its window
@@ -111,6 +120,171 @@ its first frame with messages (10 ms reopened); a short one 84-94 ms, then
 p95 21.9 ms, then 3.5 ms, p95 15 ms. Back in front after 30 s frozen while a
 reply streamed: first frame in 14 ms, caught up in 27 ms. The list on a cold
 start: about 95 ms after the process starts, both.
+
+## The code: who owns what, and the interfaces between
+
+The app is split along the work packages of `docs/exocortex-roadmap.md`
+(§4, §5): A, the foundation; B, the list; C1, markdown and rich content;
+C2, the transcript; D, the composer; E, conversation controls, ops and
+Settings. Each package edits its own files and reaches the others through
+the interfaces below. Every file's header says whose it is.
+
+| `src/exocortex/` | Owner | What |
+| --- | --- | --- |
+| `app.rs` | A | the event loop: X input to gestures, overlays first, then the page; the link, Moon, the store, deadlines, frames |
+| `gesture.rs`, `anim.rs` | A | the gesture recognizer; curves, tweens, pulses and the `Animator` |
+| `theme.rs` | A | palettes, composites, `mix()`, type tokens, metrics |
+| `store.rs`, `requests.rs`, `clipboard.rs` | A | kept files; request ids, owners and deadlines; copy and paste |
+| `ui/` | A | `widgets.rs`, `icons.rs`, the overlay stack (`overlay.rs`) and its overlays (`sheet.rs`, `menu.rs`, `toast.rs`), haptics, links, the status bar (`mod.rs`) |
+| `view/mod.rs`, `view/frame.rs`, `view/ops.rs` | A | page composition and hit testing, the frame pipeline, laid-out pieces |
+| `model/mod.rs` | A | `Model`, `Action`, the pages, the connection, the event fan-out, `Ui` |
+| `proto/mod.rs`, `proto/fixtures.jsonl` | A | `Event`, `parse_event`, the bootstrap |
+| `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs` | B | the list, folders, search |
+| `view/markdown_layout.rs`, `markdown.rs`, `reader.rs` | C1 | markdown as pieces, code, tables; the reader (A's is minimal) |
+| `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
+| `view/composer.rs`, `model/composer.rs`, `proto/composer.rs` | D | the composer, sending, the queue |
+| `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
+
+A package adds its new files (`list/*.rs`, `commands/*.rs`, `sheets/*.rs`
+and so on, roadmap §4) and declares them in `mod.rs` files; those one-line
+additions are the only shared edits.
+
+### Model: actions, handlers, events, requests
+
+- **Actions.** `Action` is `Nav` (pages, A), `List(sidebar::Act)`,
+  `Chat(chat::Act)`, `Composer(composer::Act)`, `Ops(ops::Act)` and
+  `Ui(UiAct)` (A: `Dismiss`, `Copy`, `OpenUrl`, `Read`, `Toast`). A package
+  adds variants to its own `Act` and handles them in its `handle_*`
+  (`handle_list`, `handle_chat`, `handle_composer`, `handle_ops`), which
+  returns the commands to send. Interfaces fixed for meeting points:
+  `composer::Act::{Insert(String), RestoreDraft { conv, text }, Focus}`
+  (C2's message menu, D's rewind) and `ops::Act::{OpenInspector, ChatMenu,
+  OpenSettings, OpenGoal, OpenActivity, OpenChrono, OpenBtw, OpenAccounts,
+  OpenSystemPrompt, OpenFind, …}` (D's commands open E's panels; the
+  unbuilt ones toast "Coming soon.").
+- **Events.** `Model::apply` settles the event's request, then every area
+  sees it: `apply_list`, `apply_ops`, `apply_composer` by reference, last
+  `apply_chat` by value (windows are big). An area ignores what is not its
+  own.
+- **No I/O in the model.** It asks the interface through `model.ui`:
+  `ui.open(Box<dyn Overlay>)`, `ui.toast(text)`, `ui.error_toast(text)`,
+  `ui.haptic(Haptic)`, `ui.effect(Effect::{Copy, OpenUrl, ShowKeyboard,
+  HideKeyboard})`, and `close_all` / `close_top` / `close_scoped`. The event
+  loop takes them after every change; tests read them.
+- **Requests.** Issue every request whose answer matters through
+  `model.requests.issue(owner, kind, conv, within, now)` (or `track` an id
+  you made) with your `Owner` and a deadline (`requests::DEFAULT_WITHIN`
+  20 s, `LOAD_WITHIN` 15 s, `ABORT_WITHIN` 12 s, …). An answer with that
+  `reqId` settles it; an `error` for it goes to your `*_error(id, message)`
+  (return false to get the generic error toast); a deadline passing calls
+  your `*_timeout(id, &pending)`, which says what failed and what to do
+  (`generic_timeout()` is "Exocortex did not answer. Try again."). A late
+  answer finds nothing pending: drop it unless it is still useful.
+  Disconnecting clears everything.
+- **Readiness.** `model.ready` is true once the daemon has answered the
+  bootstrap's `ping`; commands that change things wait for it (Send does
+  nothing until then; D shows why). Stop (`abort`) needs only
+  `connected`.
+- **Kept state** (`model.persist`, written by `store.rs` 500 ms after a
+  change, atomically, never over a file it could not parse; problems are
+  toasted at start). `settings.json` is `persist.settings()` /
+  `persist.update_settings(|s| …)` (`store::Settings`: theme, text scale,
+  thinking and tool disclosure, haptics; unknown keys kept); `ui.json`
+  sections `list` (B) and `chat` (C2) through `persist.section(UI, key)` /
+  `set_section`; `drafts.json` (D, drafts are in memory so far) through
+  `get(DRAFTS)` / `set`. After changing
+  the theme or text size call `theme::set_current(theme::by_id(id))` /
+  `theme::set_text_scale(s)`: the generation changes, every layout cache is
+  dropped and the next frame is drawn whole.
+
+### View: pages, frames and pieces
+
+- **Pages.** `view::draw_page`, `view::hit`, `view::animate`,
+  `view::liftable` and `view::long_press` dispatch to each area: the list
+  (`list::{draw_list, list_frame, draw_list_update, hit, liftable,
+  long_press, animate}`), the chat (the transcript, then
+  `chat_header::{draw, hit, frame_key, animate}` and `composer::{draw, hit,
+  frame_key, animate, geometry}`), Settings (`settings::{draw, hit,
+  frame_key}`). An area's `frame_key` hashes everything its pixels depend on
+  (with `theme::generation()`); when it changes, its rows are drawn again.
+  Its `animate` asks the `Animator` for the frames its motion needs
+  (`frame(now)`, `slow_frame(now)` for a 30 Hz pulse, `follow(&tween, now)`,
+  `request(at)`); nothing animating means no frames.
+- **Pieces** (`view/ops.rs`). A transcript piece is a `Laid` (height,
+  `Op`s, hits, ink rows, horizontal scroller keys) relative to its top,
+  passed through `ops::quantized`. Ops: `Text` (with tracking), `Rect`,
+  `Border`, `Line`, `Icon`, `Image` (an `ImageHandle`), `Chevron`, and
+  `Clip { rect, xscroll: Some(key), ops }`, whose content the view scrolls
+  sideways by `ViewState::xscroll[key]` (code blocks, tables: C1 clamps).
+  C1's entry point is `markdown_layout::lay(source, x, width, top, MdStyle)
+  -> Laid`; C2's is the transcript's planning in `transcript.rs` and
+  `blocks.rs`. Pieces are cached by a hash of what they show, so a piece's
+  key must include everything it draws.
+- **The rules every drawing follows** (they keep partial frames equal to
+  full ones, which `EXOCORTEX_APP_VERIFY=1` and the tests check):
+  draw only inside the canvas's clip, and nest clips with
+  `widgets::clipped` (a band redraw clips the whole frame); skip work with
+  `widgets::shows(canvas, y0, y1)`; place things at whole pixels (`ops::px`,
+  snapped piece positions) and draw shapes through icons or the ops, so a
+  piece moved by a scroll draws the same pixels; animate in quantized steps
+  (`anim::pulse_percent`, alpha in 1/32), so two frames of one state agree.
+- **Overlays** (`ui/overlay.rs`). An `Overlay` lays itself out, describes
+  its `Body` each frame (rows, the solid rows that only move, a scroller,
+  a key of everything else) and draws it; the pipeline then moves rows for
+  a slide or a scroll and redraws only the rest. Modal overlays take every
+  touch and dim the page; floating ones (toast, snackbar) pass touches that
+  miss them. `scoped()` overlays close when the conversation changes.
+  Ready-made: `sheet::Sheet<C: SheetContent>` (implement `title`, `layout`,
+  `draw`, `item_at`, `activate` → `Reply::{Action, Close, CloseWith, …}`,
+  `key`), `sheet::action_sheet(ActionList::new(title, items))` with
+  `ActionItem::new(label, action).icon(..).detail(..).tone(..)`,
+  `sheet::prompt_sheet(Prompt::new(..))`, `menu::AnchoredMenu::new(anchor, items, cut_out)`,
+  `menu::Confirm::new(title, message, confirm, action)`,
+  `toast::Snackbar::new(text, button, action, lift)`, `ui.toast(..)`,
+  `reader::open(&mut ui, title, text)`. An item's action closes its menu or
+  sheet first.
+- **Widgets and icons.** `ui::widgets` draws the shared chrome: `top_bar`,
+  `page_rail`, `icon_button`, `ellipsis`, `button(Button { label, kind,
+  icon, pressed, disabled })`, `segmented`, `switch`, `spinner`,
+  `activity_dot`, `badge`, `count_text`, `eyebrow`, `hairline`, `pill`,
+  `shadow`, `empty_state`, and text in a type token (`text`, `text_right`,
+  `text_centered`, `fit`, `measure`, `wrap_plain`). `ui::icons::draw(canvas,
+  Icon::X, cx, cy, size, color, alpha)` or `draw_styled` (stroke width,
+  knockout) draws one of the 63 icons of §3.6.20, cached as masks.
+- **Theme.** Colours come from `theme::p()` (the palette) and `theme::c()`
+  (composites mixed from it), never literals; text from the type tokens
+  (`T_ROW`, `T_TITLE`, `T_EYEBROW`, `T_BODY`, `T_CODE`, …: size, line,
+  weight, tracking, uppercase, scaled by the text size); spacing from the
+  metrics (`S1`…`S5`, `TOP_BAR`, `TARGET`, `GESTURE_RESERVE`, …).
+- **Gestures.** `gesture::Recognizer` turns pointer events into `Down`,
+  `Lift` (150 ms held), `LongPress` (600 ms), `DragStart { axis, edge }`,
+  `Drag`, `DragEnd { vx, vy }`, `Tap`, `Back` (a swipe from the left 60 px
+  over 30% of the width, or a flick) and `Cancel`; a move past 32 px makes
+  it a drag and cancels the press, and the axis is chosen once. The top
+  overlay gets gestures first.
+- **Other interfaces.** `chat_header::subtitle(model)` (the model label
+  now; E adds activity), `ui::haptic(Haptic)`, `ui::open_url(url)` (Moon's
+  Browser, http and https only), `clipboard::copy(text)`,
+  `clipboard::paste()`.
+
+### Things to know
+
+- `exocortex-notify` builds `markdown.rs`, `line.rs`, `handoff.rs` and
+  `proto/` into itself by path: they may use only each other and outside
+  crates, and the bridge matches `MdBlock` exhaustively (a new block kind
+  needs a line there).
+- `proto/chat.rs` is shared by C1 (images, file links, display blocks) and
+  C2; extend structs with defaulted fields, never rename.
+- JetBrains Mono NL in five cuts (Regular, Medium, SemiBold, Bold, Italic)
+  is the app's only family (Inter stays for the other apps). The fonts are
+  subset (`scripts/subset-fonts.sh`): a character
+  outside the subset falls back to Moon's fonts.
+- Moon draws its status bar in the colour the app asks for
+  (`ui::status_bar(theme::STATUS_BAR)`, at start and whenever the window is
+  mapped): a theme switch (E) should ask again with the theme's colour.
+- Where the iPhone screenshots and the spec's numbers disagree, the
+  screenshots won: the search field spans x 44 to 692, the chat title's
+  baseline is at 47, the ⋯ dots are 6.5 px, 15 px apart.
 
 ## Notifications: `exocortex-notify`
 
@@ -200,6 +374,7 @@ soon as it is.
 | `EXOCORTEX_APP_PROFILE` | unset | the app: logs each frame's draw and present time, and whether it was full or partial; when the list first shows, how long an open took to draw, event batches over 2 ms, and coming back to the front |
 | `EXOCORTEX_APP_NO_BOOST` | unset | the app: no utilization clamp for its UI thread |
 | `EXOCORTEX_APP_VERIFY` | unset | the app: checks each partial frame against a full redraw (slow; development) |
+| `EXOCORTEX_APP_DATA` | `/var/lib/exocortex-app` | the app: its settings, UI state and drafts (`store.rs`) |
 
 The bridge logs connections and the conversations it notifies for (never
 their text) to stderr.
