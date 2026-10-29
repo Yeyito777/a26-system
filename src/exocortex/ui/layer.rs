@@ -80,7 +80,7 @@ impl Sprite {
         for y in 0..h {
             let alike = y > 0 && {
                 let (a, b) = ((y - 1) * w..y * w, y * w..(y + 1) * w);
-                black.pixels[a.clone()] == black.pixels[b.clone()] && keep[a] == keep[b]
+                same(&black.pixels[a.clone()], &black.pixels[b.clone()]) && same(&keep[a], &keep[b])
             };
             let class = rows
                 .last()
@@ -140,6 +140,12 @@ impl Sprite {
             }
         }
     }
+}
+
+/// Whether two runs of pixels are the same, word by word (a slice's `==`
+/// is musl's `memcmp`, a byte at a time).
+fn same(a: &[u32], b: &[u32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 /// `out = base + under × keep / 256`, per channel (one loop the compiler
