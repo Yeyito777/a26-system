@@ -1121,7 +1121,15 @@ pub(crate) fn draw_mark(canvas: &mut Canvas, mark: &Mark, dy: f32, model: &Model
             let mut x = MARGIN;
             if kind == &StatusKind::Retry {
                 // ⟳, drawn (the type has no such glyph).
-                icons::draw(canvas, Icon::Refresh, x + STATUS_SPINNER / 2.0, cy, 34.0, color, 1.0);
+                icons::draw(
+                    canvas,
+                    Icon::Refresh,
+                    x + STATUS_SPINNER / 2.0,
+                    cy,
+                    34.0,
+                    color,
+                    1.0,
+                );
                 x += STATUS_SPINNER + 22.0;
             } else if spins {
                 let at = (anim::phase(now, 700) * 21.0).floor() / 21.0;

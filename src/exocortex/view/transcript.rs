@@ -2372,7 +2372,9 @@ mod tests {
             writer.write_image_data(&bytes).unwrap();
         };
         let meta = |start: u64, end: u64| {
-            format!(r#""metadata":{{"startedAt":{start},"endedAt":{end},"model":"claude-opus-5-5","tokens":900,"generationThroughput":{{"provider":"anthropic","model":"claude-opus-5-5","rates":[76.2]}}}}"#)
+            format!(
+                r#""metadata":{{"startedAt":{start},"endedAt":{end},"model":"claude-opus-5-5","tokens":900,"generationThroughput":{{"provider":"anthropic","model":"claude-opus-5-5","rates":[76.2]}}}}"#
+            )
         };
         let entries = [
             r#"{"type":"user","text":"Can you summarise this report and check the build?"}"#.to_owned(),
@@ -2394,9 +2396,14 @@ mod tests {
         assert!(
             model.chat.loaded && !model.chat.entries.is_empty(),
             "{:?}",
-            (serde_json::from_str::<serde_json::Value>(&format!("[{entries}]")).err(), &entries[990..1040])
+            (
+                serde_json::from_str::<serde_json::Value>(&format!("[{entries}]")).err(),
+                &entries[990..1040]
+            )
         );
-        model.handle(Action::Chat(chat::Act::ToggleExpanded("think:start:0".into())));
+        model.handle(Action::Chat(chat::Act::ToggleExpanded(
+            "think:start:0".into(),
+        )));
         let mut view = ViewState::new();
         let now = Instant::now();
         let mut canvas = Canvas::new(1080, HEIGHT as i32);
