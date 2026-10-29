@@ -1329,9 +1329,9 @@ mod tests {
             && text.contains("\"draft:root\"")
             && text.contains("\"schemaVersion\": 2")));
         // Another folder's draft is its own.
-        model.sidebar.path.push("f".into());
+        model.sidebar.draft_folder = Some("f".into());
         assert!(model.resolve().inherited);
-        model.sidebar.path.clear();
+        model.sidebar.draft_folder = None;
         // "Use daemon defaults for this draft".
         model.handle(Action::Ops(Act::InheritDefaults));
         assert!(model.resolve().inherited);

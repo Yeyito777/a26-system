@@ -29,7 +29,7 @@ use super::gesture::{Axis, Gesture, Recognizer};
 use super::handoff;
 use super::line::{self, Waker};
 use super::link::{DaemonLink, LinkEvent};
-use super::model::{Action, Effect, Model, Nav, Page, chat, composer};
+use super::model::{Action, Effect, Model, Nav, Page, chat, composer, sidebar};
 use super::proto;
 use super::screens::settings;
 use super::store::{self, Store};
@@ -219,7 +219,7 @@ fn withdraw_notification(conversation: String) {
 fn page_depth(model: &Model) -> usize {
     match model.page {
         Page::Settings => 0,
-        Page::List => 1 + model.sidebar.path.len(),
+        Page::List => 1,
         Page::Chat => 100,
     }
 }
@@ -233,6 +233,9 @@ struct Input {
     dragging: Option<ScrollArea>,
     /// The horizontal scroller a sideways drag moves, and the finger's last x.
     sideways: Option<(u64, f32)>,
+    /// The inner scroller a vertical drag moves (a tall table's rows, C1),
+    /// and the finger's last y.
+    inner: Option<(u64, f32)>,
     /// Moon's keyboard was asked for.
     keyboard: bool,
     /// …by an overlay (a prompt), which puts it away when it goes.
@@ -262,6 +265,11 @@ impl Context<'_> {
             }
             // The tapped row stays under the finger as it opens.
             Action::Chat(chat::Act::ToggleExpanded(_)) => self.view.follow = false,
+            // Back to the newest message at once, any fling stopped.
+            Action::Chat(chat::Act::JumpToLatest) => {
+                self.view.chat_scroll.reset();
+                self.view.follow = true;
+            }
             Action::Nav(_) if self.input.keyboard => self.hide_keyboard(),
             _ => {}
         }
@@ -428,12 +436,29 @@ impl Context<'_> {
             Gesture::DragStart {
                 axis: Axis::Vertical,
                 y,
+                start_x,
                 start_y,
                 edge: false,
                 ..
             } => {
                 self.input.pressed = None;
                 self.view.lifted = None;
+                // On a tall table that can scroll that way: its rows move.
+                self.input.inner = view::inner_vertical_target(
+                    self.model,
+                    self.view,
+                    height,
+                    (start_x, start_y),
+                    y - start_y,
+                    now,
+                )
+                .map(|key| (key, start_y));
+                if let Some((key, last)) = &mut self.input.inner {
+                    view::inner_drag(self.view, *key, y - *last);
+                    *last = y;
+                    self.input.dragging = None;
+                    return true;
+                }
                 self.input.dragging = view::scroll_area(self.model, self.view, height, start_y);
                 match self.input.dragging {
                     Some(ScrollArea::List) => {
@@ -483,6 +508,11 @@ impl Context<'_> {
                 y,
                 ..
             } => {
+                if let Some((key, last)) = &mut self.input.inner {
+                    view::inner_drag(self.view, *key, y - *last);
+                    *last = y;
+                    return true;
+                }
                 match self.input.dragging {
                     Some(ScrollArea::List) => {
                         let max = view::list_max(self.model, height);
@@ -527,6 +557,7 @@ impl Context<'_> {
                     }
                 }
                 self.input.sideways = None;
+                self.input.inner = None;
                 true
             }
             Gesture::Tap { x, y } => {
@@ -583,6 +614,11 @@ impl Context<'_> {
             if let Response::Action(action) = response {
                 self.perform(action);
             }
+            return true;
+        }
+        // The list's search field (B).
+        if self.model.page == Page::List {
+            self.perform(Action::List(sidebar::Act::Key(input)));
             return true;
         }
         // The composer's (Moon's `multiline` keyboard: Return is a line
@@ -694,7 +730,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     while running {
         let now = Instant::now();
         let before_depth = page_depth(&model);
-        let before_folders = model.sidebar.path.len();
         let before_id = model.chat.id.clone();
         // The reader's place, kept when the transcript changes above it.
         let before_view = view.before(&model, now);
@@ -933,11 +968,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // A page change slides (Moon snapshots the old page first).
         let after_depth = page_depth(&model);
         if after_depth != before_depth {
-            // Each folder level opens at its top (one scroll serves them
-            // all); back from a chat, the list is where it was.
-            if model.sidebar.path.len() != before_folders {
-                view.list_scroll.reset();
-            }
             if model.page == Page::Chat {
                 view.chat_scroll.reset();
                 view.follow = true;
@@ -969,7 +999,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             let _ = handoff::write_view(showing.as_deref());
             shown = Some(showing);
         }
-        if model.page != Page::Chat && input.keyboard && !input.keyboard_for_overlay {
+        if model.page != Page::Chat
+            && input.keyboard
+            && !input.keyboard_for_overlay
+            && !model.list_keeps_keyboard()
+        {
             control::hide_keyboard();
             input.keyboard = false;
             view.keyboard = false;
@@ -977,10 +1011,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
         // Keep the transcript where the user left it.
         view.settle(&model, before_view, height, now);
-        if model.page == Page::Chat && view.near_top(now) {
-            for command in model.load_older() {
-                link.send(command);
-            }
+        // Bring a revealed list row into view (B).
+        redraw |= view::list::settle(&mut model, &mut view, height, now);
+        // Older history near the top, tool outputs near the screen (C2).
+        for command in view::transcript::requests(&mut model, &mut view, height, now) {
+            link.send(command);
         }
 
         let mut flinging = match model.page {
