@@ -90,10 +90,12 @@ pub enum Op {
     /// A disclosure chevron (right; down when open).
     Chevron { x: f32, cy: f32, open: bool },
     /// Ops drawn only inside `rect`, shifted left by the view's offset for
-    /// `xscroll` (a horizontally scrolled code block or table).
+    /// `xscroll` (a horizontally scrolled code block or table) and up by
+    /// its offset for `yscroll` (a tall table's rows; C1).
     Clip {
         rect: RectF,
         xscroll: Option<u64>,
+        yscroll: Option<u64>,
         ops: Vec<Op>,
     },
 }
@@ -148,12 +150,15 @@ fn snap_op(op: &mut Op, keys: &mut Vec<u64>) {
             to.1 = snap(to.1);
         }
         Op::Icon { cy, .. } | Op::Chevron { cy, .. } => *cy = snap(*cy),
-        Op::Clip { rect, xscroll, ops } => {
+        Op::Clip {
+            rect,
+            xscroll,
+            yscroll,
+            ops,
+        } => {
             rect.y = snap(rect.y);
             rect.h = snap(rect.h);
-            if let Some(key) = xscroll {
-                keys.push(*key);
-            }
+            keys.extend(xscroll.iter().chain(yscroll.iter()));
             for op in ops {
                 snap_op(op, keys);
             }
@@ -175,6 +180,10 @@ pub fn quantized(mut laid: Laid) -> Laid {
         rect.y = snap(rect.y);
         rect.h = snap(rect.h);
     }
+    for (_, _, rect) in &mut laid.ymax {
+        rect.y = snap(rect.y);
+        rect.h = snap(rect.h);
+    }
     laid.h = snap(laid.h);
     laid.ink = (ink.0.floor(), ink.1.max(laid.h).ceil());
     laid.xkeys = keys;
@@ -190,8 +199,14 @@ pub struct Laid {
     pub hits: Vec<(RectF, Action)>,
     /// Rows its ops may touch (glyphs reach outside `0..h`).
     pub ink: (f32, f32),
-    /// Its horizontal scrollers' keys (`Op::Clip`).
+    /// Its scrollers' keys (`Op::Clip`, horizontal and vertical): a
+    /// frame where one moved draws the piece again.
     pub xkeys: Vec<u64>,
+    /// How far each of its horizontal scrollers can scroll (C1).
+    pub xmax: Vec<(u64, f32)>,
+    /// Its vertical scrollers (a tall table's rows, C1): how far each can
+    /// scroll and where a drag moves it, relative to the piece.
+    pub ymax: Vec<(u64, f32, RectF)>,
     /// The image previews it shows (fetched while it is near the screen).
     pub images: Vec<super::super::images::Want>,
 }
@@ -343,16 +358,19 @@ fn draw_ops_at(
             Op::Chevron { x, cy, open } => small_chevron(canvas, x + dx, cy + dy, *open),
             Op::Clip {
                 rect,
-                xscroll: key,
+                xscroll: xkey,
+                yscroll: ykey,
                 ops,
             } => {
-                let offset = key
-                    .and_then(|key| xscroll.get(&key))
-                    .copied()
-                    .unwrap_or(0.0);
+                let offset = |key: &Option<u64>| {
+                    key.and_then(|key| xscroll.get(&key))
+                        .copied()
+                        .unwrap_or(0.0)
+                };
+                let (ox, oy) = (offset(xkey), offset(ykey));
                 let area = RectF::new(rect.x + dx, rect.y + dy, rect.w, rect.h);
                 super::super::ui::widgets::clipped(canvas, area, |canvas| {
-                    draw_ops_at(canvas, ops, dx - offset, dy, clip, xscroll);
+                    draw_ops_at(canvas, ops, dx - ox, dy - oy, clip, xscroll);
                 });
             }
         }

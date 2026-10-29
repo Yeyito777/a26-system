@@ -14,7 +14,7 @@ use super::super::model::{Action, Chat, Model, Page, composer, rich::Rich};
 use super::super::proto::{Block, Entry, ToolStyle};
 use super::super::theme::{self, TRANSCRIPT_PAD};
 use super::blocks::{lay_md_piece, lay_notice, lay_thinking, lay_user, lay_whole};
-use super::markdown_layout::{PARAGRAPH_GAP, md_gap};
+use super::markdown_layout::{PARAGRAPH_GAP, md_gap, state_key};
 use super::media::{Strip, lay_strip};
 use super::ops::{Laid, draw_ops, quantized};
 use super::tools::{GROUP_MIN, lay_group, lay_tool, tool_run};
@@ -320,7 +320,9 @@ impl ViewState {
                 }
                 Segment::Markdown { block, hash, gap } => {
                     h += gap;
-                    let laid = self.piece(*hash, || lay_md_piece(block));
+                    let rich = context.rich;
+                    let key = hash_of((hash, state_key(block, Some(rich))));
+                    let laid = self.piece(key, || lay_md_piece(block, rich));
                     push(items, &mut h, laid);
                 }
                 Segment::Thinking {

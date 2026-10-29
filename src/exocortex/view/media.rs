@@ -252,6 +252,7 @@ fn tile(laid: &mut Laid, rect: RectF, state: Option<&State>, user: bool) {
             laid.ops.push(Op::Clip {
                 rect,
                 xscroll: None,
+                yscroll: None,
                 ops: vec![Op::Image {
                     rect: fitted,
                     image: ImageHandle::new(image),

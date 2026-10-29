@@ -8,7 +8,8 @@ use std::time::Instant;
 use serde_json::Value;
 
 use super::super::images::{ImageStore, Pic, Want};
-use super::super::proto::Event;
+use super::super::markdown::{self, MdBlock};
+use super::super::proto::{self, Block, Entry, Event};
 use super::super::requests::Pending;
 use super::Model;
 
@@ -30,7 +31,6 @@ impl Rich {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // ToggleWrap: code blocks' header (next).
 pub enum Act {
     /// The image viewer on a message's images, at `index`.
     ViewImages {
@@ -42,6 +42,9 @@ pub enum Act {
     ToggleWrap(u64),
     /// Asks again for a preview that failed (the viewer's Retry).
     RetryImage(Want),
+    /// The reply holding the table `key` (`view::table::key`), in the
+    /// reader ("Open full response").
+    OpenResponse(u64),
 }
 
 impl Model {
@@ -59,8 +62,39 @@ impl Model {
                 self.rich.wraps += 1;
             }
             Act::RetryImage(want) => self.rich.images.retry(&want),
+            Act::OpenResponse(key) => match self.response_with_table(key) {
+                Some(text) => {
+                    super::super::reader::open(&mut self.ui, "Response", text);
+                }
+                None => self.ui.toast("That reply is no longer loaded."),
+            },
         }
         Vec::new()
+    }
+
+    /// The text of the reply (its text blocks) that has the table `key`.
+    fn response_with_table(&self, key: u64) -> Option<String> {
+        let live = self.chat.live.as_ref().map(|live| live.blocks.as_slice());
+        let replies = self
+            .chat
+            .entries
+            .iter()
+            .rev()
+            .filter_map(|entry| match entry {
+                Entry::Ai { blocks, .. } => Some(blocks.as_slice()),
+                _ => None,
+            });
+        live.into_iter().chain(replies).find_map(|blocks| {
+            let has = blocks.iter().any(|block| match block {
+                Block::Text { text } if text.contains('|') => {
+                    markdown::parse(text).iter().any(|md| {
+                        matches!(md, MdBlock::Table(table) if super::super::view::table::key(table) == key)
+                    })
+                }
+                _ => false,
+            });
+            has.then(|| proto::reply_text(blocks))
+        })
     }
 
     /// The previews the screen shows or will soon, nearest first: asks for
