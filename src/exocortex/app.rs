@@ -62,11 +62,13 @@ impl Renderer {
         width: u16,
         height: u16,
     ) -> Result<Self, Box<dyn Error>> {
+        let mut presenter = Presenter::create(conn, window, depth, width, height)?;
+        presenter.enable_shm(conn);
         Ok(Self {
             window,
             depth,
             canvas: Canvas::new(i32::from(width), i32::from(height)),
-            presenter: Presenter::create(conn, window, depth, width, height)?,
+            presenter,
             chat_frame: None,
             list_frame: None,
         })
@@ -78,7 +80,8 @@ impl Renderer {
         width: u16,
         height: u16,
     ) -> Result<(), Box<dyn Error>> {
-        let presenter = Presenter::create(conn, self.window, self.depth, width, height)?;
+        let mut presenter = Presenter::create(conn, self.window, self.depth, width, height)?;
+        presenter.enable_shm(conn);
         self.presenter.destroy(conn);
         self.presenter = presenter;
         self.canvas = Canvas::new(i32::from(width), i32::from(height));
@@ -367,6 +370,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // X events.
         while let Some(event) = conn.poll_for_event()? {
             let now = Instant::now();
+            renderer.presenter.note_event(&event);
             match event {
                 XEvent::Expose(event) if event.window == window && event.count == 0 => {
                     renderer.presenter.expose(&conn, 0)?;
