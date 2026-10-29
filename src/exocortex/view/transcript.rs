@@ -133,6 +133,9 @@ struct History {
     gap: f32,
     /// The run's metadata before the live reply (its footer adds to it).
     live_base: Option<Metadata>,
+    /// A footer counts its reply's time to now (a reply a message split
+    /// from the turn that goes on): laid out again each second.
+    ticking: bool,
 }
 
 impl ChatLayout {
@@ -1281,7 +1284,15 @@ impl ViewState {
         let day = today();
         let disclosure = Disclosure::of(&model.persist);
         let fold_key = Self::fold_key(model, disclosure);
+        // A footer counting to now: a new history each second.
+        let tick = self
+            .layout
+            .history
+            .as_ref()
+            .filter(|history| history.ticking)
+            .map(|_| (wall_ms(Instant::now()) / 1000.0) as i64);
         let history_key = hash_of((
+            tick,
             disclosure,
             chat.version,
             chat.id.as_deref(),
@@ -1388,6 +1399,7 @@ impl ViewState {
         let live_follows = chat.live.is_some() && chat.echoes.is_empty();
         let (footers, live_base) = footer::footers(&chat.entries, live_follows);
         let now = wall_ms(Instant::now());
+        let mut ticking = false;
         // Whether the run of replies so far shows anything (else no lone
         // footer under folded work).
         let mut run_shows = false;
@@ -1457,6 +1469,7 @@ impl ViewState {
             y = top + placed.h;
             gap = placed.tail_gap;
             if let Some(meta) = footer {
+                ticking |= meta.ended_at.is_none();
                 let line = footer::text(meta, now, false, disclosure.tokens);
                 let suspended = chat.suspended == Some(*stamp);
                 let key = hash_of(("footer", &line, *stamp, suspended));
@@ -1516,6 +1529,7 @@ impl ViewState {
             y,
             gap,
             live_base,
+            ticking,
         }
     }
 
@@ -3426,8 +3440,15 @@ mod tests {
         for step in 1..4 {
             let at = t0 + Duration::from_millis(step * 100);
             let damage = update(&mut model, &mut view, (t0, at), |_, _| {});
+            // (The header's clock may tick too.)
+            let transcript: i32 = damage
+                .rows
+                .iter()
+                .map(|(y0, y1)| y1 - y0.max(&widgets::top_bar_rows().1))
+                .filter(|rows| *rows > 0)
+                .sum();
             assert!(
-                rows(&damage) <= 2 * 40 + 4,
+                transcript <= 2 * 40 + 4,
                 "the clock's rows only: {damage:?}"
             );
             // The spinners (the call's, WORKING's) in their own columns.
