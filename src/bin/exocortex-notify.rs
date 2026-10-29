@@ -26,7 +26,7 @@ mod handoff;
 mod line;
 #[path = "../exocortex/markdown.rs"]
 mod markdown;
-#[path = "../exocortex/proto.rs"]
+#[path = "../exocortex/proto/mod.rs"]
 mod proto;
 
 use std::collections::{HashMap, HashSet, VecDeque};

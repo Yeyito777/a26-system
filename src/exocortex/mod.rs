@@ -10,4 +10,5 @@ pub mod link;
 pub mod markdown;
 pub mod model;
 pub mod proto;
+pub mod sheets;
 pub mod view;
