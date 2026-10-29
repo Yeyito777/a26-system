@@ -42,8 +42,12 @@ lands), and scrolling up asks for the older page again.
 | List commands | `pin_conversation`, `pin_folder`, `pin_sidebar_items`, `mark_conversation`, `mute_conversation`, `mute_folder`, `move_sidebar_items` (refused: a `conversations_list` with its reqId), `delete_conversation`, `delete_conversations`, `delete_folder`, each followed by a `ping` with its reqId (`updateStatusOnly`); `rename_conversation`, `create_folder` (with the items to move in), `rename_folder` (acked); `clone_conversation`, `undo_delete`, `redo_delete` (answered by `conversation_restored` or a state patch); `load_folder_instructions`, `set_folder_instructions`; `list_conversations` to start over (pull to refresh, Retry) |
 | A conversation | `load_conversation` with `turns`, the `viewport` and an `initialBackfill` (which subscribes and marks it read): a window of about two screens, then the older page behind it from the same snapshot; older pages (15 turns) with `load_conversation_history` as the user scrolls up, joined where a page ends inside an entry; the stream (`streaming_started`, `block_start`, `text_chunk`, `thinking_chunk`, `streaming_sync`, `tool_call`, `tool_result`, `message_complete`, `streaming_stopped`, `user_message`, `system_message`, `history_updated`, whose `pendingAI: null` ends the live reply); after each stop the newest page again, so the history settles on the daemon's copy. Leaving it `unsubscribe`s. |
 | Sending | `send_message` (shown at once, confirmed by the daemon's `user_message` or `streaming_started` with the same `startedAt`); while it works, Send asks "Deliver message": **Next turn** (Steer now on other providers) or **Message end**, `queue_message` with that `timing` (shown as queued until delivered; sent directly if the turn ended meanwhile); a new conversation is `new_conversation` with its first message and only the draft's explicit model choices (in the folder whose "+" was tapped). Refused or unconfirmed in 20 s: the text goes back into the draft it came from, with the error above the composer |
-| The queue | a queued bubble tapped: Edit in composer, Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it) |
+| The queue | a queued bubble tapped: Edit… (`update_queued_message`), deliver at the other timing, Edit in composer, Move earlier / later (`move_queued_message`), Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it). `/queue [target]` in a message puts it on the daemon's idle queue (`source: global-idle` with its `waitTarget`) |
+| Commands | Run: `/model`, `/effort`, `/fast`, `/ultrafast` (through E's `PickModel` / `PickEffort` / `PickSpeed`), `/default-model` (`set_conversation_defaults`, `reset_conversation_defaults`), `/rename` (`rename_conversation`, `generate_title`), `/replay`, `/compact`, `/trim`, `/instructions` (`set_system_instructions`), `/goal`, `/chrono` and `/btw` (through E's goal, Chrono and aside requests and panels), `/stop`, `/ping`, `/reload`; the rest open E's panels or say something |
+| Rewind | the message menu's Edit / rewind: the text back into the draft, then `unwind_conversation` with its `userMessageIndex` (from the windows' `historyStartUserIndex`) and `expectedStartedAt` |
+| The mic | `exocortex-voice dictate` (OSS-Phone-V1 `docs/voice.md`): its `level` lines drive the strip, `stop` on its stdin transcribes (the daemon's `transcribe_audio`, by the hook) |
 | Stop | `abort` with the stream's `expectedStartedAt`; a spinner until `ack`, `streaming_stopped` or `message_complete`; a second press says it is already stopping |
+| Panels (E) | Activity: `list_tasks`, `stop_task`, `abort` for a subagent; Goal: `set_goal` (its `goal_updated` reaches subscribers only: the open conversation); Chrono: `chrono` list, create, cancel; BTW: `btw_query`, `btw_followup`, `btw_close` (sent again after a reconnection until settled); System prompt: `get_system_prompt`, `load_instructions`, `set_system_instructions`; Accounts: `accounts {watch}` while it shows; Usage: `usage_update` (pushed), `get_token_stats` when Settings or a usage panel opens; the inspector's "Use as daemon default" and reset: `set_conversation_defaults`, `reset_conversation_defaults`, confirmed only by a `conversation_defaults` with their reqId |
 | The model inspector | `tools_available`'s providers, models, efforts and speeds, and `conversationDefaults` (or `conversation_defaults`); Apply sends `set_model`, `set_effort`, `set_fast_mode` for what changed; a draft changes nothing on the wire until its first message |
 | Tool outputs | `load_tool_outputs` for a row opened, and for rows within a screen of what shows (six at a time, one request in flight; history leaves outputs out); one that does not come says so ("no longer available", "timed out") and a tap asks again |
 
@@ -143,7 +147,29 @@ it), the handles and the caret can be dragged, and a tap at the caret or on
 the selection opens the edit menu (Cut, Copy, Paste, Select, Select all over
 Moon's clipboard). Six lines show; more scroll inside, the caret's line kept
 in view. Drafts are kept per conversation and per new chat in a folder, in
-`drafts.json`, across restarts.
+`drafts.json`, across restarts; the chat's ⋯ menu discards one.
+
+A slash word at the caret opens the picker above the composer (`commands/`,
+`view/picker.rs`): commands at the start of the prompt (Commands and Macros
+tabs with counts), macros and the inline modifiers anywhere, then their
+arguments (providers, models, efforts, `/queue` targets) by a fuzzy search
+ported from the TUI ("/model opus" finds "/model anthropic claude-opus-5-5").
+A suggestion inserts its text and never runs; a typed command makes the
+trailing button Run. Send and Run go through the TUI's pipeline: `//` sends a
+literal slash; shorthands resolve ("/mod opus"); an unknown command is
+refused (the text stays, the reason above the composer); inline modifiers
+(`/model p m`, `/effort x`, `/fast`, `/ultrafast`, `/queue [target]`) apply
+first and leave the text; macros (`macros.rs`, the TUI's catalog in
+`macros.json`, regenerated with `scripts/sync-exocortex-macros.ts`) expand
+with the daemon's paths. Command results show as notices in the transcript
+(long ones, `/help`, `/model`, in the reader; a new chat's as toasts).
+
+The mic shows when nothing is typed: it runs Moon's voice hook
+(`dictation.rs`), and a recording strip takes the editor's row (cancel, the
+red dot and the clock, the waveform of the hook's levels, finish). The words
+go in at the caret of the draft they were spoken for, wherever the user is
+by then; a recording ends with its chat and stops by itself before the
+capture's 120 s limit; transcription is given up on after 90 s.
 
 Sending `turns` matters: without it the daemon does not page at all. It
 sends the whole history on every open (790 KB for a long conversation) and
@@ -251,7 +277,7 @@ the interfaces below. Every file's header says whose it is.
 | `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands (`list/actions.rs`), changes shown before the daemon answers (`list/pending.rs`), menus, prompts and pickers (`list/menus.rs`), the folder inspector (`list/sheets.rs`) |
 | `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks, tables; images in the transcript, their cache and the viewer; the reader and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
-| `view/composer.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts |
+| `view/composer.rs`, `view/picker.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts, the mic, the command picker, commands and macros |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
 
 A package adds its new files (`list/*.rs`, `commands/*.rs`, `sheets/*.rs`
@@ -266,11 +292,18 @@ additions are the only shared edits.
   adds variants to its own `Act` and handles them in its `handle_*`
   (`handle_list`, `handle_chat`, `handle_composer`, `handle_ops`), which
   returns the commands to send. Interfaces fixed for meeting points:
-  `composer::Act::{Insert(String), RestoreDraft { conv, text }, Focus}`
+  `composer::Act::{Insert(String), RestoreDraft { conv, text }, Focus,
+  Rewind(stamp), Discard}` (`Model::can_rewind(stamp)` says whether a sent
+  message can be rewound now)
   (C2's message menu, D's rewind) and `ops::Act::{OpenInspector, ChatMenu,
   OpenSettings, OpenGoal, OpenActivity, OpenChrono, OpenBtw, OpenAccounts,
-  OpenSystemPrompt, OpenFind, …}` (D's commands open E's panels; the
-  unbuilt ones toast "Coming soon.").
+  OpenSystemPrompt, OpenFind, OpenUsage, OpenTokens, OpenConnection, …}`
+  (D's commands open E's panels). For commands that act directly:
+  `ops::Act::Goal(goal::Act::Set(objective, max_ms))` (`/goal`),
+  `sheets::chrono::parse(text, now_ms)` and `ops::Act::Chrono(..)`
+  (`/chrono`), `model.ask_aside(conv, query)` (`/btw`),
+  `ops::Act::{PickModel, PickEffort, PickSpeed}` (`/model`, `/effort`,
+  `/fast`).
 - **Events.** `Model::apply` settles the event's request, then every area
   sees it: `apply_list`, `apply_ops`, `apply_composer` by reference, last
   `apply_chat` by value (windows are big). An area ignores what is not its
@@ -360,7 +393,14 @@ additions are the only shared edits.
   `menu::Confirm::new(title, message, confirm, action)`,
   `toast::Snackbar::new(text, button, action, lift)`, `ui.toast(..)`,
   `reader::open(&mut ui, title, text)`. An item's action closes its menu or
-  sheet first.
+  sheet first. A `SheetContent` can say when it next changes by itself
+  (`wake`, a ticking time) and what to do once it has gone (`farewell`: the
+  stack collects them, the event loop performs them; the Accounts panel
+  stops watching so). E's panels are `sheets::panel`: rows (sections,
+  key/value, navigation, task rows, rail cards, bars, buttons) built from
+  the model each frame (`Panel::{Goal, Activity, Chrono, Btw, SystemPrompt,
+  Usage, Accounts, Connection, Tokens, Find}`), opened with
+  `model.open_panel(..)`; Settings shows panel rows too.
 - **Widgets and icons.** `ui::widgets` draws the shared chrome: `top_bar`,
   `page_rail`, `icon_button`, `ellipsis`, `button(Button { label, kind,
   icon, pressed, disabled })`, `segmented`, `switch`, `spinner`,
@@ -437,7 +477,8 @@ It posts to `moon-notifyd` (`MOON_NOTIFY_SOCKET`, else
   stopped; no `streamStopReason`), not streaming, not `notificationsMuted`;
   or a conversation's goal changing to blocked, paused by its controller, or
   complete. Subagents (`parentConversationId`) never notify.
-- **Not** while the app shows that conversation in front (below).
+- **Not** while the app shows that conversation in front (below), and at
+  most once per conversation in 5 s.
 - **What**: app `exocortex`, tag = the conversation id (or a hash of it when
   it is not a valid tag), title = its title, body = the start of the reply
   (its text without markdown, 280 characters, or the error that ended the

@@ -345,3 +345,250 @@ pub fn set_effort(req_id: &str, conv_id: &str, effort: &str) -> Value {
 pub fn set_fast_mode(req_id: &str, conv_id: &str, speed: Speed) -> Value {
     json!({ "type": "set_fast_mode", "reqId": req_id, "convId": conv_id, "enabled": speed.value() })
 }
+
+// ----- Accounts (`accounts`'s snapshot) ----------------------------------------
+
+/// `AccountsSnapshot`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AccountsSnapshot {
+    pub generated_at: f64,
+    /// Several accounts are set up.
+    pub enabled: bool,
+    pub claude: ClaudeAccounts,
+    pub openai: OpenAiAccounts,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClaudeAccounts {
+    pub proxied: bool,
+    pub remote: Option<ClaudeRemote>,
+    pub accounts: Vec<ClaudeAccount>,
+    pub routing: ClaudeRouting,
+    pub next_new_work: Option<NextNewWork>,
+    pub current_conversation: Option<CurrentConversation>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClaudeRemote {
+    pub alias: String,
+    pub host: Option<String>,
+    pub state: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClaudeAccount {
+    pub id: String,
+    pub email: Option<String>,
+    pub plan: Option<String>,
+    pub config_dir: String,
+    /// `ready`, `limited`, `blocked`, `signed_out`, `not_subscription`,
+    /// `unchecked`.
+    pub state: String,
+    pub state_detail: Option<String>,
+    pub limited_until: Option<f64>,
+    pub blocked_until: Option<f64>,
+    pub usage: Option<Usage>,
+    pub usage_updated_at: Option<f64>,
+    pub active_turns: u32,
+    pub login_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClaudeRouting {
+    pub five_hour_floor: f64,
+    pub weekly_floor: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NextNewWork {
+    pub account: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CurrentConversation {
+    pub conv_id: String,
+    pub account: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OpenAiAccounts {
+    pub proxied: bool,
+    pub accounts: Vec<OpenAiAccount>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OpenAiAccount {
+    pub index: u32,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub plan: Option<String>,
+    pub current: bool,
+}
+
+// ----- Commands -------------------------------------------------------------------
+
+pub fn set_model_with(
+    req_id: &str,
+    conv_id: &str,
+    provider: &str,
+    model: &str,
+    delegation: Option<bool>,
+    legacy: Option<bool>,
+) -> Value {
+    let mut command = set_model(req_id, conv_id, provider, model);
+    if let Some(delegation) = delegation {
+        command["delegation"] = json!(delegation);
+    }
+    if let Some(legacy) = legacy {
+        command["legacy"] = json!(legacy);
+    }
+    command
+}
+
+pub fn set_conversation_defaults(req_id: &str, defaults: &Selection) -> Value {
+    json!({
+        "type": "set_conversation_defaults",
+        "reqId": req_id,
+        "defaults": {
+            "provider": defaults.provider,
+            "model": defaults.model,
+            "effort": defaults.effort,
+            "fastMode": defaults.speed().value(),
+        },
+    })
+}
+
+pub fn reset_conversation_defaults(req_id: &str) -> Value {
+    json!({ "type": "reset_conversation_defaults", "reqId": req_id })
+}
+
+/// `set_goal`: `show`, `set` (with an objective and an optional time
+/// limit), `pause`, `resume`, `complete`, `clear`.
+pub fn set_goal(
+    req_id: &str,
+    conv_id: &str,
+    action: &str,
+    objective: Option<&str>,
+    max_time_ms: Option<u64>,
+) -> Value {
+    let mut command =
+        json!({ "type": "set_goal", "reqId": req_id, "convId": conv_id, "action": action });
+    if let Some(objective) = objective {
+        command["objective"] = json!(objective);
+    }
+    if let Some(ms) = max_time_ms {
+        command["maxTimeMs"] = json!(ms);
+    }
+    command
+}
+
+pub fn list_tasks(req_id: &str, conv_id: &str) -> Value {
+    json!({ "type": "list_tasks", "reqId": req_id, "convId": conv_id })
+}
+
+pub fn stop_task(req_id: &str, conv_id: &str, task_id: &str) -> Value {
+    json!({ "type": "stop_task", "reqId": req_id, "convId": conv_id, "taskId": task_id })
+}
+
+/// `chrono` `list` or `cancel` (an id, a unique prefix of its short id, or
+/// `all`).
+pub fn chrono(req_id: &str, conv_id: &str, action: &str, schedule_id: Option<&str>) -> Value {
+    let mut command =
+        json!({ "type": "chrono", "reqId": req_id, "convId": conv_id, "action": action });
+    if let Some(id) = schedule_id {
+        command["scheduleId"] = json!(id);
+    }
+    command
+}
+
+/// `chrono` `create`: the first time as an ISO-8601 instant with its
+/// offset, an optional repeat, and a message or a shell command.
+pub fn chrono_create(
+    req_id: &str,
+    conv_id: &str,
+    at: &str,
+    repeat: Option<&Value>,
+    message: Option<&str>,
+    command: Option<&str>,
+) -> Value {
+    let mut out = json!({ "type": "chrono", "reqId": req_id, "convId": conv_id, "action": "create", "at": at });
+    if let Some(repeat) = repeat {
+        out["repeat"] = repeat.clone();
+    }
+    if let Some(message) = message {
+        out["message"] = json!(message);
+    }
+    if let Some(command) = command {
+        out["command"] = json!(command);
+    }
+    out
+}
+
+pub fn btw_query(
+    req_id: &str,
+    session_id: &str,
+    conv_id: &str,
+    query: &str,
+    started_at: u64,
+) -> Value {
+    json!({
+        "type": "btw_query", "reqId": req_id, "sessionId": session_id, "convId": conv_id,
+        "query": query, "startedAt": started_at,
+    })
+}
+
+pub fn btw_followup(
+    req_id: &str,
+    session_id: &str,
+    turn_id: &str,
+    conv_id: &str,
+    query: &str,
+    started_at: u64,
+) -> Value {
+    json!({
+        "type": "btw_followup", "reqId": req_id, "sessionId": session_id, "turnId": turn_id,
+        "convId": conv_id, "query": query, "startedAt": started_at,
+    })
+}
+
+pub fn btw_close(req_id: &str, conv_id: &str, session_id: &str) -> Value {
+    json!({ "type": "btw_close", "reqId": req_id, "convId": conv_id, "sessionId": session_id })
+}
+
+pub fn get_system_prompt(req_id: &str, conv_id: Option<&str>) -> Value {
+    let mut command = json!({ "type": "get_system_prompt", "reqId": req_id });
+    if let Some(id) = conv_id {
+        command["convId"] = json!(id);
+    }
+    command
+}
+
+pub fn set_system_instructions(req_id: &str, conv_id: &str, text: &str) -> Value {
+    json!({ "type": "set_system_instructions", "reqId": req_id, "convId": conv_id, "text": text })
+}
+
+pub fn accounts(req_id: &str, watch: Option<bool>, conv_id: Option<&str>) -> Value {
+    let mut command = json!({ "type": "accounts", "reqId": req_id });
+    if let Some(watch) = watch {
+        command["watch"] = json!(watch);
+    }
+    if let Some(id) = conv_id {
+        command["convId"] = json!(id);
+    }
+    command
+}
+
+pub fn get_token_stats(req_id: &str) -> Value {
+    json!({ "type": "get_token_stats", "reqId": req_id })
+}
