@@ -29,6 +29,7 @@ use super::line::{self, Waker};
 use super::link::{DaemonLink, LinkEvent};
 use super::model::{Action, Effect, Model, Nav, Page, chat, composer};
 use super::proto;
+use super::screens::settings;
 use super::store::{self, Store};
 use super::theme;
 use super::ui::overlay::Response;
@@ -302,6 +303,7 @@ impl Context<'_> {
                     self.view.follow = true;
                 }
                 Effect::HideKeyboard => self.hide_keyboard(),
+                Effect::StatusBar => ui::status_bar(&theme::status_bar()),
             }
             changed = true;
         }
@@ -384,7 +386,8 @@ impl Context<'_> {
                     }
                     Some(ScrollArea::Settings) => {
                         self.view.settings_scroll.begin(start_y, now);
-                        self.view.settings_scroll.moved(y, 0.0, now);
+                        let max = settings::max_scroll(self.model, height);
+                        self.view.settings_scroll.moved(y, max, now);
                     }
                     None => {}
                 }
@@ -425,7 +428,10 @@ impl Context<'_> {
                         self.view.list_scroll.moved(y, max, now);
                     }
                     Some(ScrollArea::Chat) => self.drag_chat(y, now),
-                    Some(ScrollArea::Settings) => self.view.settings_scroll.moved(y, 0.0, now),
+                    Some(ScrollArea::Settings) => {
+                        let max = settings::max_scroll(self.model, height);
+                        self.view.settings_scroll.moved(y, max, now);
+                    }
                     None => {}
                 }
                 true
@@ -452,7 +458,10 @@ impl Context<'_> {
                             let max = self.view.chat_max(self.model, height);
                             self.view.chat_scroll.end(max, now);
                         }
-                        Some(ScrollArea::Settings) => self.view.settings_scroll.end(0.0, now),
+                        Some(ScrollArea::Settings) => {
+                            let max = settings::max_scroll(self.model, height);
+                            self.view.settings_scroll.end(max, now);
+                        }
                         None => {}
                     }
                 }
@@ -558,7 +567,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .ui
             .error_toast(format!("{name} could not be read: changes are not kept."));
     }
-    ui::status_bar(theme::STATUS_BAR);
+    ui::status_bar(&theme::status_bar());
 
     let (conn, screen_number) = x11rb::rust_connection::RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_number];
@@ -760,7 +769,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     }
                     // Moon knows the app by now: its status bar takes the
                     // theme's background (asked again, the same colour).
-                    ui::status_bar(theme::STATUS_BAR);
+                    ui::status_bar(&theme::status_bar());
                     shell.ask();
                     next_shell_poll = now + SHELL_POLL;
                     redraw = true;
@@ -897,7 +906,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 let max = view.chat_max(&model, height);
                 view.chat_scroll.step(max, now)
             }
-            Page::Settings => view.settings_scroll.step(0.0, now),
+            Page::Settings => {
+                let max = settings::max_scroll(&model, height);
+                view.settings_scroll.step(max, now)
+            }
         };
         {
             let mut overlays = std::mem::take(&mut view.overlays);

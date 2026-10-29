@@ -4,7 +4,7 @@
 //! | File | Owner | What |
 //! | --- | --- | --- |
 //! | `settings.json` | A, written by E through `Settings` | theme, text size, transcript toggles |
-//! | `ui.json` | sections: `list` (B), `chat` (C2) | expanded folders, anchors, disclosures |
+//! | `ui.json` | sections: `list` (B), `chat` (C2), `generation` (E) | expanded folders, anchors, disclosures, drafts' model overrides |
 //! | `drafts.json` | D | drafts per conversation and folder |
 //!
 //! Two halves. `Persist` is in the model (no I/O): the documents as read,
