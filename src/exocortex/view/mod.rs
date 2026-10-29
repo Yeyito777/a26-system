@@ -18,6 +18,7 @@ pub mod composer;
 pub mod frame;
 pub mod list;
 pub mod markdown_layout;
+pub mod media;
 pub mod ops;
 pub mod tools;
 pub mod transcript;
@@ -629,7 +630,11 @@ pub fn hit(
                     continue;
                 }
                 for (rect, action) in &item.laid.hits {
-                    if y >= iy + rect.y && y < iy + rect.y + rect.h {
+                    if y >= iy + rect.y
+                        && y < iy + rect.y + rect.h
+                        && x >= rect.x
+                        && x < rect.x + rect.w
+                    {
                         return Some(Hit::Action(action.clone()));
                     }
                 }
