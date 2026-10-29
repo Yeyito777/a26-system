@@ -927,7 +927,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // Keep the transcript where the user left it.
         view.settle(&model, before_view, height, now);
         // Bring a revealed list row into view (B).
-        view::list::settle(&mut model, &mut view, height, now);
+        redraw |= view::list::settle(&mut model, &mut view, height, now);
         if model.page == Page::Chat && view.near_top(now) {
             for command in model.load_older() {
                 link.send(command);

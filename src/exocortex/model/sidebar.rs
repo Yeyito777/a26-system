@@ -211,6 +211,13 @@ pub struct Sidebar {
     pub error: Option<String>,
     /// A row on screen has a pulsing dot (the view's frames).
     pub pulsing: bool,
+    /// The search's results changed or it ended: the list goes to the
+    /// results' top, or back to where the tree was (`tree_scroll`).
+    pub scroll_top: bool,
+    /// The tree's scroll while a search shows.
+    pub tree_scroll: Option<f32>,
+    /// The folder opened or closed last, and when (its chevron turns).
+    pub toggled: Option<(String, Instant)>,
     layout: Option<((u64, String), Rc<Layout>)>,
     aggregates: Option<(u64, Rc<Aggregates>)>,
 }
@@ -651,10 +658,16 @@ impl Sidebar {
         if self.search.focused || !self.search.text.is_empty() || self.search.active() {
             self.search.clear();
             self.search.focused = false;
-            self.restructured();
+            self.searched();
             return true;
         }
         false
+    }
+
+    /// What the search shows changed.
+    pub(crate) fn searched(&mut self) {
+        self.scroll_top = true;
+        self.restructured();
     }
 
     /// The folder a new chat goes to.
@@ -764,7 +777,7 @@ impl Model {
     /// The debounced search follows the typing; true when the list changed.
     pub fn list_tick(&mut self, now: Instant) -> bool {
         if self.sidebar.search.tick(now) {
-            self.sidebar.restructured();
+            self.sidebar.searched();
             return true;
         }
         false
@@ -788,9 +801,11 @@ impl Model {
                 return self.handle(Action::Nav(Nav::OpenConversation(id)));
             }
             Act::Toggle(id) => {
-                if !self.sidebar.expanded.remove(&id) {
-                    self.sidebar.expanded.insert(id);
+                let open = !self.sidebar.expanded.remove(&id);
+                if open {
+                    self.sidebar.expanded.insert(id.clone());
                 }
+                self.sidebar.toggled = Some((id, now));
                 self.ui.haptic(Haptic::Selection);
                 self.sidebar.restructured();
                 self.keep_list();
@@ -798,6 +813,7 @@ impl Model {
             Act::ShowFolder(id) => {
                 self.unfocus_search();
                 self.sidebar.search.clear();
+                self.sidebar.searched();
                 self.sidebar.expanded.insert(id.clone());
                 self.sidebar.reveal_row(Row::Folder {
                     id,
@@ -823,7 +839,7 @@ impl Model {
             }
             Act::ClearSearch => {
                 self.sidebar.search.clear();
-                self.sidebar.restructured();
+                self.sidebar.searched();
             }
             Act::Key(KeyInput::Enter) => {
                 self.unfocus_search();

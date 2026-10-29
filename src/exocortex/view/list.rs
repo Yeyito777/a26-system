@@ -53,6 +53,9 @@ const FOLDER_RIGHT: f32 = W - TARGET - 28.0;
 const GAP: f32 = 17.0;
 /// Half the rows an activity dot covers (25 px, anti-aliased).
 const DOT_HALF: i32 = 14;
+/// A folder's chevron turns 90° in this many steps, over 240 ms.
+const TURN: u8 = 16;
+const TURN_FOR: f32 = 0.24;
 
 /// Moon shrinks the window above its keyboard: no home gesture under it.
 fn keyboard_up(height: f32) -> bool {
@@ -114,6 +117,8 @@ struct ConversationLook {
 struct FolderLook {
     depth: usize,
     open: bool,
+    /// The chevron's turn, 0 (closed, pointing right) to `TURN` (open).
+    turn: u8,
     name: String,
     hit: Option<(usize, usize)>,
     pin: bool,
@@ -173,6 +178,8 @@ struct Ctx<'a> {
     selected: Option<String>,
     /// The search query, lower-cased (empty when not searching).
     query: String,
+    /// The folder toggled last and how far its chevron has turned (0..1).
+    turning: Option<(String, f32)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -194,6 +201,10 @@ impl<'a> Ctx<'a> {
             lifted,
             selected,
             query: model.sidebar.search.query().to_lowercase(),
+            turning: model.sidebar.toggled.as_ref().map(|(id, at)| {
+                let t = now.saturating_duration_since(*at).as_secs_f32() / TURN_FOR;
+                (id.clone(), anim::ease_out(t))
+            }),
         }
     }
 
@@ -306,9 +317,15 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
             }
             let action = row_action(row, searching).expect("a folder's");
             let face = ctx.face(&action);
+            let progress = match &ctx.turning {
+                Some((turning, progress)) if turning == id => *progress,
+                _ => 1.0,
+            };
+            let progress = if *open { progress } else { 1.0 - progress };
             Look::Folder(FolderLook {
                 depth: *depth,
                 open: *open,
+                turn: (progress * TURN as f32).round() as u8,
                 hit: Search::find(&name, &ctx.query),
                 name,
                 pin: f.pinned && (*depth > 0 || searching),
@@ -542,6 +559,26 @@ fn draw_conversation(canvas: &mut Canvas, c: &ConversationLook, y: f32) {
     widgets::text(canvas, &meta, x, y + 124.0, T_META, p.muted, 1.0);
 }
 
+/// The chevron (`Icon::ChevronRight`'s stroke) turned `turn` steps of 90°.
+fn chevron(canvas: &mut Canvas, cx: f32, cy: f32, size: f32, turn: u8, color: Rgb) {
+    let angle = f32::from(turn) / f32::from(TURN) * std::f32::consts::FRAC_PI_2;
+    let (sin, cos) = angle.sin_cos();
+    let scale = size / 24.0;
+    // "M9 5l7 7-7 7" about the box's centre (12, 12).
+    let points: Vec<(f32, f32)> = [(-3.0, -7.0), (4.0, 0.0), (-3.0, 7.0)]
+        .iter()
+        .map(|(x, y): &(f32, f32)| {
+            (
+                cx + (x * cos - y * sin) * scale,
+                cy + (x * sin + y * cos) * scale,
+            )
+        })
+        .collect();
+    let mut path = crate::gfx::Path::new();
+    path.stroke_polyline(&points, 2.0 * scale);
+    canvas.fill_path(&path, color, 1.0);
+}
+
 fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
     let p = theme::p();
     let c = theme::c();
@@ -550,19 +587,7 @@ fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
     // 8 pt in, 14 pt a level.
     let base = 22.0 + FOLDER_INDENT * f.depth as f32;
     let cy = y + ROW_H / 2.0;
-    icons::draw(
-        canvas,
-        if f.open {
-            Icon::ChevronDown
-        } else {
-            Icon::ChevronRight
-        },
-        base + 19.5,
-        cy,
-        39.0,
-        p.muted,
-        1.0,
-    );
+    chevron(canvas, base + 19.5, cy, 39.0, f.turn, p.muted);
     let icon = RectF::new(
         base + 67.0,
         y + ((ROW_H - FOLDER_ICON) / 2.0).floor(),
@@ -1116,6 +1141,12 @@ pub fn animate(model: &Model, now: Instant, animator: &mut Animator) {
     if let Some(due) = model.sidebar.search.due() {
         animator.request(due);
     }
+    // A folder's chevron turning.
+    if let Some((_, at)) = &model.sidebar.toggled
+        && now.saturating_duration_since(*at).as_secs_f32() < TURN_FOR
+    {
+        animator.frame(now);
+    }
 }
 
 /// The list frame on `canvas` (drawn for `old`) turned into `new`'s: rows
@@ -1364,44 +1395,67 @@ pub fn long_press(
     }
 }
 
-/// Brings a revealed row into view, and keeps the scroll inside the list
-/// when it got shorter (a folder closed, a search narrowed).
-pub fn settle(model: &mut Model, view: &mut ViewState, height: f32, now: Instant) {
-    if model.page != Page::List && model.sidebar.reveal.is_none() {
-        return;
+/// Before a frame: the search follows the typing, its results start at
+/// their top (the tree comes back where it was), a revealed row comes into
+/// view, and the scroll stays inside a list that got shorter (a folder
+/// closed). Returns whether anything changed.
+pub fn settle(model: &mut Model, view: &mut ViewState, height: f32, now: Instant) -> bool {
+    let mut changed = model.list_tick(now);
+    if model.page != Page::List {
+        return changed;
     }
     let max = list_max(model, height);
-    if let Some(row) = model.sidebar.reveal.take() {
-        let layout = model.sidebar.layout();
-        let id = match &row {
-            Row::Conversation { id, .. } | Row::Folder { id, .. } => id.clone(),
-            _ => return,
-        };
-        let Some(index) = layout.index_of(|r| match r {
-            Row::Conversation { id: other, .. } | Row::Folder { id: other, .. } => *other == id,
-            _ => false,
-        }) else {
-            return;
-        };
-        let (top, bottom) = bounds(model, height);
-        let window = bottom - top - S1;
-        let row_top = layout.tops[index];
-        let row_bottom = row_top + layout.rows[index].height();
+    // Search results start at their top; the tree comes back where it was.
+    if std::mem::take(&mut model.sidebar.scroll_top) {
         let offset = view.list_scroll.value(now);
-        let target = if row_top < offset {
-            row_top - theme::S3
-        } else if row_bottom > offset + window {
-            row_bottom - window + theme::S3
+        let target = if model.sidebar.search.active() {
+            model.sidebar.tree_scroll.get_or_insert(offset);
+            0.0
         } else {
-            return;
+            model.sidebar.tree_scroll.take().unwrap_or(0.0)
         };
         view.list_scroll.reset();
         view.list_scroll.offset = target.clamp(0.0, max).round();
-        return;
+        changed = true;
+    }
+    if let Some(row) = model.sidebar.reveal.take() {
+        let offset = view.list_scroll.value(now);
+        if let Some(target) = reveal_target(model, &row, height, offset) {
+            view.list_scroll.reset();
+            view.list_scroll.offset = target.clamp(0.0, max).round();
+            return true;
+        }
+        return changed;
     }
     if !view.list_scroll.dragging() && view.list_scroll.value(now) > max + 0.5 {
         view.list_scroll.reset();
         view.list_scroll.offset = max.round();
+        changed = true;
+    }
+    changed
+}
+
+/// The scroll that brings `row` into view from `offset`, if it is not.
+fn reveal_target(model: &mut Model, row: &Row, height: f32, offset: f32) -> Option<f32> {
+    let id = match row {
+        Row::Conversation { id, .. } | Row::Folder { id, .. } => id,
+        _ => return None,
+    };
+    let layout = model.sidebar.layout();
+    let index = layout.index_of(|r| match r {
+        Row::Conversation { id: other, .. } | Row::Folder { id: other, .. } => other == id,
+        _ => false,
+    })?;
+    let (top, bottom) = bounds(model, height);
+    let window = bottom - top - S1;
+    let row_top = layout.tops[index];
+    let row_bottom = row_top + layout.rows[index].height();
+    if row_top < offset {
+        Some(row_top - theme::S3)
+    } else if row_bottom > offset + window {
+        Some(row_bottom - window + theme::S3)
+    } else {
+        None
     }
 }
 
@@ -1631,6 +1685,33 @@ mod tests {
     }
 
     #[test]
+    fn a_folders_chevron_turns_drawing_only_its_row() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        model.handle(Action::List(Act::Toggle("f".into())));
+        let (_, at) = model.sidebar.toggled.clone().unwrap();
+        let mut turned = 0;
+        for step in 1..=40u64 {
+            let (t0, t1) = (
+                at + Duration::from_millis((step - 1) * 8),
+                at + Duration::from_millis(step * 8),
+            );
+            let damage = update_matches(&mut model, &mut view, (None, None), (t0, t1), |_, _| {});
+            // The folder's row (and pulsing dots elsewhere).
+            assert!(
+                drawn(&damage) <= ROW_H as i32 + 8 * 2 * DOT_HALF,
+                "{damage:?}"
+            );
+            turned += damage
+                .rows
+                .iter()
+                .filter(|(a, b)| b - a == ROW_H as i32)
+                .count();
+        }
+        assert!(turned > 5, "the chevron turned over several frames");
+    }
+
+    #[test]
     fn rows_hit_and_long_press_where_they_are() {
         let mut model = model();
         let mut view = ViewState::new();
@@ -1707,6 +1788,25 @@ mod tests {
         model.handle(Action::List(Act::Toggle("f".into())));
         settle(&mut model, &mut view, H, now);
         assert!(view.list_scroll.offset <= list_max(&mut model, H));
+    }
+
+    #[test]
+    fn results_start_at_their_top_and_the_tree_comes_back_where_it_was() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let t = Instant::now();
+        view.list_scroll.offset = 900.0;
+        model.handle(Action::List(Act::Search));
+        model.handle(Action::List(Act::Key(crate::keys::KeyInput::Character(
+            '3',
+        ))));
+        model.tick(t + Duration::from_secs(1));
+        settle(&mut model, &mut view, H, t);
+        assert_eq!(view.list_scroll.offset, 0.0);
+        assert!(matches!(model.sidebar.layout().rows[0], Row::Results(_)));
+        model.handle(Action::Nav(crate::exocortex::model::Nav::Back));
+        settle(&mut model, &mut view, H, t);
+        assert_eq!(view.list_scroll.offset, 900.0);
     }
 
     #[test]
