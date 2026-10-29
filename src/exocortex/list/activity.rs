@@ -50,11 +50,11 @@ pub fn first_line(title: &str) -> &str {
 }
 
 /// What a row shows: the first line, its mark apart (drawn as its own
-/// glyph); None when blank ("Untitled chat", drawn as a placeholder). The
-/// daemon calls a conversation "pending" until its title is generated.
+/// glyph); None when blank ("Untitled chat", drawn as a placeholder). A
+/// title being generated reads "pending" (PAR-055).
 pub fn row_title(summary: &Summary) -> Option<&str> {
     let title = strip_mark(first_line(&summary.title)).trim();
-    (!title.is_empty() && title != "pending").then_some(title)
+    (!title.is_empty()).then_some(title)
 }
 
 /// What search looks in: marks are stripped only from titles that do not
@@ -419,7 +419,10 @@ mod tests {
             Some("Fix the build")
         );
         assert_eq!(row_title(&summary(r#"{"title":"  "}"#)), None);
-        assert_eq!(row_title(&summary(r#"{"title":"pending"}"#)), None);
+        assert_eq!(
+            row_title(&summary(r#"{"title":"pending"}"#)),
+            Some("pending")
+        );
         assert_eq!(mark_prefix("🐛 crash"), Some("🐛"));
         assert_eq!(mark_prefix("🐛crash"), None);
         // Search keeps marks on ASCII-led titles only.

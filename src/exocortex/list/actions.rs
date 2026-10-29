@@ -1,32 +1,31 @@
-//! The list's commands (PAR-064–079): pin, mark, mute, rename and delete a
-//! conversation (with the undo snackbar), undo and redo deletions, create,
-//! rename, pin, mute and delete folders, and the menus and prompts that
-//! lead to them.
+//! The list's commands (PAR-064–079): pin, mark, mute, rename, move, clone
+//! and delete conversations and folders (with the undo snackbar), undo and
+//! redo deletions, create folders, ask for the list again.
 //!
-//! Most list commands answer nothing and fail silently, so each is followed
-//! on the same connection by a `ping` with its reqId: the daemon handles a
+//! A change shows at once (`list/pending.rs`) and is then verified: most
+//! list commands answer nothing and fail silently, so each is followed on
+//! the same connection by a `ping` with its reqId. The daemon handles a
 //! client's commands in order, so by the `pong` every broadcast the command
-//! caused has arrived, and a change the list still does not show was not
-//! made (PAR-074): the user is told and the list asked for again. Commands
-//! that ack (renames, a new folder) are through at their ack; undo and redo
-//! at the restored conversation or the state patch they cause.
+//! caused has arrived, and a change the daemon's state still does not show
+//! was not made (PAR-074): it is taken back, the user told, and the list
+//! asked for again. Commands that ack (renames, a new folder) are through at
+//! their ack; undo, redo and clone at the conversation they restore or the
+//! state patch they cause; a move the daemon refuses comes back as a list
+//! with its reqId.
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use super::super::model::Model;
 use super::super::model::sidebar::{Act, Row, Sidebar};
-use super::super::model::{Action, Model, Nav, UiAct};
-use super::super::proto::{self, Event};
+use super::super::proto::{self, Event, Summary};
 use super::super::requests::{self, Owner, Pending};
 use super::super::ui::Haptic;
-use super::super::ui::icons::Icon;
-use super::super::ui::menu::{AnchoredMenu, Confirm, MenuItem, Tone};
-use super::super::ui::sheet::{self, ActionItem, ActionList, Prompt};
 use super::super::ui::toast::Snackbar;
 use super::activity;
-use crate::gfx::RectF;
+use super::pending::{Answer, Expect, Key, top_unpinned};
 
 /// The daemon did not make a change it was asked for.
 pub const NOT_APPLIED: &str =
@@ -34,11 +33,15 @@ pub const NOT_APPLIED: &str =
 /// A change was not answered in time.
 pub const NO_ACK: &str = "No acknowledgement received. Check the conversation before retrying; the command may have been accepted.";
 
+/// How long a new conversation's row stays after its request went without
+/// the daemon listing it (its `conversation_updated` follows the answer).
+const CREATED_GRACE: Duration = Duration::from_millis(1500);
+
 /// A list command sent and not yet seen through.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mutation {
     Pin {
-        conv: String,
+        keys: Vec<Key>,
         pinned: bool,
     },
     Mark {
@@ -46,133 +49,139 @@ pub enum Mutation {
         marked: bool,
     },
     Mute {
-        conv: String,
+        key: Key,
         muted: bool,
     },
     Rename {
-        conv: String,
+        key: Key,
+    },
+    Move {
+        keys: Vec<Key>,
+        label: String,
     },
     Delete {
-        conv: String,
+        convs: Vec<String>,
+        /// Folders (id, name).
+        folders: Vec<(String, String)>,
+        recursive: bool,
     },
     Undo,
     Redo,
+    Clone,
     CreateFolder {
         name: String,
         parent: Option<String>,
         /// The folders there were before.
         before: HashSet<String>,
-    },
-    RenameFolder {
-        folder: String,
-    },
-    PinFolder {
-        folder: String,
-        pinned: bool,
-    },
-    MuteFolder {
-        folder: String,
-        muted: bool,
-    },
-    DeleteFolder {
-        folder: String,
-        name: String,
-        recursive: bool,
+        /// Moved into it.
+        items: Vec<Key>,
     },
     /// The list asked for again.
     Refresh,
 }
 
+/// A command sent, and the change it shows meanwhile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sent {
+    pub mutation: Mutation,
+    pub edit: Option<u64>,
+}
+
 impl Mutation {
     fn kind(&self) -> &'static str {
         match self {
-            Mutation::Pin { .. } | Mutation::PinFolder { .. } => "pin",
+            Mutation::Pin { .. } => "pin",
             Mutation::Mark { .. } => "mark",
-            Mutation::Mute { .. } | Mutation::MuteFolder { .. } => "mute",
-            Mutation::Rename { .. } | Mutation::RenameFolder { .. } => "rename",
-            Mutation::Delete { .. } | Mutation::DeleteFolder { .. } => "delete",
+            Mutation::Mute { .. } => "mute",
+            Mutation::Rename { .. } => "rename",
+            Mutation::Move { .. } => "move",
+            Mutation::Delete { .. } => "delete",
             Mutation::Undo => "undo",
             Mutation::Redo => "redo",
+            Mutation::Clone => "clone",
             Mutation::CreateFolder { .. } => "folder",
             Mutation::Refresh => "list",
         }
     }
 
     /// What failing at it is called.
-    fn failure(&self) -> &'static str {
+    fn failure(&self) -> String {
         match self {
-            Mutation::Pin { pinned: true, .. } | Mutation::PinFolder { pinned: true, .. } => {
-                "Could not pin"
+            Mutation::Pin { pinned: true, .. } => "Could not pin".into(),
+            Mutation::Pin { .. } => "Could not unpin".into(),
+            Mutation::Mark { marked: true, .. } => "Could not mark".into(),
+            Mutation::Mark { .. } => "Could not unmark".into(),
+            Mutation::Mute { muted: true, .. } => "Could not mute".into(),
+            Mutation::Mute { .. } => "Could not unmute".into(),
+            Mutation::Rename {
+                key: Key::Folder(_),
+            } => "Could not rename the folder".into(),
+            Mutation::Rename { .. } => "Could not rename".into(),
+            Mutation::Move { label, .. } => format!("Could not move {label}"),
+            Mutation::Delete { convs, folders, .. } if convs.is_empty() && folders.len() == 1 => {
+                "Could not delete the folder".into()
             }
-            Mutation::Pin { .. } | Mutation::PinFolder { .. } => "Could not unpin",
-            Mutation::Mark { marked: true, .. } => "Could not mark",
-            Mutation::Mark { .. } => "Could not unmark",
-            Mutation::Mute { muted: true, .. } | Mutation::MuteFolder { muted: true, .. } => {
-                "Could not mute"
-            }
-            Mutation::Mute { .. } | Mutation::MuteFolder { .. } => "Could not unmute",
-            Mutation::Rename { .. } => "Could not rename",
-            Mutation::RenameFolder { .. } => "Could not rename the folder",
-            Mutation::Delete { .. } => "Could not delete",
-            Mutation::DeleteFolder { .. } => "Could not delete the folder",
-            Mutation::Undo => "Could not undo",
-            Mutation::Redo => "Could not redo",
-            Mutation::CreateFolder { .. } => "Could not create the folder",
-            Mutation::Refresh => "Could not load the chats",
+            Mutation::Delete { .. } => "Could not delete".into(),
+            Mutation::Undo => "Could not undo".into(),
+            Mutation::Redo => "Could not redo".into(),
+            Mutation::Clone => "Could not clone".into(),
+            Mutation::CreateFolder { .. } => "Could not create the folder".into(),
+            Mutation::Refresh => "Could not load the chats".into(),
         }
     }
 
-    /// Through at its ack (else at the barrier's pong, or, for undo, redo
-    /// and the list, at what they answer with).
+    /// Through at its ack.
     fn acked(&self) -> bool {
         matches!(
             self,
-            Mutation::Rename { .. } | Mutation::RenameFolder { .. } | Mutation::CreateFolder { .. }
+            Mutation::Rename { .. } | Mutation::CreateFolder { .. }
         )
     }
 
+    /// Verified by a barrier ping.
     fn barrier(&self) -> bool {
-        !self.acked() && !matches!(self, Mutation::Undo | Mutation::Redo | Mutation::Refresh)
+        matches!(
+            self,
+            Mutation::Pin { .. }
+                | Mutation::Mark { .. }
+                | Mutation::Mute { .. }
+                | Mutation::Move { .. }
+                | Mutation::Delete { .. }
+        )
     }
+}
 
-    /// Whether the list shows it done.
-    fn applied(&self, sidebar: &Sidebar) -> bool {
-        let conv = |id: &str| sidebar.conversations.get(id);
-        let folder = |id: &str| sidebar.folders.get(id);
-        match self {
-            Mutation::Pin { conv: id, pinned } => conv(id).is_some_and(|c| c.pinned == *pinned),
-            Mutation::Mark { conv: id, marked } => conv(id).is_some_and(|c| c.marked == *marked),
-            Mutation::Mute { conv: id, muted } => conv(id).is_some_and(|c| c.muted == *muted),
-            Mutation::Delete { conv: id } => conv(id).is_none(),
-            Mutation::PinFolder { folder: id, pinned } => {
-                folder(id).is_some_and(|f| f.pinned == *pinned)
-            }
-            Mutation::MuteFolder { folder: id, muted } => {
-                folder(id).is_some_and(|f| f.muted == *muted)
-            }
-            Mutation::DeleteFolder { folder: id, .. } => folder(id).is_none(),
-            _ => true,
+/// “Title”, “Folder” or "N items" (the TUI's `sidebarMoveLabel`).
+pub fn label_for(sidebar: &Sidebar, keys: &[Key]) -> String {
+    match keys {
+        [Key::Conv(id)] => {
+            let title = sidebar
+                .conversations
+                .get(id)
+                .and_then(activity::row_title)
+                .unwrap_or("Untitled chat");
+            format!("“{title}”")
         }
+        [Key::Folder(id)] => format!(
+            "“{}”",
+            sidebar
+                .folders
+                .get(id)
+                .map_or("folder", |f| f.name.as_str())
+        ),
+        _ => format!("{} items", keys.len()),
     }
-}
-
-/// The conversation's title for messages: “Title”.
-fn quoted(sidebar: &Sidebar, conv: &str) -> String {
-    let title = sidebar
-        .conversations
-        .get(conv)
-        .and_then(activity::row_title)
-        .unwrap_or("Untitled chat");
-    format!("“{title}”")
-}
-
-fn list(act: Act) -> Action {
-    Action::List(act)
 }
 
 impl Model {
-    /// Sends a list command (and its barrier) and waits on it.
-    fn mutate(&mut self, mutation: Mutation, command: impl FnOnce(&str) -> Value) -> Vec<Value> {
+    /// Shows `edit` at once, sends the commands `commands` makes of a
+    /// reqId (and the barrier) and waits on them.
+    fn mutate(
+        &mut self,
+        mutation: Mutation,
+        edit: Option<(Vec<(Key, Expect)>, Answer)>,
+        commands: impl FnOnce(&str) -> Vec<Value>,
+    ) -> Vec<Value> {
         if !self.ready {
             self.list_failed(&format!(
                 "{}: not connected to the daemon.",
@@ -181,60 +190,80 @@ impl Model {
             return Vec::new();
         }
         let within = match mutation {
-            Mutation::CreateFolder { .. } | Mutation::RenameFolder { .. } => {
-                requests::FOLDER_CREATE_WITHIN
-            }
+            Mutation::CreateFolder { .. }
+            | Mutation::Rename {
+                key: Key::Folder(_),
+            } => requests::FOLDER_CREATE_WITHIN,
             _ => requests::DEFAULT_WITHIN,
         };
-        let id = self.requests.issue(
-            Owner::Sidebar,
-            mutation.kind(),
-            None,
-            within,
-            Instant::now(),
-        );
-        let mut commands = vec![command(&id)];
+        let now = Instant::now();
+        let id = self
+            .requests
+            .issue(Owner::Sidebar, mutation.kind(), None, within, now);
+        let edit = edit.map(|(expected, answer)| self.sidebar.add_edit(expected, answer, now));
+        let mut sent = commands(&id);
         if mutation.barrier() {
-            commands.push(proto::barrier(&id));
+            sent.push(proto::barrier(&id));
         }
-        self.sidebar.mutations.insert(id, mutation);
-        commands
+        self.sidebar.mutations.insert(id, Sent { mutation, edit });
+        sent
     }
 
-    fn list_failed(&mut self, message: &str) {
+    pub(crate) fn list_failed(&mut self, message: &str) {
         self.ui.haptic(Haptic::Error);
         self.ui.error_toast(message);
     }
 
     fn snackbar(&mut self, text: &str, button: &str, act: Act) {
-        self.ui
-            .open(Box::new(Snackbar::new(text, button, list(act), 0.0)));
+        self.ui.open(Box::new(Snackbar::new(
+            text,
+            button,
+            super::super::model::Action::List(act),
+            0.0,
+        )));
     }
 
-    /// The list again (the error state's Retry, a change not made).
+    /// The list again (the error state's Retry, pull to refresh, a change
+    /// not made).
     pub(crate) fn refresh_list(&mut self) -> Vec<Value> {
         if self.requests.of(Owner::Sidebar, "list").next().is_some() {
             return Vec::new();
         }
-        self.mutate(Mutation::Refresh, proto::list_conversations)
+        self.mutate(Mutation::Refresh, None, |id| {
+            vec![proto::list_conversations(id)]
+        })
     }
 
-    pub(crate) fn list_pin(&mut self, conv: String, pinned: bool) -> Vec<Value> {
-        if self
-            .sidebar
-            .conversations
-            .get(&conv)
-            .is_none_or(|c| c.pinned == pinned)
-        {
+    /// Whether the list is being asked for again.
+    pub fn list_refreshing(&self) -> bool {
+        self.requests.of(Owner::Sidebar, "list").next().is_some()
+    }
+
+    /// Pins or unpins items (PAR-075): pinned ones go to the bottom of the
+    /// pinned section, unpinned ones to the top of the unpinned section,
+    /// keeping their order.
+    pub(crate) fn list_pin(&mut self, keys: Vec<Key>, pinned: bool) -> Vec<Value> {
+        let keys: Vec<Key> = keys
+            .into_iter()
+            .filter(|key| self.sidebar.pinned_of(key).is_some_and(|p| p != pinned))
+            .collect();
+        if keys.is_empty() {
             return Vec::new();
         }
-        self.mutate(
-            Mutation::Pin {
-                conv: conv.clone(),
-                pinned,
-            },
-            |id| proto::pin_conversation(id, &conv, pinned),
-        )
+        let expected = self.sidebar.pin_placements(&keys, pinned);
+        let answer = Answer::Patch(keys.clone());
+        let mutation = Mutation::Pin {
+            keys: keys.clone(),
+            pinned,
+        };
+        self.mutate(mutation, Some((expected, answer)), |id| match &keys[..] {
+            [Key::Conv(conv)] => vec![proto::pin_conversation(id, conv, pinned)],
+            [Key::Folder(folder)] => vec![proto::pin_folder(id, folder, pinned)],
+            _ => vec![proto::pin_sidebar_items(
+                id,
+                keys.iter().map(|key| (key.item_ref(), pinned)).collect(),
+            )],
+        })
     }
 
     pub(crate) fn list_mark(&mut self, conv: String, marked: bool) -> Vec<Value> {
@@ -246,70 +275,200 @@ impl Model {
         {
             return Vec::new();
         }
-        self.mutate(
-            Mutation::Mark {
-                conv: conv.clone(),
-                marked,
-            },
-            |id| proto::mark_conversation(id, &conv, marked),
-        )
-    }
-
-    pub(crate) fn list_mute(&mut self, conv: String, muted: bool) -> Vec<Value> {
-        if self
-            .sidebar
-            .conversations
-            .get(&conv)
-            .is_none_or(|c| c.muted == muted)
-        {
-            return Vec::new();
-        }
-        self.mutate(
-            Mutation::Mute {
-                conv: conv.clone(),
-                muted,
-            },
-            |id| proto::mute_conversation(id, &conv, muted),
-        )
-    }
-
-    pub(crate) fn list_set_title(&mut self, conv: String, title: String) -> Vec<Value> {
-        let title = title.trim().to_owned();
-        if title.is_empty()
-            || self
-                .sidebar
-                .conversations
-                .get(&conv)
-                .is_none_or(|c| c.title == title)
-        {
-            return Vec::new();
-        }
-        self.mutate(Mutation::Rename { conv: conv.clone() }, |id| {
-            proto::rename_conversation(id, &conv, &title)
+        let expect = Expect {
+            marked: Some(marked),
+            ..Expect::default()
+        };
+        let edit = (
+            vec![(Key::Conv(conv.clone()), expect)],
+            Answer::Marked(conv.clone()),
+        );
+        let mutation = Mutation::Mark {
+            conv: conv.clone(),
+            marked,
+        };
+        self.mutate(mutation, Some(edit), |id| {
+            vec![proto::mark_conversation(id, &conv, marked)]
         })
     }
 
-    pub(crate) fn list_delete(&mut self, conv: String) -> Vec<Value> {
-        if !self.sidebar.conversations.contains_key(&conv) {
+    pub(crate) fn list_mute(&mut self, key: Key, muted: bool) -> Vec<Value> {
+        let current = match &key {
+            Key::Conv(id) => self.sidebar.conversations.get(id).map(|c| c.muted),
+            Key::Folder(id) => self.sidebar.folders.get(id).map(|f| f.muted),
+        };
+        if current.is_none_or(|m| m == muted) {
             return Vec::new();
         }
-        self.mutate(Mutation::Delete { conv: conv.clone() }, |id| {
-            proto::delete_conversation(id, &conv)
+        let expect = Expect {
+            muted: Some(muted),
+            ..Expect::default()
+        };
+        let answer = match key {
+            Key::Folder(_) => Answer::Patch(vec![key.clone()]),
+            Key::Conv(_) => Answer::None,
+        };
+        let edit = (vec![(key.clone(), expect)], answer);
+        let mutation = Mutation::Mute {
+            key: key.clone(),
+            muted,
+        };
+        self.mutate(mutation, Some(edit), |id| match &key {
+            Key::Conv(conv) => vec![proto::mute_conversation(id, conv, muted)],
+            Key::Folder(folder) => vec![proto::mute_folder(id, folder, muted)],
+        })
+    }
+
+    /// A conversation's title or a folder's name.
+    pub(crate) fn list_rename(&mut self, key: Key, name: String) -> Vec<Value> {
+        let name = name.trim().to_owned();
+        let current = match &key {
+            Key::Conv(id) => self.sidebar.conversations.get(id).map(|c| c.title.clone()),
+            Key::Folder(id) => self.sidebar.folders.get(id).map(|f| f.name.clone()),
+        };
+        if name.is_empty() || current.is_none_or(|c| c == name) {
+            return Vec::new();
+        }
+        let expect = Expect {
+            title: Some(name.clone()),
+            ..Expect::default()
+        };
+        let answer = match key {
+            Key::Folder(_) => Answer::Patch(vec![key.clone()]),
+            Key::Conv(_) => Answer::None,
+        };
+        let edit = (vec![(key.clone(), expect)], answer);
+        self.mutate(
+            Mutation::Rename { key: key.clone() },
+            Some(edit),
+            |id| match &key {
+                Key::Conv(conv) => vec![proto::rename_conversation(id, conv, &name)],
+                Key::Folder(folder) => vec![proto::rename_folder(id, folder, &name)],
+            },
+        )
+    }
+
+    /// Items into a folder (or the top level), at the top of its unpinned
+    /// section (PAR-073).
+    pub(crate) fn list_move(&mut self, keys: Vec<Key>, parent: Option<String>) -> Vec<Value> {
+        let Some(expected) = self.sidebar.project_move(&keys, parent.as_deref()) else {
+            return Vec::new();
+        };
+        // Nothing to do when every item already sits there.
+        let changed = expected.iter().any(|(key, expect)| {
+            self.sidebar.parent_of(key) != expect.parent
+                || self.sidebar.pinned_of(key) != expect.pinned
+        });
+        if !changed {
+            return Vec::new();
+        }
+        let moving: Vec<Key> = expected.iter().map(|(key, _)| key.clone()).collect();
+        let label = label_for(&self.sidebar, &moving);
+        if let Some(parent) = &parent {
+            self.sidebar.expanded.insert(parent.clone());
+            self.keep_list();
+        }
+        let answer = Answer::Patch(moving.clone());
+        let mutation = Mutation::Move {
+            keys: moving.clone(),
+            label,
+        };
+        self.mutate(mutation, Some((expected, answer)), |id| {
+            vec![proto::move_sidebar_items(
+                id,
+                moving.iter().map(Key::item_ref).collect(),
+                parent.as_deref(),
+            )]
+        })
+    }
+
+    /// Conversations and folders to the trash (folders `recursive`ly, or
+    /// only their shells).
+    pub(crate) fn list_delete(&mut self, keys: Vec<Key>, recursive: bool) -> Vec<Value> {
+        let convs: Vec<String> = keys
+            .iter()
+            .filter_map(|key| match key {
+                Key::Conv(id) if self.sidebar.conversations.contains_key(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let folders: Vec<(String, String)> = keys
+            .iter()
+            .filter_map(|key| match key {
+                Key::Folder(id) => self
+                    .sidebar
+                    .folders
+                    .get(id)
+                    .map(|f| (id.clone(), f.name.clone())),
+                _ => None,
+            })
+            .collect();
+        if convs.is_empty() && folders.is_empty() {
+            return Vec::new();
+        }
+        let mut expected: Vec<(Key, Expect)> = Vec::new();
+        let gone = || Expect {
+            removed: true,
+            ..Expect::default()
+        };
+        for (folder, _) in &folders {
+            if recursive {
+                let below = self.sidebar.descendant_folders(folder);
+                for c in self.sidebar.conversations.values() {
+                    if c.folder_id.as_ref().is_some_and(|f| below.contains(f)) {
+                        expected.push((Key::Conv(c.id.clone()), gone()));
+                    }
+                }
+                expected.extend(below.into_iter().map(|id| (Key::Folder(id), gone())));
+            } else {
+                expected.push((Key::Folder(folder.clone()), gone()));
+            }
+        }
+        for conv in &convs {
+            expected.push((Key::Conv(conv.clone()), gone()));
+        }
+        let mutation = Mutation::Delete {
+            convs: convs.clone(),
+            folders: folders.clone(),
+            recursive,
+        };
+        self.mutate(mutation, Some((expected, Answer::None)), |id| {
+            let mut commands: Vec<Value> = folders
+                .iter()
+                .map(|(folder, _)| proto::delete_folder(id, folder, recursive))
+                .collect();
+            match &convs[..] {
+                [] => {}
+                [conv] => commands.push(proto::delete_conversation(id, conv)),
+                _ => commands.push(proto::delete_conversations(id, &convs)),
+            }
+            commands
         })
     }
 
     pub(crate) fn list_undo(&mut self, redo: bool) -> Vec<Value> {
         if redo {
-            self.mutate(Mutation::Redo, proto::redo_delete)
+            self.mutate(Mutation::Redo, None, |id| vec![proto::redo_delete(id)])
         } else {
-            self.mutate(Mutation::Undo, proto::undo_delete)
+            self.mutate(Mutation::Undo, None, |id| vec![proto::undo_delete(id)])
         }
     }
 
+    pub(crate) fn list_clone(&mut self, conv: String) -> Vec<Value> {
+        if !self.sidebar.conversations.contains_key(&conv) {
+            return Vec::new();
+        }
+        self.mutate(Mutation::Clone, None, |id| {
+            vec![proto::clone_conversation(id, &conv)]
+        })
+    }
+
+    /// A folder (`items` moved into it).
     pub(crate) fn list_create_folder(
         &mut self,
         name: String,
         parent: Option<String>,
+        items: Vec<Key>,
     ) -> Vec<Value> {
         let name = name.trim().to_owned();
         if name.is_empty() {
@@ -320,93 +479,161 @@ impl Model {
             name: name.clone(),
             parent: parent.clone(),
             before,
+            items: items.clone(),
         };
-        self.mutate(mutation, |id| {
-            proto::create_folder(id, &name, parent.as_deref())
+        self.mutate(mutation, None, |id| {
+            vec![proto::create_folder(
+                id,
+                &name,
+                parent.as_deref(),
+                items.iter().map(Key::item_ref).collect(),
+            )]
         })
     }
 
-    pub(crate) fn list_set_folder_name(&mut self, folder: String, name: String) -> Vec<Value> {
-        let name = name.trim().to_owned();
-        if name.is_empty()
-            || self
-                .sidebar
-                .folders
-                .get(&folder)
-                .is_none_or(|f| f.name == name)
-        {
-            return Vec::new();
+    /// Commands the rest of the app sent: a message bumps its unpinned
+    /// conversation to the top of its folder (PAR-076); a new conversation
+    /// shows at once at the top of its folder (PAR-082).
+    pub fn list_observe(&mut self, commands: &[Value]) {
+        let now = Instant::now();
+        for command in commands {
+            let conv = command["convId"].as_str().unwrap_or_default();
+            match command["type"].as_str() {
+                Some("send_message") => {
+                    let key = Key::Conv(conv.to_owned());
+                    let Some(old) = self
+                        .sidebar
+                        .conversations
+                        .get(conv)
+                        .filter(|c| !c.pinned)
+                        .map(|c| c.sort_order)
+                    else {
+                        continue;
+                    };
+                    let top = self.sidebar.pinned_sort_order(&key, false);
+                    if top < old {
+                        let expect = Expect {
+                            sort_order: Some(top),
+                            ..Expect::default()
+                        };
+                        self.sidebar.add_edit(
+                            vec![(key, expect)],
+                            Answer::Moved(conv.to_owned(), old),
+                            now,
+                        );
+                    }
+                }
+                Some("new_conversation") if !self.sidebar.conversations.contains_key(conv) => {
+                    let folder = self.sidebar.parent_of_id(command["folderId"].as_str());
+                    let entries = self.sidebar.placement_entries(folder.as_deref());
+                    let started = command["initialMessage"]["startedAt"]
+                        .as_f64()
+                        .unwrap_or(now_ms());
+                    let summary = Summary {
+                        id: conv.to_owned(),
+                        provider: command["provider"].as_str().unwrap_or_default().into(),
+                        model: command["model"].as_str().unwrap_or_default().into(),
+                        title: "pending".into(),
+                        created_at: started,
+                        updated_at: started,
+                        message_count: 1,
+                        streaming: true,
+                        sort_order: top_unpinned(entries.iter().map(|(_, p, s)| (*p, *s))),
+                        folder_id: folder,
+                        ..Summary::default()
+                    };
+                    let expect = Expect {
+                        created: Some(Box::new(summary)),
+                        ..Expect::default()
+                    };
+                    let edit = self.sidebar.add_edit(
+                        vec![(Key::Conv(conv.to_owned()), expect)],
+                        Answer::None,
+                        now,
+                    );
+                    let request = command["reqId"].as_str().unwrap_or_default().to_owned();
+                    self.sidebar.creating.push((edit, request, None));
+                }
+                _ => {}
+            }
         }
-        self.mutate(
-            Mutation::RenameFolder {
-                folder: folder.clone(),
-            },
-            |id| proto::rename_folder(id, &folder, &name),
-        )
     }
 
-    pub(crate) fn list_pin_folder(&mut self, folder: String, pinned: bool) -> Vec<Value> {
-        if self
-            .sidebar
-            .folders
-            .get(&folder)
-            .is_none_or(|f| f.pinned == pinned)
-        {
-            return Vec::new();
-        }
-        self.mutate(
-            Mutation::PinFolder {
-                folder: folder.clone(),
-                pinned,
-            },
-            |id| proto::pin_folder(id, &folder, pinned),
-        )
-    }
-
-    pub(crate) fn list_mute_folder(&mut self, folder: String, muted: bool) -> Vec<Value> {
-        if self
-            .sidebar
-            .folders
-            .get(&folder)
-            .is_none_or(|f| f.muted == muted)
-        {
-            return Vec::new();
-        }
-        self.mutate(
-            Mutation::MuteFolder {
-                folder: folder.clone(),
-                muted,
-            },
-            |id| proto::mute_folder(id, &folder, muted),
-        )
-    }
-
-    pub(crate) fn list_delete_folder(&mut self, folder: String, recursive: bool) -> Vec<Value> {
-        let Some(name) = self.sidebar.folders.get(&folder).map(|f| f.name.clone()) else {
-            return Vec::new();
-        };
-        let mutation = Mutation::DeleteFolder {
-            folder: folder.clone(),
-            name,
-            recursive,
-        };
-        self.mutate(mutation, |id| proto::delete_folder(id, &folder, recursive))
+    /// A new conversation's row goes when its request ended without the
+    /// daemon listing it (it refused, or did not answer).
+    pub(crate) fn settle_created(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        let mut creating = std::mem::take(&mut self.sidebar.creating);
+        creating.retain_mut(|(edit, request, orphaned)| {
+            if self.sidebar.edit_settled(*edit) {
+                return false;
+            }
+            if self.requests.is_pending(request) {
+                return true;
+            }
+            match orphaned {
+                None => {
+                    *orphaned = Some(now);
+                    true
+                }
+                Some(at) if now.duration_since(*at) < CREATED_GRACE => true,
+                Some(_) => {
+                    self.sidebar.drop_edit(*edit, now);
+                    changed = true;
+                    false
+                }
+            }
+        });
+        self.sidebar.creating = creating;
+        changed
     }
 
     /// A list command seen through.
-    fn list_done(&mut self, mutation: Mutation, restored: Option<String>) {
-        match mutation {
-            Mutation::Delete { conv } => {
-                if self.sidebar.selected.as_deref() == Some(conv.as_str()) {
+    fn list_done(&mut self, sent: Sent, restored: Option<String>) {
+        match sent.mutation {
+            Mutation::Delete {
+                convs,
+                folders,
+                recursive,
+            } => {
+                if self
+                    .sidebar
+                    .selected
+                    .as_ref()
+                    .is_some_and(|s| convs.contains(s))
+                {
                     self.sidebar.selected = None;
                 }
-                self.snackbar("Moved to trash", "Undo", Act::Undo);
+                let keys: Vec<Key> = convs
+                    .iter()
+                    .map(|c| Key::Conv(c.clone()))
+                    .chain(folders.iter().map(|(f, _)| Key::Folder(f.clone())))
+                    .collect();
+                self.sidebar.leave_selection(&keys);
+                match (&convs[..], &folders[..]) {
+                    (_, [(_, name)]) if convs.is_empty() && !recursive => {
+                        self.ui.toast(format!("Removed folder “{name}”"));
+                    }
+                    (_, [(_, name)]) if convs.is_empty() => {
+                        self.snackbar(&format!("Moved “{name}” to trash"), "Undo", Act::Undo);
+                    }
+                    ([_], []) => self.snackbar("Moved to trash", "Undo", Act::Undo),
+                    _ if folders.is_empty() => self.snackbar(
+                        &format!("Moved {} chats to trash", convs.len()),
+                        "Undo",
+                        Act::Undo,
+                    ),
+                    _ => self.snackbar(
+                        &format!("Moved {} items to trash", keys.len()),
+                        "Undo",
+                        Act::Undo,
+                    ),
+                }
             }
             Mutation::Undo => {
                 self.ui.haptic(Haptic::Light);
                 if let Some(id) = restored {
-                    self.sidebar.reveal_row(Row::Conversation { id, depth: 0 });
-                    self.keep_list();
+                    self.reveal_conversation(id);
                 }
                 self.snackbar("Restored from trash", "Redo", Act::Redo);
             }
@@ -414,31 +641,52 @@ impl Model {
                 self.ui.haptic(Haptic::Light);
                 self.snackbar("Moved to trash again", "Undo", Act::Undo);
             }
+            Mutation::Clone => {
+                if let Some(id) = restored {
+                    self.reveal_conversation(id);
+                }
+                self.ui.toast("Cloned");
+            }
+            Mutation::Move { keys, .. } => {
+                if let Some(first) = keys.first() {
+                    let row = match first {
+                        Key::Conv(id) => Row::Conversation {
+                            id: id.clone(),
+                            depth: 0,
+                        },
+                        Key::Folder(id) => Row::Folder {
+                            id: id.clone(),
+                            depth: 0,
+                            open: false,
+                        },
+                    };
+                    self.sidebar.reveal_row(row);
+                    self.keep_list();
+                }
+            }
             Mutation::CreateFolder {
                 name,
                 parent,
                 before,
+                items,
             } => {
                 self.ui.haptic(Haptic::Light);
+                self.sidebar.leave_selection(&items);
                 // The state patch with the folder follows the ack.
-                self.sidebar.created = Some((name, parent, before));
-            }
-            Mutation::DeleteFolder {
-                name, recursive, ..
-            } => {
-                if recursive {
-                    self.snackbar(&format!("Moved “{name}” to trash"), "Undo", Act::Undo);
-                } else {
-                    self.ui.toast(format!("Removed folder “{name}”"));
-                }
+                self.sidebar.created = Some((name, parent, before, !items.is_empty()));
             }
             _ => {}
         }
     }
 
+    fn reveal_conversation(&mut self, id: String) {
+        self.sidebar.reveal_row(Row::Conversation { id, depth: 0 });
+        self.keep_list();
+    }
+
     /// What the daemon said about the list's commands; returns commands
     /// (the list asked for again after a change that was not made).
-    pub(crate) fn settle_list(&mut self, event: &Event, _now: Instant) -> Vec<Value> {
+    pub(crate) fn settle_list(&mut self, event: &Event, now: Instant) -> Vec<Value> {
         let mut commands = Vec::new();
         match event {
             Event::Pong {
@@ -448,15 +696,23 @@ impl Model {
                 req_id: Some(id), ..
             } => {
                 let ack = matches!(event, Event::Ack { .. });
-                let ours = self
-                    .sidebar
-                    .mutations
-                    .get(id)
-                    .is_some_and(|m| if ack { m.acked() } else { m.barrier() });
-                if ours && let Some(mutation) = self.sidebar.mutations.remove(id) {
-                    if mutation.applied(&self.sidebar) {
-                        self.list_done(mutation, None);
+                let ours = self.sidebar.mutations.get(id).is_some_and(|sent| {
+                    if ack {
+                        sent.mutation.acked()
                     } else {
+                        sent.mutation.barrier()
+                    }
+                });
+                if ours && let Some(sent) = self.sidebar.mutations.remove(id) {
+                    // An acked command's broadcast follows its ack: its edit
+                    // settles on its own.
+                    let made = ack || sent.edit.is_none_or(|edit| self.sidebar.edit_settled(edit));
+                    if made {
+                        self.list_done(sent, None);
+                    } else {
+                        if let Some(edit) = sent.edit {
+                            self.sidebar.drop_edit(edit, now);
+                        }
                         self.list_failed(NOT_APPLIED);
                         commands.extend(self.refresh_list());
                     }
@@ -466,14 +722,24 @@ impl Model {
                 req_id: Some(id),
                 summary,
             } => {
-                if let Some(mutation) = self.sidebar.mutations.remove(id) {
-                    self.list_done(mutation, Some(summary.id.clone()));
+                if let Some(sent) = self.sidebar.mutations.remove(id) {
+                    self.list_done(sent, Some(summary.id.clone()));
                 }
             }
             Event::ConversationsList {
                 req_id: Some(id), ..
             } => {
-                self.sidebar.mutations.remove(id);
+                if let Some(sent) = self.sidebar.mutations.remove(id)
+                    && let Mutation::Move { label, .. } = &sent.mutation
+                {
+                    // Refused: the daemon's whole list instead.
+                    if let Some(edit) = sent.edit {
+                        self.sidebar.drop_edit(edit, now);
+                    }
+                    self.list_failed(&format!(
+                        "Could not move {label}; the sidebar was restored."
+                    ));
+                }
             }
             // Folder undos answer with a state patch alone.
             Event::SidebarStatePatched { .. } => {
@@ -481,19 +747,19 @@ impl Model {
                     .sidebar
                     .mutations
                     .iter()
-                    .find(|(_, m)| matches!(m, Mutation::Undo | Mutation::Redo))
+                    .find(|(_, sent)| matches!(sent.mutation, Mutation::Undo | Mutation::Redo))
                     .map(|(id, _)| id.clone());
                 if let Some(id) = undo
-                    && let Some(mutation) = self.sidebar.mutations.remove(&id)
+                    && let Some(sent) = self.sidebar.mutations.remove(&id)
                 {
                     self.requests.forget(&id);
-                    self.list_done(mutation, None);
+                    self.list_done(sent, None);
                 }
             }
             _ => {}
         }
         // A folder made here shows once the daemon lists it.
-        if let Some((name, parent, before)) = &self.sidebar.created {
+        if let Some((name, parent, before, open)) = &self.sidebar.created {
             let made = self
                 .sidebar
                 .folders
@@ -501,16 +767,15 @@ impl Model {
                 .find(|f| !before.contains(&f.id) && &f.name == name && &f.parent_id == parent)
                 .map(|f| f.id.clone());
             if let Some(id) = made {
-                let parent = parent.clone();
+                let (parent, open) = (parent.clone(), *open);
                 self.sidebar.created = None;
                 if let Some(parent) = parent {
                     self.sidebar.expanded.insert(parent);
                 }
-                self.sidebar.reveal_row(Row::Folder {
-                    id,
-                    depth: 0,
-                    open: false,
-                });
+                if open {
+                    self.sidebar.expanded.insert(id.clone());
+                }
+                self.sidebar.reveal_row(Row::Folder { id, depth: 0, open });
                 self.keep_list();
             }
         }
@@ -519,24 +784,30 @@ impl Model {
 
     /// An error answering one of the list's requests; true when handled.
     pub(crate) fn list_error(&mut self, id: &str, message: &str) -> bool {
-        let Some(mutation) = self.sidebar.mutations.remove(id) else {
-            return false;
+        let Some(sent) = self.sidebar.mutations.remove(id) else {
+            return self.instructions_failed(id, message);
         };
-        if mutation == Mutation::Refresh && !self.sidebar.loaded {
+        if let Some(edit) = sent.edit {
+            self.sidebar.drop_edit(edit, Instant::now());
+        }
+        if sent.mutation == Mutation::Refresh && !self.sidebar.loaded {
             self.sidebar.error = Some(message.to_owned());
             self.sidebar.changed();
         }
-        self.list_failed(&format!("{}: {message}", mutation.failure()));
+        self.list_failed(&format!("{}: {message}", sent.mutation.failure()));
         true
     }
 
     /// One of the list's requests was not answered in time; true when
     /// handled.
     pub(crate) fn list_timeout(&mut self, id: &str, _pending: &Pending) -> bool {
-        let Some(mutation) = self.sidebar.mutations.remove(id) else {
-            return false;
+        let Some(sent) = self.sidebar.mutations.remove(id) else {
+            return self.instructions_failed(id, "Exocortex did not answer. Try again.");
         };
-        if mutation == Mutation::Refresh {
+        if let Some(edit) = sent.edit {
+            self.sidebar.drop_edit(edit, Instant::now());
+        }
+        if sent.mutation == Mutation::Refresh {
             if !self.sidebar.loaded {
                 self.sidebar.error = Some("Exocortex did not send the list.".into());
                 self.sidebar.changed();
@@ -544,244 +815,61 @@ impl Model {
             self.list_failed("Exocortex did not send the list. Try again.");
             return true;
         }
-        self.list_failed(&format!("{}. {NO_ACK}", mutation.failure()));
+        self.list_failed(&format!("{}. {NO_ACK}", sent.mutation.failure()));
         true
     }
+}
 
-    // ----- Menus and prompts ----------------------------------------------------
-
-    /// The header's ⋯ (`real-03-sidebar-menu`).
-    pub(crate) fn list_menu(&mut self, anchor: RectF) {
-        let items = vec![
-            MenuItem::new(
-                Icon::DownloadCircle,
-                "Next unread",
-                Tone::Success,
-                list(Act::NextUnread),
-            ),
-            MenuItem::new(
-                Icon::Undo,
-                "Undo last deletion",
-                Tone::Accent,
-                list(Act::Undo),
-            ),
-            MenuItem::new(Icon::Redo, "Redo deletion", Tone::Accent, list(Act::Redo)),
-            MenuItem::new(
-                Icon::Gear,
-                "Settings",
-                Tone::Muted,
-                Action::Nav(Nav::OpenSettings),
-            ),
-        ];
-        self.ui
-            .open(Box::new(AnchoredMenu::new(anchor, items, false)));
-    }
-
-    /// A conversation row's long press (PAR-067, 068).
-    pub(crate) fn conversation_menu(&mut self, id: String, rect: RectF) {
-        let Some(c) = self.sidebar.conversations.get(&id) else {
-            return;
-        };
-        let (pinned, marked, muted) = (c.pinned, c.marked, c.muted);
-        let items = vec![
-            MenuItem::new(
-                if pinned { Icon::PinOff } else { Icon::Pin },
-                if pinned { "Unpin" } else { "Pin" },
-                Tone::Accent,
-                list(Act::Pin(id.clone(), !pinned)),
-            ),
-            MenuItem::new(
-                if marked {
-                    Icon::StarOff
-                } else {
-                    Icon::StarLine
-                },
-                if marked { "Unmark" } else { "Mark" },
-                Tone::Warning,
-                list(Act::Mark(id.clone(), !marked)),
-            ),
-            MenuItem::new(
-                if muted { Icon::Bell } else { Icon::BellOff },
-                if muted { "Unmute" } else { "Mute" },
-                Tone::Plain,
-                list(Act::Mute(id.clone(), !muted)),
-            ),
-            MenuItem::new(
-                Icon::Pencil,
-                "Rename…",
-                Tone::Accent,
-                list(Act::Rename(id.clone())),
-            ),
-            MenuItem::new(
-                Icon::Hash,
-                "Copy id",
-                Tone::Muted,
-                Action::Ui(UiAct::Copy(id.clone())),
-            ),
-            MenuItem::new(
-                Icon::Trash,
-                "Delete",
-                Tone::Destructive,
-                list(Act::ConfirmDelete(id)),
-            ),
-        ];
-        self.ui.open(Box::new(AnchoredMenu::new(rect, items, true)));
-    }
-
-    /// A folder row's long press (PAR-078's quick actions).
-    pub(crate) fn folder_menu(&mut self, id: String, rect: RectF) {
-        let Some(f) = self.sidebar.folders.get(&id) else {
-            return;
-        };
-        let (pinned, muted) = (f.pinned, f.muted);
-        let items = vec![
-            MenuItem::new(
-                if pinned { Icon::PinOff } else { Icon::Pin },
-                if pinned { "Unpin" } else { "Pin" },
-                Tone::Accent,
-                list(Act::PinFolder(id.clone(), !pinned)),
-            ),
-            MenuItem::new(
-                if muted { Icon::Bell } else { Icon::BellOff },
-                if muted { "Unmute" } else { "Mute" },
-                Tone::Plain,
-                list(Act::MuteFolder(id.clone(), !muted)),
-            ),
-            MenuItem::new(
-                Icon::Plus,
-                "New chat",
-                Tone::Accent,
-                list(Act::NewChatIn(id.clone())),
-            ),
-            MenuItem::new(
-                Icon::Pencil,
-                "Rename…",
-                Tone::Accent,
-                list(Act::RenameFolder(id.clone())),
-            ),
-            MenuItem::new(
-                Icon::FolderPlus,
-                "New subfolder…",
-                Tone::Accent,
-                list(Act::NewFolder(Some(id.clone()))),
-            ),
-            MenuItem::new(
-                Icon::Trash,
-                "Delete…",
-                Tone::Destructive,
-                list(Act::ConfirmDeleteFolder(id)),
-            ),
-        ];
-        self.ui.open(Box::new(AnchoredMenu::new(rect, items, true)));
-    }
-
-    pub(crate) fn rename_prompt(&mut self, id: String) {
-        let Some(c) = self.sidebar.conversations.get(&id) else {
-            return;
-        };
-        let title = activity::first_line(&c.title).to_owned();
-        let prompt = Prompt::new(
-            "Rename conversation",
-            "",
-            title,
-            "Rename",
-            Box::new(move |title| list(Act::SetTitle(id.clone(), title))),
-        );
-        self.ui.open(Box::new(sheet::prompt_sheet(prompt)));
-    }
-
-    pub(crate) fn new_folder_prompt(&mut self, parent: Option<String>) {
-        // One line (the prompt's message does not wrap).
-        let message = match &parent {
-            Some(id) => format!("Inside “{}”.", self.sidebar.folder_path(Some(id))),
-            None => "At the top level of the list.".into(),
-        };
-        let title = if parent.is_some() {
-            "New subfolder"
-        } else {
-            "New folder"
-        };
-        let prompt = Prompt::new(
-            title,
-            message,
-            "",
-            "Create",
-            Box::new(move |name| {
-                list(Act::CreateFolder {
-                    name,
-                    parent: parent.clone(),
-                })
-            }),
-        );
-        self.ui.open(Box::new(sheet::prompt_sheet(prompt)));
-    }
-
-    pub(crate) fn rename_folder_prompt(&mut self, id: String) {
-        let Some(f) = self.sidebar.folders.get(&id) else {
-            return;
-        };
-        let prompt = Prompt::new(
-            "Rename folder",
-            "",
-            f.name.clone(),
-            "Rename",
-            Box::new(move |name| list(Act::SetFolderName(id.clone(), name))),
-        );
-        self.ui.open(Box::new(sheet::prompt_sheet(prompt)));
-    }
-
-    pub(crate) fn confirm_delete(&mut self, id: String) {
-        if !self.sidebar.conversations.contains_key(&id) {
-            return;
+impl Sidebar {
+    /// Where pinning or unpinning `keys` puts each (in their list order):
+    /// pinned after the pinned section's last, unpinned before the unpinned
+    /// section's first, as a block.
+    pub fn pin_placements(&self, keys: &[Key], pinned: bool) -> Vec<(Key, Expect)> {
+        let mut out = Vec::new();
+        let mut parents: Vec<Option<String>> = Vec::new();
+        for key in keys {
+            let parent = self.parent_of(key).flatten();
+            if !parents.contains(&parent) {
+                parents.push(parent);
+            }
         }
-        let title = format!("Delete {}?", quoted(&self.sidebar, &id));
-        self.ui.open(Box::new(Confirm::new(
-            title,
-            "The conversation will be moved to Exocortex’s undoable trash.",
-            "Delete",
-            list(Act::Delete(id)),
-        )));
+        for parent in parents {
+            let entries = self.placement_entries(parent.as_deref());
+            let mine: Vec<&Key> = entries
+                .iter()
+                .map(|(key, _, _)| key)
+                .filter(|key| keys.contains(key))
+                .collect();
+            let others = entries.iter().filter(|(key, _, _)| !keys.contains(key));
+            let orders: Vec<f64> = if pinned {
+                let max = others
+                    .filter(|(_, p, _)| *p)
+                    .map(|(_, _, s)| *s)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let first = if max == f64::NEG_INFINITY {
+                    0.0
+                } else {
+                    max + 1.0
+                };
+                (0..mine.len()).map(|i| first + i as f64).collect()
+            } else {
+                let top = top_unpinned(others.map(|(_, p, s)| (*p, *s)));
+                let n = mine.len() as f64;
+                (0..mine.len()).map(|i| top - n + 1.0 + i as f64).collect()
+            };
+            for (key, order) in mine.into_iter().zip(orders) {
+                let expect = Expect {
+                    pinned: Some(pinned),
+                    sort_order: Some(order),
+                    ..Expect::default()
+                };
+                out.push((key.clone(), expect));
+            }
+        }
+        out
     }
+}
 
-    pub(crate) fn confirm_delete_folder(&mut self, id: String) {
-        let Some(f) = self.sidebar.folders.get(&id) else {
-            return;
-        };
-        let title = format!("Delete “{}”", f.name);
-        let count = self
-            .sidebar
-            .aggregates(&self.composer.queued)
-            .folders
-            .get(&id)
-            .map_or(0, |a| a.count);
-        let message = match count {
-            0 => "The folder is empty.".to_owned(),
-            1 => "It contains 1 chat.".to_owned(),
-            n => format!("It contains {} chats.", activity::thousands(n as u64)),
-        };
-        let items = vec![
-            ActionItem::new(
-                "Remove folder shell; keep children",
-                list(Act::DeleteFolder {
-                    id: id.clone(),
-                    recursive: false,
-                }),
-            )
-            .icon(Icon::Tray)
-            .detail("Its chats and subfolders move up one level"),
-            ActionItem::new(
-                "Move folder and children to trash",
-                list(Act::DeleteFolder {
-                    id,
-                    recursive: true,
-                }),
-            )
-            .icon(Icon::Trash)
-            .detail("Undoable from the trash")
-            .tone(Tone::Destructive),
-        ];
-        self.ui.open(Box::new(sheet::action_sheet(
-            ActionList::new(title, items).subtitle(message),
-        )));
-    }
+fn now_ms() -> f64 {
+    super::super::model::now_ms() as f64
 }

@@ -22,7 +22,8 @@ use super::super::anim::{Animator, Tween, ease_out};
 use super::super::gesture::Gesture;
 use super::super::model::{Action, UiAct};
 use super::super::theme::{
-    self, HAIRLINE, MENU_CLAMP, MENU_ITEM, MENU_OFFSET, MENU_W, T_MENU, T_NOTE, T_ROW, TARGET,
+    self, HAIRLINE, MENU_CLAMP, MENU_ITEM, MENU_OFFSET, MENU_QUICK, MENU_W, T_MENU, T_NOTE, T_ROW,
+    TARGET,
 };
 use super::icons::{self, Icon};
 use super::overlay::{Body, Cx, Overlay, Response};
@@ -85,6 +86,8 @@ fn steps(shown: f32) -> u32 {
 
 pub struct AnchoredMenu {
     anchor: RectF,
+    /// The quick row's items (icon over label, side by side), then the rest.
+    quick: Vec<MenuItem>,
     items: Vec<MenuItem>,
     /// Keep the anchor undimmed (a list row stays visible, lifted).
     cut_out: bool,
@@ -99,6 +102,7 @@ impl AnchoredMenu {
     pub fn new(anchor: RectF, items: Vec<MenuItem>, cut_out: bool) -> Self {
         Self {
             anchor,
+            quick: Vec::new(),
             items,
             cut_out,
             rect: RectF::new(0.0, 0.0, 0.0, 0.0),
@@ -108,9 +112,29 @@ impl AnchoredMenu {
         }
     }
 
+    /// A quick row on top (§3.4: 172 px): the most used items side by side,
+    /// each an icon over its label.
+    pub fn quick(mut self, quick: Vec<MenuItem>) -> Self {
+        self.quick = quick;
+        self
+    }
+
+    fn height(&self) -> f32 {
+        let quick = if self.quick.is_empty() {
+            0.0
+        } else {
+            MENU_QUICK
+        };
+        quick + self.items.len() as f32 * MENU_ITEM
+    }
+
     /// Where the menu goes for an anchor in a window `width` × `bottom`.
     pub fn place(anchor: RectF, count: usize, width: f32, bottom: f32) -> RectF {
-        let h = count as f32 * MENU_ITEM;
+        Self::place_height(anchor, count as f32 * MENU_ITEM, width, bottom)
+    }
+
+    /// `place` for a menu `h` tall.
+    pub fn place_height(anchor: RectF, h: f32, width: f32, bottom: f32) -> RectF {
         // Under a wide anchor (a row) from its content's left; under a
         // button, its right edges with the button's.
         let x = if anchor.w > MENU_W {
@@ -144,17 +168,42 @@ impl AnchoredMenu {
         )
     }
 
+    /// The item at (`x`, `y`): quick ones first, then the rest.
     fn item_at(&self, x: f32, y: f32) -> Option<usize> {
         if !self.rect.contains(x, y) {
             return None;
         }
-        Some((((y - self.rect.y) / MENU_ITEM).floor() as usize).min(self.items.len() - 1))
+        let quick = self.quick.len();
+        let mut top = self.rect.y;
+        if quick > 0 {
+            if y < top + MENU_QUICK {
+                let cell = self.rect.w / quick as f32;
+                return Some((((x - self.rect.x) / cell).floor() as usize).min(quick - 1));
+            }
+            top += MENU_QUICK;
+        }
+        if self.items.is_empty() {
+            return None;
+        }
+        Some(quick + (((y - top) / MENU_ITEM).floor() as usize).min(self.items.len() - 1))
+    }
+
+    fn item(&self, index: usize) -> &MenuItem {
+        match index.checked_sub(self.quick.len()) {
+            Some(index) => &self.items[index],
+            None => &self.quick[index],
+        }
     }
 }
 
 impl Overlay for AnchoredMenu {
     fn label(&self) -> String {
-        let labels: Vec<&str> = self.items.iter().map(|item| item.label.as_str()).collect();
+        let labels: Vec<&str> = self
+            .quick
+            .iter()
+            .chain(&self.items)
+            .map(|item| item.label.as_str())
+            .collect();
         format!("menu: {}", labels.join(", "))
     }
 
@@ -166,7 +215,7 @@ impl Overlay for AnchoredMenu {
         if self.opened.is_none() {
             self.opened = Some(cx.now);
         }
-        self.rect = Self::place(self.anchor, self.items.len(), cx.width, cx.bottom());
+        self.rect = Self::place_height(self.anchor, self.height(), cx.width, cx.bottom());
     }
 
     fn draw_backdrop(&self, canvas: &mut Canvas, cx: &Cx) {
@@ -188,7 +237,7 @@ impl Overlay for AnchoredMenu {
         (
             steps(self.shown(cx.now)),
             self.pressed,
-            format!("{:?}", self.items),
+            format!("{:?}{:?}", self.quick, self.items),
         )
             .hash(&mut key);
         Body {
@@ -223,8 +272,51 @@ impl Overlay for AnchoredMenu {
         };
         fill(canvas, rect, p.surface_background);
         widgets::clipped(canvas, rect, |canvas| {
+            let quick = self.quick.len();
+            let mut top = self.rect.y;
+            if quick > 0 {
+                let cell = (self.rect.w / quick as f32).floor();
+                for (index, item) in self.quick.iter().enumerate() {
+                    let x = self.rect.x + index as f32 * cell;
+                    let w = if index + 1 == quick {
+                        self.rect.x + self.rect.w - x
+                    } else {
+                        cell
+                    };
+                    if self.pressed == Some(index) {
+                        fill(
+                            canvas,
+                            RectF::new(x, top, w, MENU_QUICK),
+                            c.menu_item_pressed,
+                        );
+                    }
+                    if index > 0 {
+                        fill(
+                            canvas,
+                            RectF::new(x, top, HAIRLINE, MENU_QUICK),
+                            c.menu_border,
+                        );
+                    }
+                    let (icon_color, label_color) = item.colors();
+                    let cx = x + w / 2.0;
+                    icons::draw(canvas, item.icon, cx, top + 62.0, 56.0, icon_color, alpha);
+                    let ty = theme::T_FOOTER.weight(crate::text::Weight::MonoSemiBold);
+                    let label = widgets::fit(&item.label, ty, w - 22.0);
+                    widgets::text_centered(
+                        canvas,
+                        &label,
+                        cx,
+                        ty.baseline(top + 106.0),
+                        ty,
+                        label_color,
+                        alpha,
+                    );
+                }
+                top += MENU_QUICK;
+            }
             for (index, item) in self.items.iter().enumerate() {
-                let y = self.rect.y + index as f32 * MENU_ITEM;
+                let y = top + index as f32 * MENU_ITEM;
+                let index = index + quick;
                 if self.pressed == Some(index) {
                     fill(
                         canvas,
@@ -232,7 +324,13 @@ impl Overlay for AnchoredMenu {
                         c.menu_item_pressed,
                     );
                 }
-                if index > 0 {
+                if index == quick && quick > 0 {
+                    fill(
+                        canvas,
+                        RectF::new(self.rect.x, y, self.rect.w, HAIRLINE),
+                        c.menu_border,
+                    );
+                } else if index > 0 {
                     fill(
                         canvas,
                         RectF::new(self.rect.x + 141.0, y, self.rect.w - 141.0, HAIRLINE),
@@ -285,7 +383,7 @@ impl Overlay for AnchoredMenu {
                 match self.item_at(x, y) {
                     Some(index) => {
                         self.close(cx.now);
-                        Response::Action(self.items[index].action.clone())
+                        Response::Action(self.item(index).action.clone())
                     }
                     None => Response::Action(Action::Ui(UiAct::Dismiss)),
                 }
