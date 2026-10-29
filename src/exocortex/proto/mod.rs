@@ -459,6 +459,8 @@ pub enum Event {
     QueueNotice(QueueNotice),
     TranscriptionResult(Transcription),
     UserMacros(UserMacros),
+    /// `path_directory_entries` (D: path completion).
+    PathDirectoryEntries(PathEntries),
 
     #[serde(other)]
     Other,
@@ -497,6 +499,7 @@ impl Event {
             Event::FileLinkResolved(e) => &e.req_id,
             Event::TranscriptionResult(e) => &e.req_id,
             Event::UserMacros(e) => &e.req_id,
+            Event::PathDirectoryEntries(e) => &e.req_id,
             _ => return None,
         };
         id.as_deref()
@@ -847,6 +850,7 @@ mod tests {
             "QueueNotice",
             "TranscriptionResult",
             "UserMacros",
+            "PathDirectoryEntries",
         ] {
             assert!(
                 seen.iter().any(|name| name == variant),

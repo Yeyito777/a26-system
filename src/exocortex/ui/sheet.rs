@@ -95,6 +95,12 @@ pub trait SheetContent {
     fn farewell(&mut self) -> Option<Action> {
         None
     }
+
+    /// The content changed wholly (D's file browser opened another folder):
+    /// scroll back to its top. Asked once a layout.
+    fn scroll_reset(&mut self) -> bool {
+        false
+    }
 }
 
 /// A sheet showing `C`.
@@ -192,6 +198,9 @@ impl<C: SheetContent> Overlay for Sheet<C> {
             self.opened = Some(cx.now);
         }
         self.content_h = self.content.layout(cx, W - 2.0 * ACTION_PAD).ceil();
+        if self.content.scroll_reset() {
+            self.scroll = Scroll::default();
+        }
         self.size = (cx.width, cx.height, cx.keyboard);
     }
 

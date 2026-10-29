@@ -16,8 +16,9 @@ use super::env::SlashEnv;
 use super::inline::{self, Generation};
 use super::registry::{self, Command, QUEUEABLE};
 use super::syntax::{self, Completion};
+use crate::exocortex::attachments;
 use crate::exocortex::macros;
-use crate::exocortex::model::composer::{BUDGET, ComposerError, Timing, VoicePhase};
+use crate::exocortex::model::composer::{ComposerError, Timing, VoicePhase};
 use crate::exocortex::model::ops::{self, model_info, provider_info, supports_speed};
 use crate::exocortex::model::{Action, Effect, Model, Nav, Page, chat};
 use crate::exocortex::proto::{Entry, Speed};
@@ -77,6 +78,25 @@ impl Model {
             return None;
         }
         let completion = syntax::completion(text, cursor.caret);
+        // A path: the daemon host's files (PAR-235), "Loading…" until its
+        // listing is here.
+        if let Some(c) = completion.as_ref().filter(|c| c.path) {
+            let files = self
+                .composer
+                .paths
+                .matches(&c.query, std::time::Instant::now());
+            if files.as_ref().is_some_and(Vec::is_empty) {
+                return None;
+            }
+            return Some(PickerState {
+                completion: c.clone(),
+                hint: files.is_none().then(|| ("Loading…".to_owned(), false)),
+                commands: files.unwrap_or_default(),
+                macros: Vec::new(),
+                title: "Files".into(),
+                prefix: String::new(),
+            });
+        }
         let env = SlashEnv::new(self);
         let items = match &completion {
             Some(c) if c.leading => env.leading(&c.query),
@@ -100,6 +120,7 @@ impl Model {
             end: cursor.caret,
             query: String::new(),
             leading: false,
+            path: false,
         });
         let (title, prefix) =
             syntax::heading(&completion.query, commands.len(), macros.len(), &is_macro);
@@ -161,23 +182,27 @@ impl Model {
         };
         let tail = &text[c.end..];
         let spaced = tail.starts_with([' ', '\t']);
-        let insertion = if spaced {
+        // A directory goes on to its listing: no space after it.
+        let directory = c.path && insert.ends_with('/');
+        let insertion = if spaced || directory {
             insert.to_owned()
         } else {
             format!("{insert} ")
         };
         let mut next = text.clone();
         next.replace_range(c.start..c.end, &insertion);
-        let caret = c.start + insertion.len() + usize::from(spaced);
+        let caret = c.start + insertion.len() + usize::from(spaced && !directory);
         self.composer.text = next;
         self.composer.cursor = crate::exocortex::editor::Cursor::at(caret);
         self.composer.picker_dismissed = None;
         self.ui.haptic(Haptic::Selection);
-        self.composer_changed();
-        // A finished command or macro needs no exact-match menu.
-        if self
-            .picker()
-            .is_none_or(|p| p.commands.is_empty() && p.macros.is_empty())
+        // (The composer's change follows in `handle_composer`.)
+        // A finished command or macro needs no exact-match menu; a
+        // directory's listing is still to come.
+        if !directory
+            && self
+                .picker()
+                .is_none_or(|p| p.commands.is_empty() && p.macros.is_empty())
         {
             self.composer.picker_dismissed = Some(self.composer.text.clone());
         }
@@ -230,14 +255,15 @@ impl Model {
     pub(crate) fn submit_prompt(&mut self, timing: Option<Timing>) -> Vec<Value> {
         let original = self.composer.text.clone();
         let key = self.shown_draft_key();
-        if original.trim().is_empty() || !self.ready || self.composer.submitting(&key) {
+        let attached = !self.attachments_of(&key).is_empty();
+        if (original.trim().is_empty() && !attached)
+            || !self.ready
+            || self.composer.submitting(&key)
+        {
             return Vec::new();
         }
-        if original.len() > BUDGET {
-            self.refuse(
-                &key,
-                "Message exceeds the 12 MB attachment budget. Remove an item before sending.",
-            );
+        if attachments::weight(&original, self.attachments_of(&key)) > attachments::BUDGET {
+            self.refuse(&key, attachments::OVER_BUDGET);
             return Vec::new();
         }
         if self.rewinding() {
@@ -250,6 +276,12 @@ impl Model {
         self.composer.errors.remove(&key);
         // `//`: one literal slash, nothing else.
         if let Some(literal) = syntax::unescape_literal(&original) {
+            let g = SlashEnv::new(self).generation();
+            if let Some(problem) = self.attachments_problem(&key, &original, &g.provider, &g.model)
+            {
+                self.refuse(&key, &problem);
+                return Vec::new();
+            }
             let key = self.take_draft();
             return self.deliver(key, literal.trim().to_owned(), original, timing, None);
         }
@@ -266,6 +298,10 @@ impl Model {
             {
                 let args = args.to_owned();
                 drop(env);
+                if attached && name != "/queue" {
+                    self.refuse(&key, attachments::COMMAND);
+                    return Vec::new();
+                }
                 return self.run(command, &args, &original);
             }
             if command.is_none() && !inline::INLINE_NAMES.contains(&name) {
@@ -281,6 +317,7 @@ impl Model {
         // Inline modifiers: all valid, or nothing changes.
         let parsed = inline::parse(&resolved, &env.inline_env());
         let macro_env = self.composer.macro_env.clone();
+        let generation = env.generation();
         drop(env);
         let parsed = match parsed {
             Ok(parsed) => parsed,
@@ -298,6 +335,10 @@ impl Model {
                 self.refuse(&key, &format!("{primary} needs an existing conversation."));
                 return Vec::new();
             }
+            if attached {
+                self.refuse(&key, attachments::COMMAND);
+                return Vec::new();
+            }
             let key = self.take_draft();
             let mut commands =
                 self.deliver(key, primary.clone(), original, None, Some(wait.clone()));
@@ -307,6 +348,14 @@ impl Model {
             }
             return commands;
         }
+        // Images need a model with vision (after any model modifier).
+        let target = parsed.selection.as_ref().unwrap_or(&generation);
+        if let Some(problem) =
+            self.attachments_problem(&key, &original, &target.provider, &target.model)
+        {
+            self.refuse(&key, &problem);
+            return Vec::new();
+        }
         let mut commands = Vec::new();
         if let Some(selection) = &parsed.selection {
             commands.extend(self.apply_modifiers(selection, &parsed));
@@ -315,7 +364,7 @@ impl Model {
             }
         }
         let body = parsed.text.trim().to_owned();
-        if body.is_empty() {
+        if body.is_empty() && !attached {
             let key = self.take_draft();
             let _ = key;
             if parsed.queue.is_some() {
@@ -1425,6 +1474,114 @@ mod tests {
         let sent = send(&mut model, "/goal pause");
         assert_eq!(sent[0]["type"], "set_goal");
         assert_eq!(sent[0]["action"], "pause");
+    }
+
+    #[test]
+    fn the_edit_picker_lists_the_queue_then_sent_messages() {
+        let mut model = ready(true);
+        model.handle(Action::Composer(Act::EditPicker));
+        assert_eq!(
+            opened(&mut model),
+            vec!["Edit…"],
+            "sent messages (not rewindable now)"
+        );
+        model.apply(
+            parse_event(r#"{"type":"queue_updated","messages":[{"id":"q1","convId":"c","text":"queued one","timing":"message-end","source":"daemon"}]}"#),
+            Instant::now(),
+        );
+        model.handle(Action::Composer(Act::EditPicker));
+        assert_eq!(opened(&mut model), vec!["Edit…"]);
+        // Nothing to edit in a fresh chat.
+        let mut model = ready(false);
+        model.chat.entries.clear();
+        model.chat.stamps.clear();
+        model.handle(Action::Composer(Act::EditPicker));
+        assert_eq!(
+            opened(&mut model),
+            vec!["Nothing to edit in this chat yet."]
+        );
+    }
+
+    #[test]
+    fn paths_complete_from_the_daemons_host() {
+        let mut model = ready(false);
+        let mut sent = Vec::new();
+        for character in "see ~/sr".chars() {
+            sent.extend(model.composer_key(KeyInput::Character(character)).unwrap());
+        }
+        let ask = sent
+            .iter()
+            .rev()
+            .find(|c| c["type"] == "list_path_directory")
+            .unwrap()
+            .clone();
+        // A prefetch of "~/", then one targeted request the rest rides on.
+        assert_eq!(
+            (ask["directory"].as_str(), ask["prefix"].as_str()),
+            (Some("~/"), Some("s"))
+        );
+        let picker = model.composer.picker_state.clone().unwrap();
+        assert_eq!(
+            (
+                picker.title.as_str(),
+                picker.hint.as_ref().map(|h| h.0.as_str())
+            ),
+            ("Files", Some("Loading…"))
+        );
+        let id = ask["reqId"].as_str().unwrap();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"path_directory_entries","reqId":"{id}","listings":[{{"directory":"~/","prefix":"s","entries":[{{"name":"srv","type":"file"}},{{"name":"src","type":"dir"}},{{"name":"sbin","type":"dir"}}]}}]}}"#
+            )),
+            Instant::now(),
+        );
+        let picker = model.composer.picker_state.clone().unwrap();
+        let names: Vec<&str> = picker.commands.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["~/src/", "~/srv"]);
+        // A directory: no space, and its own listing asked for.
+        let next = model.handle(Action::Composer(Act::Complete("~/src/".into())));
+        assert_eq!(model.composer.text, "see ~/src/");
+        assert!(
+            next.iter()
+                .any(|c| c["type"] == "list_path_directory" && c["directory"] == "~/src/")
+        );
+        assert!(model.composer.picker_state.is_some(), "loading the next");
+    }
+
+    #[test]
+    fn valid_commands_are_highlighted() {
+        let mut model = ready(false);
+        let shown = |model: &mut Model, text: &str| -> Vec<String> {
+            model.composer.text.clear();
+            model.composer.cursor = Default::default();
+            type_text(model, text);
+            let text = model.composer.text.clone();
+            model
+                .composer
+                .highlights
+                .iter()
+                .map(|(a, b)| text[*a..*b].to_owned())
+                .collect()
+        };
+        assert_eq!(
+            shown(&mut model, "/model anthropic claude-haiku-5-5 hi"),
+            vec!["/model anthropic claude-haiku-5-5"]
+        );
+        assert_eq!(
+            shown(&mut model, "/model anthropic nosuch"),
+            vec!["/model anthropic"]
+        );
+        assert_eq!(
+            shown(&mut model, "please /effort low and /help"),
+            vec!["/effort low"],
+            "commands only lead; modifiers anywhere"
+        );
+        assert_eq!(shown(&mut model, "/consider this"), vec!["/consider"]);
+        assert_eq!(
+            shown(&mut model, "later /queue 5m check"),
+            vec!["/queue 5m"]
+        );
+        assert!(shown(&mut model, "no slashes here").is_empty());
     }
 
     #[test]
