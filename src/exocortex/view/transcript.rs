@@ -1202,6 +1202,20 @@ impl ViewState {
         }
     }
 
+    /// Scrolls to an entry (its stamp), its top 8 pt below the
+    /// transcript's top (the iPhone's `reveal`), and stops following (E: a
+    /// Find in chat match). False when it isn't laid out.
+    pub fn reveal(&mut self, model: &Model, stamp: u64, height: f32) -> bool {
+        let max = self.chat_max(model, height);
+        let Some(item) = self.layout.items.iter().find(|item| item.stamp == stamp) else {
+            return false;
+        };
+        self.chat_scroll.reset();
+        self.chat_scroll.offset = (item.y - 22.0).clamp(0.0, max);
+        self.follow = false;
+        true
+    }
+
     /// The transcript is scrolled near its oldest loaded message.
     pub fn near_top(&self, now: Instant) -> bool {
         self.chat_scroll.value(now) < 1500.0

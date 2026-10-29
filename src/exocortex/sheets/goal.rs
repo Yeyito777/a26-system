@@ -14,6 +14,7 @@ use super::super::requests::{self, Owner};
 use super::super::theme;
 use super::super::ui::menu::Confirm;
 use super::super::ui::sheet::{ActionItem, ActionList, Prompt, action_sheet, prompt_sheet};
+use super::super::ui::textarea::{self, TextArea};
 use super::clock;
 use super::panel::{self, Btn, Built, Kind, Row, Style, Tap};
 
@@ -80,7 +81,7 @@ impl Model {
         };
         match a {
             Act::New => {
-                self.ui.open(Box::new(prompt_sheet(Prompt::new(
+                self.ui.open(Box::new(textarea::sheet(TextArea::new(
                     "Set a goal",
                     "What should this conversation work toward?",
                     "",

@@ -1,28 +1,27 @@
 //! Find in chat (WP-E; PAR-331; the iPhone's `ui/chat/search.tsx`): the
-//! loaded history searched for a phrase (case-insensitive, C1's find
-//! engine), matches listed with their context; one opens its message in the
-//! reader.
+//! loaded history searched for a phrase (case- and accent-insensitive,
+//! C1's find engine), matches listed with their context; tapping one scrolls
+//! the chat to its message.
 
 use serde_json::Value;
 
 use super::super::find;
-use super::super::model::{Action, Model, UiAct, ops};
+use super::super::model::{Action, Effect, Model, ops};
 use super::super::proto::{Block, Entry};
 use super::super::theme;
+use super::super::ui::Haptic;
 use super::super::ui::sheet::{Prompt, prompt_sheet};
 use super::panel::{self, Btn, Built, Kind, Row, Style, Tap};
 
 /// At most this many matches are listed.
 const MAX: usize = 60;
-/// Characters of context on each side of a match.
-const CONTEXT: usize = 28;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Act {
     /// The phrase prompt.
     Ask,
     Search(String),
-    /// A match's message, in the reader.
+    /// The chat scrolled to a match's message.
     Open(usize),
 }
 
@@ -30,10 +29,11 @@ fn act(a: Act) -> Action {
     Action::Ops(ops::Act::Find(a))
 }
 
-/// What an entry shows, as plain text.
+/// What an entry shows, as plain text, under its role (the iPhone's
+/// `roleLabel`).
 fn entry_text(entry: &Entry) -> Option<(&'static str, String)> {
     match entry {
-        Entry::User { text, .. } => Some(("You", text.clone())),
+        Entry::User { text, .. } => Some(("USER", text.clone())),
         Entry::Ai { blocks, .. } => {
             let mut parts = Vec::new();
             for block in blocks {
@@ -46,60 +46,24 @@ fn entry_text(entry: &Entry) -> Option<(&'static str, String)> {
                 }
             }
             let text = parts.join("\n");
-            (!text.trim().is_empty()).then_some(("Reply", text))
+            (!text.trim().is_empty()).then_some(("ASSISTANT", text))
         }
-        Entry::System { text, .. } => Some(("System", text.clone())),
+        Entry::System { text, .. } => Some(("SYSTEM", text.clone())),
+        Entry::SystemInstructions { text } => Some(("SYSTEM INSTRUCTIONS", text.clone())),
         _ => None,
     }
 }
 
-/// A match: the entry, who, and the line around it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Hit {
-    pub entry: usize,
-    pub who: &'static str,
-    pub snippet: String,
-}
-
-/// Every place `query` occurs in the loaded entries (C1's
-/// `find::matches`), the first `MAX` with their context; and how many.
-pub fn search(entries: &[Entry], query: &str) -> (Vec<Hit>, usize) {
-    let query = query.trim();
-    let mut hits = Vec::new();
-    let mut total = 0;
-    if query.is_empty() {
-        return (hits, 0);
-    }
-    for (index, entry) in entries.iter().enumerate() {
-        let Some((who, text)) = entry_text(entry) else {
-            continue;
-        };
-        for (start, end) in find::matches(&text, query, find::MAX_MATCHES) {
-            total += 1;
-            if hits.len() >= MAX {
-                continue;
-            }
-            let before: String = {
-                let head: Vec<char> = text[..start].chars().collect();
-                head[head.len().saturating_sub(CONTEXT)..].iter().collect()
-            };
-            let after: String = text[end..].chars().take(CONTEXT).collect();
-            let mut snippet = format!("{before}{}{after}", &text[start..end]);
-            snippet = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-            if before.len() < start {
-                snippet.insert(0, '…');
-            }
-            if end + after.len() < text.len() {
-                snippet.push('…');
-            }
-            hits.push(Hit {
-                entry: index,
-                who,
-                snippet,
-            });
-        }
-    }
-    (hits, total)
+/// The loaded entries as the search reads them: index, role, plain text.
+fn messages(entries: &[Entry]) -> Vec<(usize, String, String)> {
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let (role, text) = entry_text(entry)?;
+            Some((index, role.to_owned(), text))
+        })
+        .collect()
 }
 
 impl Model {
@@ -121,15 +85,9 @@ impl Model {
                 }
             }
             Act::Open(index) => {
-                if let Some((who, text)) = self.chat.entries.get(index).and_then(entry_text) {
-                    self.handle(Action::Ui(UiAct::Read {
-                        title: if who == "You" {
-                            "Your message".into()
-                        } else {
-                            who.into()
-                        },
-                        text,
-                    }));
+                if let Some(&stamp) = self.chat.stamps.get(index) {
+                    self.ui.haptic(Haptic::Selection);
+                    self.ui.effects.push(Effect::Reveal(stamp));
                 }
             }
         }
@@ -141,35 +99,35 @@ impl Model {
 pub fn build(model: &Model, _conv: &str) -> Built {
     let p = theme::p();
     let query = model.ops.find.clone().unwrap_or_default();
-    let (hits, total) = search(&model.chat.entries, &query);
+    let hits = find::search_messages(&messages(&model.chat.entries), &query, find::MAX_MATCHES);
+    let total = hits.len();
     let mut rows = vec![Row::Section {
         title: match total {
             0 => format!("No matches for “{query}”"),
-            1 => format!("1 match for “{query}”"),
-            n => format!("{n} matches for “{query}”"),
+            1 => format!("1 result for “{query}”"),
+            n if n >= find::MAX_MATCHES => format!("500+ results for “{query}”"),
+            n => format!("{n} results for “{query}”"),
         },
         button: Some(("Change".into(), Tap::Stay(act(Act::Ask)))),
     }];
-    for hit in &hits {
-        rows.push(Row::Task {
-            label: hit.who.into(),
-            color: if hit.who == "You" {
-                p.accent
-            } else {
-                p.secondary_accent
-            },
-            title: hit.snippet.clone(),
-            time: String::new(),
-            tap: Some(Tap::Close(act(Act::Open(hit.entry)))),
-            more: None,
+    for hit in hits.iter().take(MAX) {
+        rows.push(Row::Hit {
+            role: hit.role.clone(),
+            preview: hit.preview.clone(),
+            start: hit.start,
+            end: hit.end,
+            tap: Tap::Close(act(Act::Open(hit.key))),
         });
     }
-    if total > hits.len() {
+    if total > MAX {
         rows.push(panel::text(
-            format!("… and {} more", total - hits.len()),
+            format!("… and {} more", total - MAX),
             Style::Meta,
             p.muted,
         ));
+    }
+    if total == 0 && !query.trim().is_empty() {
+        rows.push(panel::note("No matches in the loaded history."));
     }
     if model.chat.has_older {
         rows.push(panel::note(
@@ -196,7 +154,7 @@ mod tests {
     fn matches_are_found_with_their_context() {
         let entries = vec![
             Entry::User {
-                text: "Where is the Deploy script?".into(),
+                text: "Where is the Déploy script?".into(),
                 images: Vec::new(),
                 metadata: None,
             },
@@ -207,17 +165,19 @@ mod tests {
                 metadata: None,
             },
         ];
-        let (hits, total) = search(&entries, "deploy");
-        assert_eq!(total, 4);
-        assert_eq!(hits[0].who, "You");
-        assert!(hits[0].snippet.contains("Deploy script"), "{:?}", hits[0]);
-        assert_eq!(hits[1].entry, 1);
-        assert_eq!(search(&entries, "  ").1, 0);
-        assert_eq!(search(&entries, "nothing").1, 0);
+        let hits = find::search_messages(&messages(&entries), "deploy", 500);
+        assert_eq!(hits.len(), 4, "accents and case folded");
+        assert_eq!(hits[0].role, "USER");
+        assert_eq!(hits[1].key, 1);
+        let chars: Vec<char> = hits[0].preview.chars().collect();
+        assert_eq!(
+            chars[hits[0].start..hits[0].end].iter().collect::<String>(),
+            "Déploy"
+        );
     }
 
     #[test]
-    fn finding_asks_then_lists_then_reads() {
+    fn finding_asks_then_lists_then_shows_the_message() {
         use crate::exocortex::model::Nav;
         let mut model = Model::new();
         model.handle(Action::Nav(Nav::OpenConversation("c".into())));
@@ -232,12 +192,41 @@ mod tests {
         assert_eq!(model.ui.opening.pop().unwrap().label(), "");
         let built = build(&model, "c");
         assert!(
-            matches!(&built.rows[0], Row::Section { title, .. } if title == "1 match for “deploy”")
+            matches!(&built.rows[0], Row::Section { title, .. } if title == "1 result for “deploy”")
         );
+        assert!(matches!(&built.rows[1], Row::Hit { role, .. } if role == "USER"));
         model.handle(Action::Ops(ops::Act::Find(Act::Open(0))));
         assert_eq!(
-            model.ui.opening.pop().unwrap().label(),
-            "reader: Your message"
+            model.ui.effects.last(),
+            Some(&Effect::Reveal(model.chat.stamps[0]))
         );
+    }
+
+    #[test]
+    fn a_match_is_scrolled_to() {
+        use crate::exocortex::model::Nav;
+        use crate::exocortex::view::ViewState;
+        let mut model = Model::new();
+        model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        for n in 0..40 {
+            model.chat.push(Entry::User {
+                text: format!("message {n}"),
+                images: Vec::new(),
+                metadata: None,
+            });
+        }
+        let mut view = ViewState::new();
+        let height = 2400.0;
+        let max = view.chat_max(&model, height);
+        assert!(max > 0.0);
+        assert!(view.reveal(&model, model.chat.stamps[20], height));
+        let middle = view.chat_scroll.offset;
+        assert!(middle > 0.0 && middle < max, "{middle} of {max}");
+        assert!(!view.follow);
+        assert!(view.reveal(&model, model.chat.stamps[0], height));
+        assert!(view.chat_scroll.offset < middle);
+        assert!(view.reveal(&model, model.chat.stamps[39], height));
+        assert_eq!(view.chat_scroll.offset, max);
+        assert!(!view.reveal(&model, u64::MAX, height));
     }
 }

@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod btw;
+pub mod chips;
 pub mod chrono;
 pub mod clock;
 pub mod find;
