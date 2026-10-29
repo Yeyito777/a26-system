@@ -1428,6 +1428,32 @@ mod tests {
     }
 
     #[test]
+    fn the_edit_picker_lists_the_queue_then_sent_messages() {
+        let mut model = ready(true);
+        model.handle(Action::Composer(Act::EditPicker));
+        assert_eq!(
+            opened(&mut model),
+            vec!["Edit…"],
+            "sent messages (not rewindable now)"
+        );
+        model.apply(
+            parse_event(r#"{"type":"queue_updated","messages":[{"id":"q1","convId":"c","text":"queued one","timing":"message-end","source":"daemon"}]}"#),
+            Instant::now(),
+        );
+        model.handle(Action::Composer(Act::EditPicker));
+        assert_eq!(opened(&mut model), vec!["Edit…"]);
+        // Nothing to edit in a fresh chat.
+        let mut model = ready(false);
+        model.chat.entries.clear();
+        model.chat.stamps.clear();
+        model.handle(Action::Composer(Act::EditPicker));
+        assert_eq!(
+            opened(&mut model),
+            vec!["Nothing to edit in this chat yet."]
+        );
+    }
+
+    #[test]
     fn valid_commands_are_highlighted() {
         let mut model = ready(false);
         let shown = |model: &mut Model, text: &str| -> Vec<String> {

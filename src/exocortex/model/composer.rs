@@ -410,6 +410,9 @@ pub enum Act {
     /// …confirmed: its text back into the draft, everything from it on
     /// removed from the conversation.
     RewindConfirmed(u64),
+    /// "Edit…" (PAR-268, the TUI's Ctrl+W; E's chat menu): queued
+    /// messages, recent sent messages, the system instructions.
+    EditPicker,
     /// Discard the shown draft (PAR-190; E's chat menu): asks first.
     Discard,
     DiscardConfirmed,
@@ -880,6 +883,10 @@ impl Model {
                 Vec::new()
             }
             Act::RewindConfirmed(stamp) => self.rewind(stamp),
+            Act::EditPicker => {
+                self.edit_picker();
+                Vec::new()
+            }
             Act::Discard => {
                 if !self.composer.text.trim().is_empty() && !self.submitting() {
                     self.ui.open(Box::new(super::super::ui::menu::Confirm::new(
@@ -1311,6 +1318,118 @@ impl Model {
             command["expectedStartedAt"] = Value::from(started as u64);
         }
         vec![command]
+    }
+
+    /// "Edit…" (PAR-268): this conversation's queued messages (newest
+    /// first) back into the composer, its last sent messages to rewind, and
+    /// its instructions as an `/instructions` command to edit.
+    fn edit_picker(&mut self) {
+        use super::super::ui::icons::Icon;
+        let Some(conv) = self.chat.id.clone() else {
+            return;
+        };
+        let snippet = |text: &str| {
+            let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if line.chars().count() > 60 {
+                format!("{}…", line.chars().take(59).collect::<String>())
+            } else {
+                line
+            }
+        };
+        let mut items = Vec::new();
+        let provider = self
+            .sidebar
+            .conversations
+            .get(&conv)
+            .map(|s| s.provider.clone());
+        let mut queued: Vec<Queued> = self.queued_here().into_iter().cloned().collect();
+        queued.reverse();
+        for q in queued
+            .iter()
+            .filter(|q| q.command.is_none() && q.automation.is_none())
+        {
+            items.push(
+                ActionItem::new(
+                    snippet(&q.text),
+                    Action::Composer(Act::PullBack(q.id.clone())),
+                )
+                .icon(Icon::Pencil)
+                .detail(format!(
+                    "Queued · {} · back to the composer",
+                    queue_label(q, provider.as_deref()).trim_start_matches("queued: ")
+                )),
+            );
+        }
+        let sent: Vec<(u64, String, Option<f64>)> = self
+            .chat
+            .entries
+            .iter()
+            .zip(&self.chat.stamps)
+            .filter_map(|(entry, stamp)| match entry {
+                Entry::User { text, metadata, .. }
+                    if !metadata
+                        .as_ref()
+                        .is_some_and(|m| m.system || m.automation.is_some()) =>
+                {
+                    Some((
+                        *stamp,
+                        text.clone(),
+                        metadata.as_ref().map(|m| m.started_at),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        for (stamp, text, started) in sent.iter().rev().take(12) {
+            let (action, detail) = match self.can_rewind(*stamp) {
+                Ok(_) => (
+                    Action::Composer(Act::Rewind(*stamp)),
+                    format!(
+                        "Sent {} · rewind and edit",
+                        started
+                            .filter(|t| *t > 0.0)
+                            .map(|t| crate::clock::local_date_time_text((t / 1000.0) as i64))
+                            .unwrap_or_default()
+                    ),
+                ),
+                Err(why) => (Action::Ui(UiAct::Toast(why.clone())), why),
+            };
+            items.push(
+                ActionItem::new(snippet(text), action)
+                    .icon(Icon::Rewind)
+                    .detail(detail),
+            );
+        }
+        let instructions = self.chat.entries.iter().find_map(|e| match e {
+            Entry::SystemInstructions { text } if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        });
+        if let Some(text) = instructions {
+            let empty = self.composer.text.trim().is_empty();
+            let action = if empty {
+                Action::Composer(Act::Insert(format!("/instructions {text}")))
+            } else {
+                Action::Ui(UiAct::Toast(
+                    "Clear the draft first to edit the instructions.".into(),
+                ))
+            };
+            items.push(
+                ActionItem::new("System instructions", action)
+                    .icon(Icon::Pencil)
+                    .detail(if empty {
+                        snippet(&text)
+                    } else {
+                        "Clear the draft first to edit the instructions".into()
+                    }),
+            );
+        }
+        if items.is_empty() {
+            self.ui.toast("Nothing to edit in this chat yet.");
+            return;
+        }
+        self.ui.open(Box::new(sheet::action_sheet(
+            ActionList::new("Edit…", items).scoped(),
+        )));
     }
 
     /// `update_queued_message`: its text and timing (PAR-260).
