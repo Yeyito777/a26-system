@@ -419,6 +419,13 @@ impl Sidebar {
         }
     }
 
+    pub fn sort_order_of(&self, key: &Key) -> Option<f64> {
+        match key {
+            Key::Conv(id) => self.conversations.get(id).map(|c| c.sort_order),
+            Key::Folder(id) => self.folders.get(id).map(|f| f.sort_order),
+        }
+    }
+
     pub fn pinned_of(&self, key: &Key) -> Option<bool> {
         match key {
             Key::Conv(id) => self.conversations.get(id).map(|c| c.pinned),
@@ -484,10 +491,18 @@ impl Sidebar {
         }
     }
 
-    /// Where `move_sidebar_items {items, parentId}` puts each item: the top
-    /// of the destination's unpinned section, unpinned, in order (the
-    /// daemon's projection without an anchor). None when nothing can move.
-    pub fn project_move(&self, items: &[Key], parent: Option<&str>) -> Option<Vec<(Key, Expect)>> {
+    /// Where `move_sidebar_items {items, parentId, before?, preservePinned?,
+    /// placement?}` puts each item (the TUI's `projectSidebarItemsMove`):
+    /// without an anchor, the top of the destination's unpinned section,
+    /// unpinned; before an anchor, between it and the one above it (in the
+    /// same pinned group when pins are kept); or at the group's bottom.
+    /// None when nothing can move.
+    pub fn project_move(
+        &self,
+        items: &[Key],
+        parent: Option<&str>,
+        place: Place,
+    ) -> Option<Vec<(Key, Expect)>> {
         let parent = self.parent_of_id(parent);
         let mut movable: Vec<Key> = Vec::new();
         for key in items {
@@ -512,23 +527,91 @@ impl Sidebar {
         if movable.is_empty() {
             return None;
         }
+        let n = movable.len() as f64;
         let all = self.placement_entries(parent.as_deref());
-        let start = top_unpinned(all.iter().map(|(_, p, s)| (*p, *s))) - movable.len() as f64;
+        let dest: Vec<&(Key, bool, f64)> = all
+            .iter()
+            .filter(|(k, _, _)| !movable.contains(k))
+            .collect();
+        let keep = place.keep_pinned();
+        let preserved = keep.then(|| self.pinned_of(&movable[0])).flatten();
+        let homogeneous =
+            preserved.is_some_and(|p| movable.iter().all(|k| self.pinned_of(k) == Some(p)));
+        let anchors: Vec<&(Key, bool, f64)> = if homogeneous {
+            dest.iter()
+                .copied()
+                .filter(|(_, p, _)| Some(*p) == preserved)
+                .collect()
+        } else {
+            dest.clone()
+        };
+        let (start, step) = match &place {
+            Place::Before(before) => {
+                match anchors.iter().position(|(k, _, _)| k == before) {
+                    Some(index) => {
+                        let anchor = anchors[index].2;
+                        match index.checked_sub(1).map(|i| anchors[i].2) {
+                            Some(prev) => {
+                                let step = (anchor - prev) / (n + 1.0);
+                                (prev + step, step)
+                            }
+                            None => (anchor - n, 1.0),
+                        }
+                    }
+                    // An anchor elsewhere: the top, as without one.
+                    None => (top_unpinned(all.iter().map(|(_, p, s)| (*p, *s))) - n, 1.0),
+                }
+            }
+            Place::Bottom => {
+                let pool = if homogeneous { &anchors } else { &dest };
+                let max = pool
+                    .iter()
+                    .map(|(_, _, s)| *s)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (
+                    if max == f64::NEG_INFINITY {
+                        0.0
+                    } else {
+                        max + 1.0
+                    },
+                    1.0,
+                )
+            }
+            Place::Top => (top_unpinned(all.iter().map(|(_, p, s)| (*p, *s))) - n, 1.0),
+        };
         Some(
             movable
                 .into_iter()
                 .enumerate()
                 .map(|(index, key)| {
+                    let pinned = keep && self.pinned_of(&key).unwrap_or(false);
                     let expect = Expect {
-                        sort_order: Some(start + index as f64),
+                        sort_order: Some(start + step * index as f64),
                         parent: Some(parent.clone()),
-                        pinned: Some(false),
+                        pinned: Some(pinned),
                         ..Expect::default()
                     };
                     (key, expect)
                 })
                 .collect(),
         )
+    }
+}
+
+/// Where a move puts its items in their new level.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Place {
+    /// The top of the unpinned section, unpinned (into a folder).
+    Top,
+    /// Before this item, pins kept (a reorder).
+    Before(Key),
+    /// The bottom of the items' pinned group, pins kept.
+    Bottom,
+}
+
+impl Place {
+    fn keep_pinned(&self) -> bool {
+        !matches!(self, Place::Top)
     }
 }
 

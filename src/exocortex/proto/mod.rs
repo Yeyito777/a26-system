@@ -589,15 +589,17 @@ pub fn event_type(line: &str) -> Option<&str> {
 // ----- Commands --------------------------------------------------------
 
 /// Capabilities this client understands (protocol.ts `ClientCapability`):
-/// compact sidebar deltas, byte-budgeted history windows and token stats
-/// only on request.
-pub const APP_CAPABILITIES: [&str; 6] = [
+/// compact sidebar deltas, byte-budgeted history windows, token stats only
+/// on request, and the daemon's update status pushed when it changes (the
+/// list's footer, B).
+pub const APP_CAPABILITIES: [&str; 7] = [
     "targeted-unwind",
     "sidebar-reorder-delta",
     "sidebar-state-patch",
     "history-block-pagination",
     "token-stats-on-demand",
     "sidebar-incremental",
+    "update-status-push",
 ];
 
 /// The phone's history viewport in terminal-cell terms (the daemon sizes the

@@ -26,9 +26,10 @@ unknown events and fields are ignored, missing ones take defaults
 parse).
 
 The app declares `targeted-unwind`, `sidebar-reorder-delta`,
-`sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`
-and `sidebar-incremental` (with a tree `sidebarView` naming the folders open
-on the list), then `ping`s.
+`sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`,
+`sidebar-incremental` (with a tree `sidebarView` naming the folders open on
+the list) and `update-status-push` (the daemon's update status, shown under
+the list: "Daemon update available", "Daemon restart needed"), then `ping`s.
 Its bootstrap, and every reconnection's, is that, with `load_conversation`
 for the conversation on screen before the `ping`, in the same write, so its
 window comes ahead of the list. A window or an older page the daemon has not
@@ -69,8 +70,12 @@ press opens a row's menu (pin, mark and mute side by side; rename, emoji
 mark, move to folder, clone, select, copy id, delete; a folder's has its
 inspector, with its own instructions); deleting offers Undo. Select mode
 (the ⋯ menu's Select chats) checks rows and moves, pins, groups into a new
-folder or deletes them. Pulling the list down past the top asks for it
-again.
+folder or deletes them. A held row moved on 16 pt is dragged: dropped on
+a folder it moves in, between conversations of its pinned group it is
+reordered there (`move_sidebar_items` with `before`, `preservePinned`,
+`placement`); near the list's edges it scrolls. Pulling the list down past
+the top asks for it again. The daemon's update status shows under the
+last row.
 
 A change shows at once (`list/pending.rs`): the fields it expects are
 projected over the daemon's values after every event until the daemon shows
