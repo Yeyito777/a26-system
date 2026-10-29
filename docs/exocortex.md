@@ -66,8 +66,12 @@ press opens a row's menu (pin, mark and mute side by side; rename, emoji
 mark, move to folder, clone, select, copy id, delete; a folder's has its
 inspector, with its own instructions); deleting offers Undo. Select mode
 (the ⋯ menu's Select chats) checks rows and moves, pins, groups into a new
-folder or deletes them. Pulling the list down past the top asks for it
-again.
+folder or deletes them. A held row moved on 16 pt is dragged: dropped on
+a folder it moves in, between conversations of its pinned group it is
+reordered there (`move_sidebar_items` with `before`, `preservePinned`,
+`placement`); near the list's edges it scrolls. Pulling the list down past
+the top asks for it again. The daemon's update status shows under the
+last row.
 
 A change shows at once (`list/pending.rs`): the fields it expects are
 projected over the daemon's values after every event until the daemon shows
