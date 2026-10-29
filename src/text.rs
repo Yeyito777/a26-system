@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use fontdue::{Font, FontSettings};
 use ttf_parser::{Face, GlyphId, OutlineBuilder, RasterImageFormat};
@@ -124,7 +125,6 @@ enum Fallback {
 }
 
 struct Typefaces {
-    fonts: Vec<Font>,
     fallbacks: Vec<Fallback>,
     glyphs: HashMap<(Weight, u16, Cluster), Rc<Glyph>>,
     gamma: [u8; 256],
@@ -445,15 +445,34 @@ fn resample(width: u32, height: u32, pixels: &[u32], to_w: u32, to_h: u32) -> Ve
     out
 }
 
+/// The embedded faces, each parsed the first time it is needed (fontdue
+/// parses every glyph up front: all nine took 63 ms on the A26's fast core,
+/// a cold start's longest step), or ahead of time by `preload`.
+static FACES: [OnceLock<Font>; 9] = [const { OnceLock::new() }; 9];
+
+fn face(weight: Weight) -> &'static Font {
+    let index = WEIGHTS.iter().position(|w| *w == weight).unwrap_or(0);
+    FACES[index].get_or_init(|| {
+        Font::from_bytes(font_bytes(WEIGHTS[index]), FontSettings::default())
+            .expect("embedded Inter font is valid")
+    })
+}
+
+/// Parses `weights` on threads of their own, in parallel, so text drawn
+/// later is not held up by them (a face still being parsed when it is first
+/// needed is waited for, not parsed twice).
+pub fn preload(weights: &[Weight]) {
+    for &weight in weights {
+        let _ = std::thread::Builder::new()
+            .name("font-preload".into())
+            .spawn(move || {
+                face(weight);
+            });
+    }
+}
+
 impl Typefaces {
     fn load() -> Self {
-        let fonts = WEIGHTS
-            .iter()
-            .map(|weight| {
-                Font::from_bytes(font_bytes(*weight), FontSettings::default())
-                    .expect("embedded Inter font is valid")
-            })
-            .collect();
         // Light text on Moon's dark surfaces reads slightly thin with linear
         // coverage; a mild curve restores the designed stroke weight.
         let mut gamma = [0_u8; 256];
@@ -461,7 +480,6 @@ impl Typefaces {
             *value = ((index as f32 / 255.0).powf(0.84) * 255.0 + 0.5) as u8;
         }
         Self {
-            fonts,
             fallbacks: FALLBACK_FILES.iter().map(|_| Fallback::Unloaded).collect(),
             glyphs: HashMap::new(),
             gamma,
@@ -500,9 +518,8 @@ impl Typefaces {
         glyph
     }
 
-    fn inter(&self, weight: Weight) -> &Font {
-        let index = WEIGHTS.iter().position(|w| *w == weight).unwrap_or(0);
-        &self.fonts[index]
+    fn inter(&self, weight: Weight) -> &'static Font {
+        face(weight)
     }
 
     fn char_glyph(&mut self, weight: Weight, size: f32, character: char) -> Glyph {

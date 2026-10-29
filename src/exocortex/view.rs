@@ -155,6 +155,16 @@ struct Laid {
 struct Placed {
     y: f32,
     laid: Rc<Laid>,
+    /// Which entry (its stamp; 0: none, as the live reply) and which of its
+    /// pieces: what the reader's place is kept by.
+    stamp: u64,
+    index: u32,
+}
+
+/// Where the reader is: pieces on screen (entry stamp, piece) and how far
+/// below the transcript's top edge each starts.
+pub struct Anchor {
+    pieces: Vec<(u64, u32, f32)>,
 }
 
 #[derive(Default)]
@@ -1248,22 +1258,28 @@ impl ViewState {
 
     /// Places a planned entry's pieces from `y`; returns where the next
     /// entry goes.
+    #[allow(clippy::too_many_arguments)]
     fn place(
         &mut self,
         items: &mut Vec<Placed>,
         y: f32,
         plan: &Plan,
         entry: Option<&Entry>,
+        stamp: u64,
         blocks: &[Block],
         context: &Context,
     ) -> f32 {
         let mut h = 0.0;
-        let push = |items: &mut Vec<Placed>, h: &mut f32, laid: Rc<Laid>| {
+        let mut index = 0;
+        let mut push = |items: &mut Vec<Placed>, h: &mut f32, laid: Rc<Laid>| {
             if laid.h > 0.0 {
                 items.push(Placed {
                     y: y + *h,
                     laid: laid.clone(),
+                    stamp,
+                    index,
                 });
+                index += 1;
                 *h += laid.h;
             }
         };
@@ -1372,7 +1388,12 @@ impl ViewState {
                 return y;
             }
             let next = y + laid.h + 30.0;
-            items.push(Placed { y, laid });
+            items.push(Placed {
+                y,
+                laid,
+                stamp: 0,
+                index: 0,
+            });
             next
         };
         if chat.older_request.is_some() {
@@ -1387,7 +1408,7 @@ impl ViewState {
                 Entry::Ai { blocks, .. } => blocks.as_slice(),
                 _ => &[],
             };
-            y = self.place(&mut items, y, &plan, Some(entry), blocks, &context);
+            y = self.place(&mut items, y, &plan, Some(entry), *stamp, blocks, &context);
         }
         for echo in &chat.echoes {
             let key = hash_of(("echo", &echo.text));
@@ -1397,7 +1418,7 @@ impl ViewState {
         }
         if let Some(live) = &chat.live {
             let plan = plan_blocks(&live.blocks);
-            y = self.place(&mut items, y, &plan, None, &live.blocks, &context);
+            y = self.place(&mut items, y, &plan, None, 0, &live.blocks, &context);
         }
         for queued in queued {
             let key = hash_of(("queued", &queued.text));
@@ -1450,7 +1471,7 @@ pub struct ComposerGeometry {
 pub fn composer(model: &Model, height: f32, keyboard: bool) -> ComposerGeometry {
     let bottom = height - if keyboard { 24.0 } else { GESTURE_RESERVE };
     let field_w = W - 2.0 * MARGIN - 2.0 * SEND_R - 24.0;
-    let lines = wrap(&plain(&model.composer), field_w - 60.0, FIELD_TEXT);
+    let lines = composer_lines(&model.composer, field_w - 60.0);
     let shown = lines.len().clamp(1, FIELD_MAX_LINES);
     let h = (shown as f32 * FIELD_LINE + 46.0).max(FIELD_MIN_H);
     ComposerGeometry {
@@ -1459,6 +1480,27 @@ pub fn composer(model: &Model, height: f32, keyboard: bool) -> ComposerGeometry 
         lines,
         send: (W - MARGIN - SEND_R, bottom - FIELD_MIN_H / 2.0),
     }
+}
+
+/// The composer's text wrapped, kept until it changes: the field's height
+/// (and so the transcript's bounds) is asked for many times a frame.
+fn composer_lines(text: &str, width: f32) -> Vec<Vec<Run>> {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST: RefCell<(String, f32, Vec<Vec<Run>>)> =
+            const { RefCell::new((String::new(), 0.0, Vec::new())) };
+    }
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if last.0 != text || last.1 != width || last.2.is_empty() {
+            *last = (
+                text.to_owned(),
+                width,
+                wrap(&plain(text), width, FIELD_TEXT),
+            );
+        }
+        last.2.clone()
+    })
 }
 
 fn transcript_bounds(model: &Model, height: f32, keyboard: bool) -> (f32, f32) {
@@ -1490,6 +1532,46 @@ impl ViewState {
         self.layout(model);
         let (top, bottom) = transcript_bounds(model, height, self.keyboard);
         (self.layout.height - (bottom - top)).max(0.0)
+    }
+
+    /// Where the reader is, unless following the newest message.
+    pub fn anchor(&mut self, model: &Model, now: Instant) -> Option<Anchor> {
+        if self.follow {
+            return None;
+        }
+        self.layout(model);
+        let offset = self.chat_scroll.value(now);
+        let items = &self.layout.items;
+        let first = items.partition_point(|item| item.y + item.laid.h <= offset);
+        let pieces: Vec<(u64, u32, f32)> = items[first..]
+            .iter()
+            .filter(|item| item.stamp != 0)
+            .take(6)
+            .map(|item| (item.stamp, item.index, item.y - offset))
+            .collect();
+        (!pieces.is_empty()).then_some(Anchor { pieces })
+    }
+
+    /// Scrolls so the reader's place is where it was, after the transcript
+    /// changed above it (older history, a fresh window, a row opened).
+    /// Returns false when none of its pieces is still there.
+    pub fn restore(&mut self, model: &Model, anchor: &Anchor, now: Instant) -> bool {
+        self.layout(model);
+        let found = anchor.pieces.iter().find_map(|(stamp, index, delta)| {
+            self.layout
+                .items
+                .iter()
+                .find(|item| item.stamp == *stamp && item.index == *index)
+                .map(|item| item.y - delta)
+        });
+        let Some(offset) = found else {
+            return false;
+        };
+        let shift = offset - self.chat_scroll.value(now);
+        if shift != 0.0 {
+            self.chat_scroll.shift(shift);
+        }
+        true
     }
 
     /// The transcript is scrolled near its oldest loaded message.
@@ -3184,6 +3266,51 @@ mod tests {
         view.layout(&model);
         let committed: Vec<Rc<Laid>> = view.layout.items.iter().map(|i| i.laid.clone()).collect();
         assert!(after.iter().zip(&committed).all(|(a, b)| Rc::ptr_eq(a, b)));
+    }
+
+    #[test]
+    fn the_reader_stays_put_when_older_history_arrives() {
+        let now = Instant::now();
+        let mut model = Model::new();
+        model.on_connected();
+        let commands = model.handle(Action::OpenConversation("c".into()));
+        let request = commands[0]["reqId"].as_str().unwrap().to_owned();
+        let page = |kind: &str, request: &str, from: u64, to: u64| {
+            let entries: Vec<String> = (from..to)
+                .map(|i| format!(r#"{{"type":"user","text":"Message number {i}"}},{{"type":"ai","blocks":[{{"type":"text","text":"Reply {i}"}}]}}"#))
+                .collect();
+            format!(
+                r#"{{"type":"{kind}","reqId":"{request}","convId":"c","entries":[{}],"historyStartIndex":{},"historyEndIndex":{},"hasOlderHistory":{}}}"#,
+                entries.join(","),
+                from * 2,
+                to * 2,
+                from > 0
+            )
+        };
+        model.apply(
+            parse_event(&page("conversation_loaded", &request, 10, 20)),
+            now,
+        );
+        let mut view = ViewState::new();
+        view.follow = false;
+        view.chat_scroll.offset = 700.0;
+        let anchor = view.anchor(&model, now).expect("an anchor");
+        let (stamp, index, delta) = anchor.pieces[0];
+        let older = model.load_older();
+        let request = older[0]["reqId"].as_str().unwrap().to_owned();
+        model.apply(
+            parse_event(&page("conversation_history_loaded", &request, 0, 10)),
+            now,
+        );
+        assert!(view.restore(&model, &anchor, now));
+        let item = view
+            .layout
+            .items
+            .iter()
+            .find(|item| item.stamp == stamp && item.index == index)
+            .unwrap();
+        assert!(item.y > 700.0, "older history above it");
+        assert_eq!(item.y - view.chat_scroll.value(now), delta);
     }
 
     /// Draws the frame, applies `change`, updates the frame incrementally,

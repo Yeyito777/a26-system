@@ -214,6 +214,17 @@ fn page_depth(model: &Model) -> usize {
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
+    // Launched into the front, the first frames get a fast core; the faces
+    // they do not use are parsed meanwhile on other cores (the first frame
+    // parses its own: Bold and Regular).
+    use crate::text::Weight;
+    crate::text::preload(&[
+        Weight::SemiBold,
+        Weight::Medium,
+        Weight::Italic,
+        Weight::Mono,
+    ]);
+    boost_ui_thread(std::env::var_os("EXOCORTEX_APP_NO_BOOST").is_none());
     let (conn, screen_number) = x11rb::rust_connection::RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_number];
     let (window, protocols) = crate::create_window(&conn, screen, handoff::APP_ID)?;
@@ -284,6 +295,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             view.content_height(&model)
         } else {
             0.0
+        };
+        // The reader's place, kept when the transcript changes above it.
+        let anchor = if model.page == Page::Chat {
+            view.anchor(&model, now)
+        } else {
+            None
         };
 
         // Daemon events.
@@ -603,7 +620,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             let height_now = view.content_height(&model);
             let older_added = before_start.0 == model.chat.id
                 && (model.chat.start, model.chat.start_block) < (before_start.1, before_start.2);
-            if older_added && !view.follow {
+            let kept = before_start.0 == model.chat.id
+                && !view.follow
+                && anchor
+                    .as_ref()
+                    .is_some_and(|anchor| view.restore(&model, anchor, now));
+            if older_added && !view.follow && !kept {
                 let delta = height_now - before_height;
                 view.chat_scroll.shift(delta);
             }
