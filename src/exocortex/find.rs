@@ -2,6 +2,8 @@
 //! in a text, at most `MAX_MATCHES`, as byte ranges. The reader's Find
 //! uses it; Find in chat (E) searches loaded history with it.
 
+#![allow(dead_code)] // search_messages is for E's Find in chat sheet.
+
 /// At most this many matches are found (the iPhone's).
 pub const MAX_MATCHES: usize = 500;
 
