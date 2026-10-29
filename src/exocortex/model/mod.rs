@@ -117,6 +117,9 @@ pub enum Effect {
     /// The chat scrolls to an entry (its stamp) and stops following (E: a
     /// Find in chat match).
     Reveal(u64),
+    /// The chat scrolls to its top, where the System Instructions are
+    /// pinned (a Find match in them).
+    RevealTop,
 }
 
 /// What the model asks of the interface: overlays to open or close and

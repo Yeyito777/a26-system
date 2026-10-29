@@ -328,6 +328,10 @@ impl Context<'_> {
                 Effect::Reveal(stamp) => {
                     self.view.reveal(self.model, stamp, self.height);
                 }
+                Effect::RevealTop => {
+                    self.view.chat_scroll.reset();
+                    self.view.follow = false;
+                }
             }
             changed = true;
         }
