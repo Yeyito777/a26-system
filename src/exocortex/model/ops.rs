@@ -381,15 +381,19 @@ pub fn speeds(providers: &[Provider], provider: &str, model: &str, current: Spee
         .collect()
 }
 
-/// Text size steps (PAR-360; the iPhone's `TEXT_SIZES` up to XXL: larger
-/// ones need layouts this phone's fixed rows do not have).
-pub const TEXT_SIZES: [(&str, f32); 6] = [
+/// Text size steps (PAR-360; the iPhone's `TEXT_SIZES`): above 1.3 the
+/// top bars grow (`theme::top_bar`), and rows that hold text grow with it
+/// (`theme::grown`).
+pub const TEXT_SIZES: [(&str, f32); 9] = [
     ("Extra small", 0.82),
     ("Small", 0.9),
     ("Default", 1.0),
     ("Large", 1.12),
     ("Extra large", 1.24),
     ("XXL", 1.36),
+    ("Accessibility 1", 1.6),
+    ("Accessibility 2", 1.9),
+    ("Accessibility 3", 2.25),
 ];
 
 /// The step nearest a scale.
@@ -1846,7 +1850,7 @@ mod tests {
         let default = paragraph();
         let before = theme::generation();
         model.handle(Action::Ops(Act::TextSize(TEXT_SIZES.len() - 1)));
-        assert_eq!(model.persist.settings().text_scale, 1.36);
+        assert_eq!(model.persist.settings().text_scale, 2.25);
         assert_eq!(text_step(theme::text_scale()), TEXT_SIZES.len() - 1);
         assert_ne!(theme::generation(), before, "layouts are made again");
         assert!(paragraph() > default * 1.3);

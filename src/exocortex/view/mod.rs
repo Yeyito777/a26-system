@@ -39,7 +39,7 @@ use crate::gfx::{Canvas, RectF};
 use super::anim::Animator;
 use super::model::{Action, Model, Page, ops as ops_model};
 use super::screens::settings;
-use super::theme::{self, HAIRLINE, T_CAPTION, T_EYEBROW, TARGET, TOP_BAR};
+use super::theme::{self, HAIRLINE, T_CAPTION, T_EYEBROW, TARGET};
 use super::ui::overlay::{Cx, OverlayStack};
 use super::ui::widgets;
 use ops::{Laid, op_rows};
@@ -51,7 +51,9 @@ pub use list::{ListFrame, list_max};
 pub use theme::W;
 
 /// Where the chat's transcript starts: under its top bar and hairline.
-pub const CHAT_TOP: f32 = TOP_BAR + HAIRLINE;
+pub fn chat_top() -> f32 {
+    theme::below_bar()
+}
 
 /// Something on screen a touch is on.
 #[derive(Debug, Clone, PartialEq)]
@@ -175,7 +177,7 @@ impl ViewState {
 /// Where the transcript is: under the chat's top bar, above the composer.
 pub fn transcript_bounds(model: &Model, height: f32, keyboard: bool) -> (f32, f32) {
     (
-        CHAT_TOP,
+        chat_top(),
         composer::geometry(model, height, keyboard).band_top(),
     )
 }
@@ -409,8 +411,8 @@ pub fn draw_chat_update(
     let mut damage = FrameDamage::default();
     let mut redraw: Vec<(i32, i32)> = Vec::new();
     for (y0, y1) in pieces {
-        let from = (CHAT_TOP + y0 - new.offset).floor() as i32;
-        let to = (CHAT_TOP + y1 - new.offset).ceil() as i32;
+        let from = (chat_top() + y0 - new.offset).floor() as i32;
+        let to = (chat_top() + y1 - new.offset).ceil() as i32;
         if to > top && from < bottom {
             redraw.push((from.max(top), to.min(bottom)));
         }
@@ -439,7 +441,7 @@ pub fn draw_chat_update(
         damage.moved = Some((top, bottom, -shift));
     }
     if change.is_finite() {
-        let from = (CHAT_TOP + change - new.offset).floor() as i32;
+        let from = (chat_top() + change - new.offset).floor() as i32;
         if from < bottom {
             redraw.push((from.max(top), bottom));
         }
@@ -450,8 +452,8 @@ pub fn draw_chat_update(
             if laid.xkeys.is_empty() || old.scrolls.get(index) == new.scrolls.get(index) {
                 continue;
             }
-            let y0 = (CHAT_TOP + y + laid.ink.0 - new.offset).floor() as i32;
-            let y1 = (CHAT_TOP + y + laid.ink.1 - new.offset).ceil() as i32;
+            let y0 = (chat_top() + y + laid.ink.0 - new.offset).floor() as i32;
+            let y1 = (chat_top() + y + laid.ink.1 - new.offset).ceil() as i32;
             if y1 > top && y0 < bottom {
                 redraw.push((y0.max(top), y1.min(bottom)));
             }
@@ -467,8 +469,8 @@ pub fn draw_chat_update(
             for (y, laid) in &new.items {
                 for (rect, hit) in &laid.hits {
                     if hit == action {
-                        let y0 = (CHAT_TOP + y + rect.y - new.offset).floor() as i32 - 1;
-                        let y1 = (CHAT_TOP + y + rect.y + rect.h - new.offset).ceil() as i32 + 1;
+                        let y0 = (chat_top() + y + rect.y - new.offset).floor() as i32 - 1;
+                        let y1 = (chat_top() + y + rect.y + rect.h - new.offset).ceil() as i32 + 1;
                         if y1 > top && y0 < bottom {
                             redraw.push((y0.max(top), y1.min(bottom)));
                         }
@@ -514,7 +516,7 @@ pub fn draw_chat_update(
     }
     if old.header != new.header || header_pressed {
         chat_header::draw(canvas, model, new.pressed.as_ref(), now);
-        damage.rows.push(widgets::TOP_BAR_ROWS);
+        damage.rows.push(widgets::top_bar_rows());
     }
     if old.composer != new.composer || composer_pressed {
         composer::draw(
@@ -658,7 +660,7 @@ pub fn scroll_area(model: &Model, view: &ViewState, height: f32, y: f32) -> Opti
             let (top, bottom) = transcript_bounds(model, height, view.keyboard);
             (y >= top && y < bottom).then_some(ScrollArea::Chat)
         }
-        Page::Settings => (y >= CHAT_TOP).then_some(ScrollArea::Settings),
+        Page::Settings => (y >= chat_top()).then_some(ScrollArea::Settings),
     }
 }
 
@@ -675,7 +677,7 @@ pub fn hit(
         Page::List => list::hit(model, view, height, x, y, now),
         Page::Settings => settings::hit(model, view, x, y, now).map(Hit::Action),
         Page::Chat => {
-            if y < CHAT_TOP {
+            if y < chat_top() {
                 return chat_header::hit(model, x, y).map(Hit::Action);
             }
             if let Some(hit) = composer::hit(model, height, view.keyboard, x, y) {
@@ -847,7 +849,7 @@ mod tests {
     use crate::exocortex::model::{Nav, chat, composer as composer_act};
     use crate::exocortex::proto::parse_event;
     use crate::text::Weight;
-    use list::{ROW_H, draw_list_update, list_frame, list_top};
+    use list::{draw_list_update, list_frame, list_top, row_h};
     use markdown_layout::{body, lay_markdown, line_width, plain, wrap};
     use ops::Op;
     use theme::TRANSCRIPT_PAD as MARGIN;
@@ -1354,7 +1356,7 @@ mod tests {
                 |_, _| {},
             );
             if pressed == Some(Hit::Action(Action::Nav(Nav::Back))) {
-                assert!(damage.rows.contains(&widgets::TOP_BAR_ROWS));
+                assert!(damage.rows.contains(&widgets::top_bar_rows()));
             }
             previous = pressed;
         }
@@ -1413,7 +1415,7 @@ mod tests {
             let damage = draw_list_update(&mut canvas, &mut model, &mut view, &old, &new, now)
                 .expect("incremental");
             assert_eq!(damage.rows.len(), 1);
-            assert!(damage.rows[0].1 - damage.rows[0].0 <= ROW_H as i32 + 1);
+            assert!(damage.rows[0].1 - damage.rows[0].0 <= row_h() as i32 + 1);
             let mut full = Canvas::new(1080, height as i32);
             full.clear(BG);
             draw(&mut full, &mut model, &mut view, after, now);
@@ -1427,7 +1429,7 @@ mod tests {
         let mut model = chat_model();
         model.handle(Action::Nav(Nav::Back));
         let mut view = ViewState::default();
-        let y = (list_top(&model) + ROW_H / 2.0) as i16;
+        let y = (list_top(&model) + row_h() / 2.0) as i16;
         assert_eq!(
             hit(&mut model, &mut view, 2216.0, 400, y, now),
             Some(Hit::Action(Action::List(
@@ -1481,7 +1483,7 @@ mod tests {
         let mut view = ViewState::new();
         let now = Instant::now();
         view.layout(&model);
-        let top = CHAT_TOP;
+        let top = chat_top();
         // Scroll to the code block, then drag it sideways.
         let code = view
             .layout
@@ -1528,7 +1530,7 @@ mod tests {
             .expect("a tall table");
         view.follow = false;
         view.chat_scroll.offset = item_y;
-        let y = CHAT_TOP + area.y + area.h / 2.0;
+        let y = chat_top() + area.y + area.h / 2.0;
         // Down first: it is at its top, so the transcript takes it.
         assert_eq!(
             inner_vertical_target(&model, &mut view, height, (500.0, y), 40.0, now),

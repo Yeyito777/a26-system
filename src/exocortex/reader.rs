@@ -27,7 +27,7 @@ use crate::text::{self, Weight};
 use super::find;
 use super::gesture::{Axis, Gesture};
 use super::model::{Action, Ui, UiAct};
-use super::theme::{self, HAIRLINE, T_BODY, T_META, T_NOTE, T_SUBTITLE, T_TITLE, TARGET, TOP_BAR};
+use super::theme::{self, HAIRLINE, T_BODY, T_META, T_NOTE, T_SUBTITLE, T_TITLE, TARGET};
 use super::ui::Haptic;
 use super::ui::icons::{self, Icon};
 use super::ui::overlay::{Body, Cx, Overlay, Response, Scroller};
@@ -188,7 +188,7 @@ impl Reader {
 
     /// Where the text area is: under the bars, above the bottom.
     fn area(&self, cx: &Cx) -> (f32, f32) {
-        let top = TOP_BAR
+        let top = theme::top_bar()
             + HAIRLINE
             + if self.find_open() {
                 FIND_BAR + HAIRLINE
@@ -216,7 +216,7 @@ impl Reader {
         if let Some(handle) = self.handle_at(cx, x, y) {
             return Some(Control::Handle(handle));
         }
-        if y < TOP_BAR {
+        if y < theme::top_bar() {
             return if x < 240.0 {
                 Some(Control::Done)
             } else if x >= cx.width - TARGET {
@@ -227,7 +227,7 @@ impl Reader {
                 None
             };
         }
-        if self.find_open() && y < TOP_BAR + HAIRLINE + FIND_BAR {
+        if self.find_open() && y < theme::below_bar() + FIND_BAR {
             return if x >= cx.width - TARGET {
                 Some(Control::Next)
             } else if x >= cx.width - 2.0 * TARGET {
@@ -242,7 +242,7 @@ impl Reader {
     }
 
     fn field_rect(&self, cx: &Cx) -> RectF {
-        let top = TOP_BAR + HAIRLINE + 11.0;
+        let top = theme::below_bar() + 11.0;
         RectF::new(34.0, top, cx.width - 34.0 - 2.0 * TARGET - 200.0, TARGET)
     }
 
@@ -545,7 +545,7 @@ impl Reader {
     fn draw_find_bar(&self, canvas: &mut Canvas, cx: &Cx, find: &Find) {
         let p = theme::p();
         let c = theme::c();
-        let top = TOP_BAR + HAIRLINE;
+        let top = theme::below_bar();
         widgets::fill(
             canvas,
             RectF::new(0.0, top, cx.width, FIND_BAR),
@@ -678,7 +678,7 @@ impl Overlay for Reader {
         self.draw_text(canvas, cx);
         widgets::top_bar(canvas, p.app_background);
         let label_ty = T_NOTE.weight(Weight::MonoSemiBold);
-        let cy = TOP_BAR / 2.0;
+        let cy = theme::top_bar() / 2.0;
         let alpha = |control| {
             if self.pressed == Some(control) {
                 0.5
@@ -696,7 +696,16 @@ impl Overlay for Reader {
             alpha(Control::Done),
         );
         let title = widgets::fit(&self.title, T_TITLE, cx.width - 2.0 * 260.0);
-        widgets::text_centered(canvas, &title, cx.width / 2.0, 47.0, T_TITLE, p.text, 1.0);
+        let title_baseline = theme::in_bar(47.0);
+        widgets::text_centered(
+            canvas,
+            &title,
+            cx.width / 2.0,
+            title_baseline,
+            T_TITLE,
+            p.text,
+            1.0,
+        );
         let count = self.text.chars().count();
         let meta = format!(
             "{} character{}",
@@ -707,7 +716,7 @@ impl Overlay for Reader {
             canvas,
             &meta,
             cx.width / 2.0,
-            96.0,
+            theme::in_bar(96.0),
             T_SUBTITLE,
             theme::c().text_dim,
             1.0,
@@ -1064,7 +1073,7 @@ mod tests {
         reader.gesture(
             &Gesture::Tap {
                 x: 1080.0 - 0.5 * TARGET,
-                y: TOP_BAR + 60.0,
+                y: theme::top_bar() + 60.0,
             },
             &c,
         );
@@ -1076,7 +1085,7 @@ mod tests {
         reader.gesture(
             &Gesture::Tap {
                 x: 1080.0 - 0.5 * TARGET,
-                y: TOP_BAR + 60.0,
+                y: theme::top_bar() + 60.0,
             },
             &c,
         );

@@ -318,7 +318,7 @@ pub fn usage_rows(model: &Model, with_links: bool, now: Instant) -> Vec<Row> {
     for (index, (provider, (usage, at))) in entries.iter().enumerate() {
         let Some(usage) = usage else { continue };
         if index > 0 {
-            rows.push(Row::Gap(22));
+            rows.push(Row::Rule);
         }
         let capacity = usage.capacity.filter(|c| *c > 0.0).unwrap_or(100.0);
         let badge = if !model.ready {
@@ -333,7 +333,7 @@ pub fn usage_rows(model: &Model, with_links: bool, now: Instant) -> Vec<Row> {
         } else {
             String::new()
         };
-        rows.push(Row::Pair {
+        rows.push(Row::Lead {
             left: format!("{}{badge}", provider_name(provider).to_uppercase()),
             right: accounts,
             style: Style::CaptionBold,
@@ -367,6 +367,9 @@ pub fn usage_rows(model: &Model, with_links: bool, now: Instant) -> Vec<Row> {
         }
     }
     if with_links {
+        if !entries.is_empty() {
+            rows.push(Row::Rule);
+        }
         if model.accounts_likely() {
             rows.push(panel::nav(
                 "Accounts",

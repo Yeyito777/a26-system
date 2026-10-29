@@ -25,22 +25,32 @@ use super::super::list::search::Search;
 use super::super::model::sidebar::{Act, Aggregates, Drag, DropTarget, Key, Layout};
 use super::super::model::{self, Action, Model, Page, Row};
 use super::super::theme::{
-    self, FOLDER_ICON, FOLDER_INDENT, GESTURE_RESERVE, HAIRLINE, LIST_PAD, LIST_ROW, S1, SPINNER,
-    T_CAPTION, T_EYEBROW, T_META, T_NOTE, T_ROW, TARGET, TOP_BAR, W,
+    self, FOLDER_ICON, FOLDER_INDENT, GESTURE_RESERVE, LIST_PAD, S1, SPINNER, T_CAPTION, T_EYEBROW,
+    T_META, T_NOTE, T_ROW, TARGET, W,
 };
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets::{self, Button, ButtonKind, RAIL_LIST};
 use super::{FrameDamage, Hit, ViewState, pressed_action};
 
-pub(crate) const ROW_H: f32 = LIST_ROW;
+/// A row's height at the current text size.
+pub(crate) fn row_h() -> f32 {
+    theme::list_row()
+}
 /// The header's controls' centres.
 const MORE_X: f32 = 768.0;
 const FOLDER_PLUS_X: f32 = 888.0;
 const PLUS_X: f32 = 1008.0;
-const ROW_Y: f32 = 61.0;
+/// The header's row: its centre in today's top bar (taller with large
+/// text).
+fn row_y() -> f32 {
+    theme::in_bar(61.0)
+}
 /// The search field (`real-01-sidebar`: x 44 to 692; the roadmap's 17 to
-/// 680 is not where the iPhone draws it).
-const SEARCH: RectF = RectF::new(44.0, 14.0, 648.0, 94.0);
+/// 680 is not where the iPhone draws it), y 14 to 108 in the 122 px bar.
+fn search_rect() -> RectF {
+    let (top, bottom) = (theme::in_bar(14.0), theme::in_bar(108.0));
+    RectF::new(44.0, top, 648.0, bottom - top)
+}
 /// Room under the last row (the iPhone's footer, less its safe area).
 const FOOT: f32 = 111.0;
 /// Where a conversation row's trailing items end (12 pt in).
@@ -70,7 +80,7 @@ pub fn bounds(model: &Model, height: f32) -> (f32, f32) {
     } else {
         0.0
     };
-    (TOP_BAR + HAIRLINE, bottom(height) - bar)
+    (theme::below_bar(), bottom(height) - bar)
 }
 
 /// The page's bottom: Moon's home gesture (or its keyboard) below it.
@@ -183,7 +193,7 @@ fn select_bar_hit(model: &Model, height: f32, x: f32, y: f32) -> Option<Action> 
 
 /// Where the first row starts on screen, unscrolled.
 pub(crate) fn list_top(_model: &Model) -> f32 {
-    TOP_BAR + HAIRLINE + S1
+    theme::below_bar() + S1
 }
 
 pub fn list_max(model: &mut Model, height: f32) -> f32 {
@@ -674,19 +684,30 @@ fn draw_dot(
     right - 25.0
 }
 
+/// A row's title and meta baselines: 72 and 124 px into the 160 px row at
+/// the default size; with larger text the two lines grow and stay centred.
+fn text_baselines(y: f32) -> (f32, f32) {
+    let scale = theme::text_scale();
+    let pad = ((row_h() - 100.0 * scale) / 2.0).max(0.0);
+    (
+        (y + pad + 42.0 * scale).round(),
+        (y + pad + 94.0 * scale).round(),
+    )
+}
+
 fn draw_conversation(canvas: &mut Canvas, c: &ConversationLook, y: f32) {
     let p = theme::p();
     let background = face_color(c.face);
-    widgets::fill(canvas, RectF::new(0.0, y, W, ROW_H), background);
+    widgets::fill(canvas, RectF::new(0.0, y, W, row_h()), background);
     if c.face == Face::Selected {
         widgets::fill(
             canvas,
-            RectF::new(0.0, y + 17.0, theme::RAIL, ROW_H - 34.0),
+            RectF::new(0.0, y + 17.0, theme::RAIL, row_h() - 34.0),
             p.accent,
         );
     }
     let mut x = LIST_PAD + FOLDER_INDENT * c.depth as f32;
-    let cy = y + ROW_H / 2.0;
+    let cy = y + row_h() / 2.0;
     if let Some(checked) = c.check {
         x += draw_check(canvas, x, cy, checked);
     }
@@ -700,14 +721,14 @@ fn draw_conversation(canvas: &mut Canvas, c: &ConversationLook, y: f32) {
     if let Some(kind) = c.activity.kind {
         trail = draw_dot(canvas, kind, 0, c.pulse, trail, cy, background) - GAP;
     }
-    let baseline = y + 72.0;
+    let (baseline, meta_baseline) = text_baselines(y);
     let mut tx = x;
     if c.pin {
         icons::draw(
             canvas,
             Icon::Pin,
             tx + 17.0,
-            baseline - 14.0,
+            baseline - (14.0 * theme::text_scale()).round(),
             34.0,
             p.accent,
             1.0,
@@ -719,7 +740,7 @@ fn draw_conversation(canvas: &mut Canvas, c: &ConversationLook, y: f32) {
             canvas,
             Icon::Star,
             tx + 18.0,
-            baseline - 14.0,
+            baseline - (14.0 * theme::text_scale()).round(),
             36.0,
             p.warning,
             1.0,
@@ -751,18 +772,18 @@ fn draw_conversation(canvas: &mut Canvas, c: &ConversationLook, y: f32) {
             canvas,
             Icon::BellOff,
             tx + title_w + GAP + 18.0,
-            baseline - 14.0,
+            baseline - (14.0 * theme::text_scale()).round(),
             36.0,
             p.muted,
             1.0,
         );
     }
     let meta = widgets::fit(&c.meta, T_META, (RIGHT - x).max(0.0));
-    widgets::text(canvas, &meta, x, y + 124.0, T_META, p.muted, 1.0);
+    widgets::text(canvas, &meta, x, meta_baseline, T_META, p.muted, 1.0);
     // A drag's reorder line (§3.6.3): an 8 px capsule at the edge it
     // would land on, inside the row.
     if let Some(after) = c.edge {
-        let ly = if after { y + ROW_H - 8.0 } else { y };
+        let ly = if after { y + row_h() - 8.0 } else { y };
         canvas.fill_rrect(RectF::new(22.0, ly, W - 44.0, 8.0), 4.0, p.accent, 1.0);
     }
 }
@@ -807,20 +828,20 @@ fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
     } else {
         face_color(f.face)
     };
-    widgets::fill(canvas, RectF::new(0.0, y, W, ROW_H), background);
+    widgets::fill(canvas, RectF::new(0.0, y, W, row_h()), background);
     if f.drop {
-        widgets::border(canvas, RectF::new(0.0, y, W, ROW_H), 6.0, p.accent);
+        widgets::border(canvas, RectF::new(0.0, y, W, row_h()), 6.0, p.accent);
     }
     // 8 pt in, 14 pt a level.
     let mut base = 22.0 + FOLDER_INDENT * f.depth as f32;
-    let cy = y + ROW_H / 2.0;
+    let cy = y + row_h() / 2.0;
     if let Some(checked) = f.check {
         base += draw_check(canvas, base, cy, checked);
     }
     chevron(canvas, base + 19.5, cy, 39.0, f.turn, p.muted);
     let icon = RectF::new(
         base + 67.0,
-        y + ((ROW_H - FOLDER_ICON) / 2.0).floor(),
+        y + ((row_h() - FOLDER_ICON) / 2.0).floor(),
         FOLDER_ICON,
         FOLDER_ICON,
     );
@@ -873,14 +894,14 @@ fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
         );
     }
     let x = base + 178.0;
-    let baseline = y + 72.0;
+    let (baseline, meta_baseline) = text_baselines(y);
     let mut tx = x;
     if f.pin {
         icons::draw(
             canvas,
             Icon::Pin,
             tx + 17.0,
-            baseline - 14.0,
+            baseline - (14.0 * theme::text_scale()).round(),
             34.0,
             p.accent,
             1.0,
@@ -888,7 +909,8 @@ fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
         tx += 34.0 + GAP;
     }
     let muted_w = if f.muted { 36.0 + GAP } else { 0.0 };
-    let ty = T_ROW.weight(Weight::MonoSemiBold);
+    // Bold, as `real-01-sidebar` draws folder names.
+    let ty = T_ROW.weight(Weight::MonoBold);
     let room = (trail - tx - muted_w).max(0.0);
     let w = text_with_hit(canvas, &f.name, f.hit, tx, baseline, ty, p.text, room);
     if f.muted {
@@ -896,7 +918,7 @@ fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
             canvas,
             Icon::BellOff,
             tx + w + GAP + 18.0,
-            baseline - 14.0,
+            baseline - (14.0 * theme::text_scale()).round(),
             36.0,
             p.muted,
             1.0,
@@ -904,7 +926,7 @@ fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
     }
     let meta_ty = T_META.tracked(1.2);
     let meta = widgets::fit(&f.meta, meta_ty, (trail - x).max(0.0));
-    widgets::text(canvas, &meta, x, y + 124.0, meta_ty, p.muted, 1.0);
+    widgets::text(canvas, &meta, x, meta_baseline, meta_ty, p.muted, 1.0);
 }
 
 fn draw_look(canvas: &mut Canvas, look: &Look, y: f32) {
@@ -914,17 +936,18 @@ fn draw_look(canvas: &mut Canvas, look: &Look, y: f32) {
         Look::Pinned | Look::Results(_) => {
             widgets::fill(
                 canvas,
-                RectF::new(0.0, y, W, theme::HEADER_ROW),
+                RectF::new(0.0, y, W, theme::header_row()),
                 p.sidebar_background,
             );
-            let baseline = y + 66.0;
+            // On the header's bottom, as it grows with the text.
+            let baseline = y + theme::header_row() - 22.0;
             let mut x = LIST_PAD;
             if matches!(look, Look::Pinned) {
                 icons::draw(
                     canvas,
                     Icon::Pin,
                     x + 16.5,
-                    baseline - 11.0,
+                    baseline - (11.0 * theme::text_scale()).round(),
                     33.0,
                     p.muted,
                     1.0,
@@ -946,7 +969,9 @@ fn draw_look(canvas: &mut Canvas, look: &Look, y: f32) {
                 }
             }
         }
-        Look::Missing => widgets::fill(canvas, RectF::new(0.0, y, W, ROW_H), p.sidebar_background),
+        Look::Missing => {
+            widgets::fill(canvas, RectF::new(0.0, y, W, row_h()), p.sidebar_background)
+        }
         Look::Divider(depth) => {
             let h = theme::DIVIDER_ROW;
             widgets::fill(canvas, RectF::new(0.0, y, W, h), p.sidebar_background);
@@ -983,31 +1008,38 @@ fn new_folder() -> Act {
 }
 
 /// Select mode's Done: where the header's controls are otherwise.
-const DONE: RectF = RectF::new(708.0, 0.0, W - 708.0, TOP_BAR);
+fn done_rect() -> RectF {
+    RectF::new(708.0, 0.0, W - 708.0, theme::top_bar())
+}
 
 /// The search field's ✕ target (when there is text).
 fn clear_target() -> RectF {
-    RectF::new(SEARCH.x + SEARCH.w - TARGET, 0.0, TARGET, TOP_BAR)
+    RectF::new(
+        search_rect().x + search_rect().w - TARGET,
+        0.0,
+        TARGET,
+        theme::top_bar(),
+    )
 }
 
 /// The header's control at (`x`, `y`).
 fn header_hit(model: &Model, x: f32, y: f32) -> Option<Action> {
-    if y >= TOP_BAR {
+    if y >= theme::top_bar() {
         return None;
     }
     let near = |cx: f32| (x - cx).abs() < 60.0;
     let selecting = model.sidebar.selection.is_some();
-    let act = if selecting && DONE.contains(x, y) {
+    let act = if selecting && done_rect().contains(x, y) {
         Act::EndSelect
-    } else if selecting && x >= SEARCH.x + SEARCH.w {
+    } else if selecting && x >= search_rect().x + search_rect().w {
         return None;
     } else if near(PLUS_X) {
         Act::NewChat
     } else if near(FOLDER_PLUS_X) {
         new_folder()
     } else if near(MORE_X) {
-        Act::Menu(widgets::target(MORE_X, ROW_Y))
-    } else if x < SEARCH.x + SEARCH.w {
+        Act::Menu(widgets::target(MORE_X, row_y()))
+    } else if x < search_rect().x + search_rect().w {
         if !model.sidebar.search.text.is_empty() && clear_target().contains(x, y) {
             Act::ClearSearch
         } else {
@@ -1035,7 +1067,7 @@ fn header_key(model: &Model, pressed: Option<&Action>) -> u64 {
 
 /// The top bar: the search field, ⋯, new folder, new chat.
 fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
-    if !widgets::shows(canvas, 0.0, TOP_BAR + HAIRLINE) {
+    if !widgets::shows(canvas, 0.0, theme::below_bar()) {
         return;
     }
     let p = theme::p();
@@ -1043,26 +1075,27 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
     let down = |act: Act| pressed == Some(&Action::List(act));
     widgets::top_bar(canvas, p.sidebar_background);
     widgets::page_rail(canvas, RAIL_LIST);
-    widgets::boxed(canvas, SEARCH, c.search_box, c.search_field_border);
+    widgets::boxed(canvas, search_rect(), c.search_box, c.search_field_border);
     let search = &model.sidebar.search;
     let alpha = if down(Act::Search) { 0.5 } else { 1.0 };
     icons::draw(
         canvas,
         Icon::Search,
-        SEARCH.x + 49.0,
-        ROW_Y,
+        search_rect().x + 49.0,
+        row_y(),
         44.0,
         p.muted,
         alpha,
     );
-    let text_x = SEARCH.x + 97.0;
+    let text_x = search_rect().x + 97.0;
     if search.text.is_empty() {
         let placeholder = T_CAPTION.tracked(2.2);
+        let room = search_rect().x + search_rect().w - text_x - 22.0;
         widgets::text(
             canvas,
-            "SEARCH CHATS",
+            &widgets::fit("SEARCH CHATS", placeholder, room),
             text_x,
-            placeholder.baseline(ROW_Y - placeholder.line() / 2.0),
+            placeholder.baseline(row_y() - placeholder.line() / 2.0),
             placeholder,
             p.muted,
             alpha,
@@ -1080,7 +1113,7 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
             canvas,
             shown,
             text_x,
-            T_ROW.baseline(ROW_Y - T_ROW.line() / 2.0),
+            T_ROW.baseline(row_y() - T_ROW.line() / 2.0),
             T_ROW,
             p.text,
             1.0,
@@ -1088,7 +1121,7 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
         if search.focused {
             widgets::fill(
                 canvas,
-                RectF::new((text_x + w + 2.0).round(), ROW_Y - 26.0, 5.0, 52.0),
+                RectF::new((text_x + w + 2.0).round(), row_y() - 26.0, 5.0, 52.0),
                 p.accent,
             );
         }
@@ -1097,7 +1130,7 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
             canvas,
             Icon::X,
             clear.x + clear.w / 2.0,
-            ROW_Y,
+            row_y(),
             39.0,
             p.muted,
             if down(Act::ClearSearch) { 0.5 } else { 1.0 },
@@ -1106,7 +1139,7 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
     if search.focused && search.text.is_empty() {
         widgets::fill(
             canvas,
-            RectF::new(text_x - 8.0, ROW_Y - 26.0, 5.0, 52.0),
+            RectF::new(text_x - 8.0, row_y() - 26.0, 5.0, 52.0),
             p.accent,
         );
     }
@@ -1115,8 +1148,8 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
         widgets::text_centered(
             canvas,
             "DONE",
-            DONE.x + DONE.w / 2.0,
-            ty.baseline(ROW_Y - ty.line() / 2.0),
+            done_rect().x + done_rect().w / 2.0,
+            ty.baseline(row_y() - ty.line() / 2.0),
             ty,
             p.accent,
             if down(Act::EndSelect) { 0.5 } else { 1.0 },
@@ -1126,7 +1159,7 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
     widgets::ellipsis(
         canvas,
         MORE_X,
-        ROW_Y,
+        row_y(),
         p.text,
         if matches!(pressed, Some(Action::List(Act::Menu(_)))) {
             0.5
@@ -1138,7 +1171,7 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
         canvas,
         Icon::FolderPlus,
         FOLDER_PLUS_X,
-        ROW_Y,
+        row_y(),
         60.0,
         p.text,
         down(new_folder()),
@@ -1147,7 +1180,7 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
         canvas,
         Icon::Plus,
         PLUS_X,
-        ROW_Y,
+        row_y(),
         60.0,
         p.text,
         down(Act::NewChat),
@@ -1607,7 +1640,7 @@ pub fn draw_list_update(
         redraw.push(on_screen(content_top + old.end.min(new.end), bottom));
     }
     if old.header != new.header {
-        redraw.push(widgets::TOP_BAR_ROWS);
+        redraw.push(widgets::top_bar_rows());
     }
     // A lifted row's shadow, come or gone (it moves with a scroll).
     if old.lifted != new.lifted || (shift != 0 && new.lifted.is_some()) {
@@ -1802,7 +1835,7 @@ pub fn hit(
     y: f32,
     now: Instant,
 ) -> Option<Hit> {
-    if y < TOP_BAR {
+    if y < theme::top_bar() {
         return header_hit(model, x, y).map(Hit::Action);
     }
     if let Some(action) = select_bar_hit(model, height, x, y) {
@@ -1884,7 +1917,7 @@ pub fn long_press(
 ) -> Option<Action> {
     liftable(model, view, height, x, y, now)?;
     let (row, row_y) = row_at(model, view, height, y, now)?;
-    let rect = RectF::new(0.0, row_y.round(), W, ROW_H);
+    let rect = RectF::new(0.0, row_y.round(), W, row_h());
     let key = row_key(&row)?;
     // Held: the menu opens; moved on far enough, it becomes a drag.
     model.sidebar.drag = Some(Drag {
@@ -1951,7 +1984,7 @@ fn drop_target(
             }
             Some(DropTarget::Reorder {
                 key: Key::Conv(id),
-                after: y >= row_y + ROW_H / 2.0,
+                after: y >= row_y + row_h() / 2.0,
             })
         }
         _ => None,
@@ -2432,7 +2465,7 @@ mod tests {
                 |_, _| {},
             );
             assert_eq!(damage.rows.len(), 1);
-            assert!(drawn(&damage) <= ROW_H as i32);
+            assert!(drawn(&damage) <= row_h() as i32);
         }
         // A key in the search field: the header.
         let damage = update_matches(
@@ -2447,7 +2480,7 @@ mod tests {
                 ))));
             },
         );
-        assert_eq!(damage.rows, [widgets::TOP_BAR_ROWS]);
+        assert_eq!(damage.rows, [widgets::top_bar_rows()]);
         model.handle(Action::List(Act::ClearSearch));
         model.handle(Action::List(Act::Key(crate::keys::KeyInput::Enter)));
         // A conversation renamed: its row.
@@ -2463,7 +2496,10 @@ mod tests {
             );
             },
         );
-        assert!(drawn(&damage) <= ROW_H as i32 + 2 * DOT_HALF, "{damage:?}");
+        assert!(
+            drawn(&damage) <= row_h() as i32 + 2 * DOT_HALF,
+            "{damage:?}"
+        );
         // A folder opened in place: the rows under it.
         let damage = update_matches(
             &mut model,
@@ -2492,13 +2528,13 @@ mod tests {
             let damage = update_matches(&mut model, &mut view, (None, None), (t0, t1), |_, _| {});
             // The folder's row (and pulsing dots elsewhere).
             assert!(
-                drawn(&damage) <= ROW_H as i32 + 8 * 2 * DOT_HALF,
+                drawn(&damage) <= row_h() as i32 + 8 * 2 * DOT_HALF,
                 "{damage:?}"
             );
             turned += damage
                 .rows
                 .iter()
-                .filter(|(a, b)| b - a == ROW_H as i32)
+                .filter(|(a, b)| b - a == row_h() as i32)
                 .count();
         }
         assert!(turned > 5, "the chevron turned over several frames");
@@ -2521,7 +2557,7 @@ mod tests {
         );
         // The row and the shadow's reach around it, nothing more.
         assert!(
-            drawn(&damage) <= ROW_H as i32 + (2.0 * LIFT_BLUR) as i32 + 4 + 2 * 2 * DOT_HALF,
+            drawn(&damage) <= row_h() as i32 + (2.0 * LIFT_BLUR) as i32 + 4 + 2 * 2 * DOT_HALF,
             "{damage:?}"
         );
         let damage = update_matches(
@@ -2560,7 +2596,7 @@ mod tests {
         );
         // The row, and the bar's count.
         assert!(
-            drawn(&damage) <= ROW_H as i32 + SELECT_BAR as i32 + 2 * 2 * DOT_HALF,
+            drawn(&damage) <= row_h() as i32 + SELECT_BAR as i32 + 2 * 2 * DOT_HALF,
             "{damage:?}"
         );
         // The bar's buttons, now that something is selected.
@@ -2662,8 +2698,8 @@ mod tests {
                 let lit = full(&mut model, &mut view, Some(&pressed), now);
                 let drawn = differing(&base, &lit);
                 let (y0, y1) = (drawn[0], *drawn.last().unwrap());
-                assert!(y1 - y0 >= ROW_H - 2.0, "{row:?} drawn at {y0}..{y1}");
-                let title = ink(&base, y0, y0 + ROW_H / 2.0, text);
+                assert!(y1 - y0 >= row_h() - 2.0, "{row:?} drawn at {y0}..{y1}");
+                let title = ink(&base, y0, y0 + row_h() / 2.0, text);
                 assert!(
                     !title.is_empty(),
                     "{row:?}: its title is drawn in its upper half"
@@ -3079,7 +3115,7 @@ mod tests {
         let offset = view.list_scroll.offset;
         let (top, bottom) = bounds(&model, H);
         let y = list_top(&model) + layout.tops[index] - offset;
-        assert!(y >= top && y + ROW_H <= bottom, "on screen: {y}");
+        assert!(y >= top && y + row_h() <= bottom, "on screen: {y}");
         // Closing the folders shortens the list: the scroll stays inside.
         model.handle(Action::List(Act::Toggle("f".into())));
         let _ = settle(&mut model, &mut view, H, now);

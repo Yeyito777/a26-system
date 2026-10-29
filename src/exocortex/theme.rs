@@ -446,8 +446,12 @@ pub fn text_scale() -> f32 {
     TEXT_SCALE.with(Cell::get)
 }
 
+/// The text scales' range: the iPhone's Extra small to Accessibility 3.
+pub const TEXT_SCALE_MIN: f32 = 0.75;
+pub const TEXT_SCALE_MAX: f32 = 2.25;
+
 pub fn set_text_scale(scale: f32) {
-    let scale = scale.clamp(0.75, 1.5);
+    let scale = scale.clamp(TEXT_SCALE_MIN, TEXT_SCALE_MAX);
     if (scale - text_scale()).abs() > f32::EPSILON {
         TEXT_SCALE.with(|cell| cell.set(scale));
         bump();
@@ -595,8 +599,40 @@ pub const S5: f32 = 56.0;
 pub const HAIRLINE: f32 = 2.0;
 /// Colour rails (user bubbles, tool rows, the open list row, the page rail).
 pub const RAIL: f32 = 6.0;
-/// Top bars: window y 0 to 122, then a hairline.
+/// Top bars: window y 0 to 122, then a hairline (at the default text
+/// sizes; `top_bar()` is the height at the current one).
 pub const TOP_BAR: f32 = 122.0;
+
+/// A top bar's height at the current text size: 122 up to 1.3×, then the
+/// iPhone's `44pt × min(scale, 2.4) × 0.8` (its rails grow with large
+/// text, PAR-360), so a header's title and subtitle keep their room.
+pub fn top_bar() -> f32 {
+    let scale = text_scale();
+    if scale <= 1.3 {
+        TOP_BAR
+    } else {
+        (TOP_BAR * scale.min(2.4) * 0.8).round()
+    }
+}
+
+/// A y laid out for the 122 px top bar, where it is in today's bar (its
+/// rows keep their proportions as the bar grows).
+pub fn in_bar(y: f32) -> f32 {
+    (y * top_bar() / TOP_BAR).round()
+}
+
+/// Where a page's content starts: under its top bar and the hairline.
+pub fn below_bar() -> f32 {
+    top_bar() + HAIRLINE
+}
+
+/// A height laid out to hold `text` px of text at the default size: its
+/// text part grows with the text size and its padding does not, never
+/// below `base` (the iPhone's min-heights: a sidebar row is
+/// `max(58, 39 × scale + 19)` pt).
+pub fn grown(base: f32, text: f32) -> f32 {
+    (base - text + text * text_scale()).round().max(base)
+}
 /// Every touch target is at least this square (44 pt).
 pub const TARGET: f32 = 122.0;
 /// An icon inside a button.
@@ -616,6 +652,17 @@ pub const QUOTE_INDENT: f32 = 34.0;
 /// The conversation list.
 pub const LIST_ROW: f32 = 160.0;
 pub const HEADER_ROW: f32 = 88.0;
+
+/// A list row at the current text size: the iPhone's `max(58, ceil(39 ×
+/// scale + 19))` pt, its title and meta lines (39 pt) growing.
+pub fn list_row() -> f32 {
+    grown(LIST_ROW, 108.0)
+}
+
+/// A list section header ("PINNED"): `max(32, ceil(15 × scale + 17))` pt.
+pub fn header_row() -> f32 {
+    grown(HEADER_ROW, 42.0)
+}
 pub const DIVIDER_ROW: f32 = 30.0;
 pub const LIST_PAD: f32 = 34.0;
 pub const FOLDER_INDENT: f32 = 40.0;
@@ -770,5 +817,28 @@ mod tests {
         set_text_scale(1.0);
         assert_eq!(T_EYEBROW.tracking(), 2.2);
         const { assert!(T_EYEBROW.upper && !T_BODY.upper) };
+    }
+
+    /// Bars and rows that hold text grow with it as the iPhone's do; the
+    /// default sizes are the roadmap's.
+    #[test]
+    fn bars_and_rows_grow_with_large_text() {
+        for scale in [0.82, 1.0] {
+            set_text_scale(scale);
+            assert_eq!((top_bar(), list_row(), header_row()), (122.0, 160.0, 88.0));
+        }
+        // Rows grow from Large up (`39 × 1.24 + 19` pt), bars past 1.3.
+        set_text_scale(1.24);
+        assert_eq!((top_bar(), list_row()), (122.0, 186.0));
+        set_text_scale(1.36);
+        assert_eq!(top_bar(), 133.0);
+        assert_eq!(in_bar(61.0), 67.0);
+        set_text_scale(2.25);
+        // The iPhone's rails at Accessibility 3: 44 pt × 2.25 × 0.8.
+        assert_eq!(top_bar(), 220.0);
+        assert_eq!(list_row(), 295.0);
+        set_text_scale(9.0);
+        assert_eq!(text_scale(), TEXT_SCALE_MAX);
+        set_text_scale(1.0);
     }
 }

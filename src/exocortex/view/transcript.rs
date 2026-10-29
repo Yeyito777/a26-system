@@ -43,7 +43,7 @@ use super::markdown_layout::{md_gap, state_key};
 use super::media::{Strip, lay_strip};
 use super::ops::{Laid, draw_ops, px, quantized};
 use super::tools::{GROUP_MIN, Output, expandable, lay_group, lay_tool, output_state, tool_run};
-use super::{CHAT_TOP, ViewState, hash_of, transcript_bounds};
+use super::{ViewState, chat_top, hash_of, transcript_bounds};
 
 /// What a placed piece belongs to (what a long press on it opens).
 #[derive(Debug, Clone, PartialEq)]
@@ -1401,7 +1401,7 @@ pub(crate) fn mark_damage(
     (top, bottom): (i32, i32),
 ) -> Vec<(i32, i32)> {
     let screen = |(y0, y1): (i32, i32)| {
-        let base = CHAT_TOP - offset;
+        let base = chat_top() - offset;
         (
             ((base + y0 as f32).floor() as i32).max(top),
             ((base + y1 as f32).ceil() as i32).min(bottom),
@@ -1536,7 +1536,7 @@ pub(crate) fn draw_transcript(
         return;
     }
     let clip = (top, bottom);
-    let area_top = CHAT_TOP;
+    let area_top = chat_top();
     canvas.set_clip(outer.0, top as i32, outer.2, bottom as i32);
     // Pieces are in order: skip to the first that may reach the clip (no
     // glyph reaches a screen beyond its piece).
@@ -1982,7 +1982,7 @@ mod tests {
 
     /// Rows damaged in the transcript (the header pulses on its own).
     fn rows(damage: &crate::exocortex::view::FrameDamage) -> i32 {
-        let top = CHAT_TOP as i32;
+        let top = chat_top() as i32;
         let rows: i32 = damage
             .rows
             .iter()

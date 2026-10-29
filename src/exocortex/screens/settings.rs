@@ -23,7 +23,7 @@ use super::super::sheets::{panel, usage};
 use super::super::store;
 use super::super::theme::{
     self, HAIRLINE, SETTINGS_PAD, SWITCH, T_BODY, T_CAPTION, T_EYEBROW, T_META, T_NOTE,
-    T_PAGE_TITLE, T_SECTION, T_SMALL, TOGGLE_ROW, TOP_BAR, Theme, W,
+    T_PAGE_TITLE, T_SECTION, T_SMALL, TOGGLE_ROW, Theme, W,
 };
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets::{self, RAIL_SETTINGS};
@@ -31,12 +31,17 @@ use super::super::view::ViewState;
 use super::super::view::frame::FrameDamage;
 
 const CLOSE_X: f32 = 1008.0;
+/// The bar's row centre, in the 122 px bar.
 const ROW_Y: f32 = 61.0;
 /// Where the page's content starts (under the top bar's rule).
-const CONTENT_TOP: f32 = TOP_BAR + HAIRLINE;
+fn content_top() -> f32 {
+    theme::below_bar()
+}
 /// A section's title: padding above, its line, the gap to the rule, the
 /// rule, the padding under it.
-const SECTION_HEAD: f32 = 50.0 + 40.0 + 28.0 + HAIRLINE + 22.0;
+fn section_head() -> f32 {
+    50.0 + T_SECTION.line() + 28.0 + HAIRLINE + 22.0
+}
 /// A section's padding below.
 const SECTION_END: f32 = 17.0;
 /// Between a section's rows (2 pt).
@@ -84,9 +89,9 @@ enum Row {
 impl Row {
     fn height(&self) -> f32 {
         match self {
-            Row::Section(_) => SECTION_HEAD,
+            Row::Section(_) => section_head(),
             Row::End => SECTION_END,
-            Row::Themes(card) => GRID_PAD.0 + *card as f32 + GRID_PAD.1,
+            Row::Themes(card) => GRID_PAD.0 + cards_height(*card as f32) + GRID_PAD.1,
             Row::TextSize(_) => (T_BODY.line() + T_META.line()).max(TOGGLE_ROW),
             Row::Sample => T_BODY.line() + 22.0,
             Row::Switch(_, detail) => {
@@ -115,8 +120,33 @@ fn summary_line() -> f32 {
 }
 
 /// A theme card's width (three to a row).
+/// Three cards side by side; one per row with large text (their words do
+/// not fit a third of the width).
+fn card_columns() -> usize {
+    if theme::text_scale() > 1.3 { 1 } else { 3 }
+}
+
 fn card_width() -> f32 {
-    ((width() - 2.0 * CARD_GAP) / 3.0).floor()
+    let columns = card_columns() as f32;
+    ((width() - (columns - 1.0) * CARD_GAP) / columns).floor()
+}
+
+/// Where theme card `index` is in its row (`y` the row's top).
+fn card_rect(index: usize, x: f32, y: f32, card: f32) -> RectF {
+    let (column, row) = (index % card_columns(), index / card_columns());
+    let w = card_width();
+    RectF::new(
+        x + column as f32 * (w + CARD_GAP),
+        y + GRID_PAD.0 + row as f32 * (card + CARD_GAP),
+        w,
+        card,
+    )
+}
+
+/// The cards' rows' height.
+fn cards_height(card: f32) -> f32 {
+    let rows = theme::THEMES.len().div_ceil(card_columns()) as f32;
+    rows * card + (rows - 1.0) * CARD_GAP
 }
 
 /// A card's summary, wrapped.
@@ -325,7 +355,7 @@ fn content_height(rows: &[(f32, Row)]) -> f32 {
 /// How far the page scrolls: its content past the window, above Moon's
 /// home gesture.
 pub fn max_scroll(model: &Model, height: f32) -> f32 {
-    let visible = height - CONTENT_TOP - theme::GESTURE_RESERVE;
+    let visible = height - content_top() - theme::GESTURE_RESERVE;
     (content_height(&rows(model, Instant::now())) - visible)
         .max(0.0)
         .round()
@@ -405,7 +435,7 @@ pub fn draw_settings_update(
     if old.key != new.key {
         return None;
     }
-    let (top, bottom) = (CONTENT_TOP as i32, canvas.height);
+    let (top, bottom) = (content_top() as i32, canvas.height);
     let shift = new.offset - old.offset;
     let mut damage = FrameDamage::default();
     let mut redraw: Vec<(i32, i32)> = Vec::new();
@@ -432,7 +462,7 @@ pub fn draw_settings_update(
     let list = rows(model, now);
     let band = |wanted: &dyn Fn(&Row) -> bool| {
         list.iter().find(|(_, row)| wanted(row)).map(|(y, row)| {
-            let y0 = (CONTENT_TOP - new.offset as f32 + y).floor() as i32;
+            let y0 = (content_top() - new.offset as f32 + y).floor() as i32;
             (
                 y0.max(top),
                 (y0 + row.height().ceil() as i32 + 1).min(bottom),
@@ -498,10 +528,10 @@ pub fn draw(
         p.sidebar_background,
     );
     let offset = view.settings_scroll.value(now).round();
-    let top = CONTENT_TOP - offset;
+    let top = content_top() - offset;
     widgets::clipped(
         canvas,
-        RectF::new(0.0, CONTENT_TOP, W, height - CONTENT_TOP),
+        RectF::new(0.0, content_top(), W, height - content_top()),
         |canvas| {
             for (y, row) in rows(model, now).iter() {
                 let y = top + y;
@@ -517,7 +547,7 @@ pub fn draw(
         canvas,
         "Settings",
         theme::S3,
-        T_PAGE_TITLE.baseline(ROW_Y - T_PAGE_TITLE.line() / 2.0),
+        T_PAGE_TITLE.baseline(theme::in_bar(ROW_Y) - T_PAGE_TITLE.line() / 2.0),
         T_PAGE_TITLE,
         p.text,
         1.0,
@@ -527,7 +557,7 @@ pub fn draw(
         canvas,
         Icon::ChevronRight,
         CLOSE_X,
-        ROW_Y,
+        theme::in_bar(ROW_Y),
         60.0,
         p.text,
         down,
@@ -557,19 +587,19 @@ fn draw_row(
                 p.accent,
                 1.0,
             );
-            widgets::hairline(canvas, x, right, y + 50.0 + 40.0 + 28.0, c.rule_settings);
+            widgets::hairline(
+                canvas,
+                x,
+                right,
+                y + 50.0 + T_SECTION.line() + 28.0,
+                c.rule_settings,
+            );
         }
         Row::End => {}
         Row::Themes(card) => {
             let current = model.persist.settings().theme;
-            let w = card_width();
             for (index, theme) in theme::THEMES.iter().enumerate() {
-                let rect = RectF::new(
-                    x + index as f32 * (w + CARD_GAP),
-                    y + GRID_PAD.0,
-                    w,
-                    *card as f32,
-                );
+                let rect = card_rect(index, x, y, *card as f32);
                 let down = pressed == Some(&Action::Ops(ops::Act::SetTheme(theme.id)));
                 theme_card(canvas, theme, rect, theme.id == current, down);
             }
@@ -781,7 +811,10 @@ fn theme_card(canvas: &mut Canvas, theme: &Theme, rect: RectF, current: bool, pr
     }
     y += SWATCH + SWATCH_GAP;
     let name = T_NOTE.weight(Weight::MonoBold);
-    let name_w = widgets::text(canvas, theme.label, x, name.baseline(y), name, t.text, 1.0);
+    // The name fits the card, its check included (large text).
+    let room = rect.x + rect.w - CARD_PAD - x - if current { 51.0 } else { 0.0 };
+    let label = widgets::fit(theme.label, name, room);
+    let name_w = widgets::text(canvas, &label, x, name.baseline(y), name, t.text, 1.0);
     if current {
         icons::draw(
             canvas,
@@ -810,31 +843,23 @@ fn theme_card(canvas: &mut Canvas, theme: &Theme, rect: RectF, current: bool, pr
 
 /// The page's target at (`x`, `y`).
 pub fn hit(model: &Model, view: &ViewState, x: f32, y: f32, now: Instant) -> Option<Action> {
-    if y < TOP_BAR {
+    if y < theme::top_bar() {
         return (x > CLOSE_X - 90.0).then_some(Action::Nav(Nav::CloseSettings));
     }
     let offset = view.settings_scroll.value(now).round();
-    let cy = y - CONTENT_TOP + offset;
+    let cy = y - content_top() + offset;
     let (row_y, row) = rows(model, now)
         .iter()
         .find(|(top, row)| cy >= *top && cy < top + row.height())
         .cloned()?;
     match row {
-        Row::Themes(card) => {
-            let w = card_width();
-            let inside = cy - row_y - GRID_PAD.0;
-            if !(0.0..card as f32).contains(&inside) {
-                return None;
-            }
-            let column = ((x - SETTINGS_PAD.1) / (w + CARD_GAP)).floor();
-            let within = x - SETTINGS_PAD.1 - column * (w + CARD_GAP);
-            if column < 0.0 || within > w {
-                return None;
-            }
-            theme::THEMES
-                .get(column as usize)
-                .map(|t| Action::Ops(ops::Act::SetTheme(t.id)))
-        }
+        Row::Themes(card) => theme::THEMES
+            .iter()
+            .enumerate()
+            .find(|(index, _)| {
+                card_rect(*index, SETTINGS_PAD.1, row_y, card as f32).contains(x, cy)
+            })
+            .map(|(_, t)| Action::Ops(ops::Act::SetTheme(t.id))),
         Row::Switch(toggle, _) => Some(Action::Ops(ops::Act::Toggle(toggle))),
         Row::TextSize(step) => {
             let (small, track, large) = text_size_parts();
@@ -987,7 +1012,7 @@ mod tests {
             .find(|(_, r)| matches!(r, Row::Themes(_)))
             .map(|(y, _)| *y)
             .unwrap();
-        let card_top = (CONTENT_TOP + themes + GRID_PAD.0) as usize;
+        let card_top = (content_top() + themes + GRID_PAD.0) as usize;
         let card_bottom = card_top + card_height() as usize;
         let card_right = (SETTINGS_PAD.1 + card_width()) as usize + 1;
         let width = SIZE.0 as usize;
@@ -1034,7 +1059,7 @@ mod tests {
         rows(model, Instant::now())
             .iter()
             .find(|(_, row)| wanted(row))
-            .map(|(y, _)| y + CONTENT_TOP)
+            .map(|(y, _)| y + content_top())
             .unwrap()
     }
 
@@ -1080,7 +1105,10 @@ mod tests {
             _ => None,
         };
         assert_eq!(tap(track.x + 4.0), Some(0));
-        assert_eq!(tap(track.x + track.w - 4.0), Some(5));
+        assert_eq!(
+            tap(track.x + track.w - 4.0),
+            Some(ops::TEXT_SIZES.len() - 1)
+        );
         assert_eq!(tap(large.x + 50.0), Some(3));
         assert_eq!(tap(small.x + 50.0), Some(1));
     }

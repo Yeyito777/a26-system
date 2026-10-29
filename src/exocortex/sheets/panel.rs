@@ -138,6 +138,16 @@ pub enum Row {
         style: Style,
         color: Rgb,
     },
+    /// A bold title with a muted note right after it ("ANTHROPIC  2
+    /// accounts", `real-08-settings-top`).
+    Lead {
+        left: String,
+        right: String,
+        style: Style,
+        color: Rgb,
+    },
+    /// A rule between blocks (between providers' usage, `real-08`).
+    Rule,
     /// A 3 pt bar filled to `permille`.
     Bar {
         permille: u16,
@@ -157,6 +167,19 @@ pub enum Row {
 
 /// A hit's preview shows at most this many lines.
 const HIT_LINES: usize = 4;
+
+/// A rule row: room above its hairline, and in all (`real-08`).
+const RULE_AT: f32 = 44.0;
+const RULE_ROW: f32 = 76.0;
+/// Between a lead's title and its note.
+const LEAD_GAP: f32 = 24.0;
+
+/// Whether a pair's two texts fit on one line.
+fn pair_fits(left: &str, right: &str, style: Style, width: f32) -> bool {
+    let ty = style.ty();
+    widgets::measure(left, ty) + 34.0 + widgets::measure(right, ty.weight(Weight::MonoBold))
+        <= width
+}
 
 /// `text` wrapped at spaces to `width` in `ty`, as char ranges (the space a
 /// line breaks at belongs to neither line; a word longer than a line
@@ -301,7 +324,18 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
             2.0 * RAIL_PAD.0 + text_h
         }
         Row::Task { .. } => TASK,
-        Row::Pair { style, .. } => style.ty().line() + 8.0,
+        Row::Pair {
+            left, right, style, ..
+        } => {
+            let lines = if pair_fits(left, right, *style, width) {
+                1.0
+            } else {
+                2.0
+            };
+            lines * style.ty().line() + 8.0
+        }
+        Row::Lead { style, .. } => style.ty().line() + 8.0,
+        Row::Rule => RULE_ROW,
         Row::Bar { .. } => BAR + 14.0,
         Row::Gap(px) => *px as f32,
         Row::Hit { preview, .. } => {
@@ -773,7 +807,40 @@ pub fn draw_row(
             let baseline = ty.baseline(y + 4.0);
             widgets::text(canvas, left, x, baseline, ty, p.text, 1.0);
             let bold = ty.weight(Weight::MonoBold);
-            widgets::text_right(canvas, value, right, baseline, bold, *color, 1.0);
+            // On the next line when both do not fit (large text).
+            let value_baseline = if pair_fits(left, value, *style, width) {
+                baseline
+            } else {
+                baseline + ty.line()
+            };
+            widgets::text_right(canvas, value, right, value_baseline, bold, *color, 1.0);
+        }
+        Row::Lead {
+            left,
+            right: note,
+            style,
+            color,
+        } => {
+            let ty = style.ty();
+            let baseline = ty.baseline(y + 4.0);
+            let w = widgets::text(canvas, left, x, baseline, ty, p.text, 1.0);
+            if !note.is_empty() {
+                let note_ty = ty.weight(Weight::Mono);
+                let room = (right - x - w - LEAD_GAP).max(0.0);
+                let note = widgets::fit(note, note_ty, room);
+                widgets::text(
+                    canvas,
+                    &note,
+                    x + w + LEAD_GAP,
+                    baseline,
+                    note_ty,
+                    *color,
+                    1.0,
+                );
+            }
+        }
+        Row::Rule => {
+            widgets::hairline(canvas, x, right, y + RULE_AT, c.rule_settings);
         }
         Row::Bar { permille, color } => {
             let track = RectF::new(x, y + 14.0, width, BAR);

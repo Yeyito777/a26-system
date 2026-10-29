@@ -18,7 +18,7 @@ use crate::text;
 use super::super::anim;
 use super::super::theme::{
     self, HAIRLINE, RAIL, SPINNER, SPINNER_STROKE, T_CAPTION, T_EYEBROW, T_META, T_NOTE, T_ROW,
-    TARGET, TOP_BAR, Type, W,
+    TARGET, Type, W,
 };
 use super::icons::{self, Icon};
 
@@ -194,10 +194,12 @@ pub const RAIL_SETTINGS: usize = 0;
 pub const RAIL_LIST: usize = 1;
 pub const RAIL_CHAT: usize = 2;
 
-/// A top bar's background (window y 0 to 122) and its hairline (§3.6.1).
+/// A top bar's background (window y 0 to 122, taller with large text:
+/// `theme::top_bar()`) and its hairline (§3.6.1).
 pub fn top_bar(canvas: &mut Canvas, background: Rgb) {
-    fill(canvas, RectF::new(0.0, 0.0, W, TOP_BAR), background);
-    hairline(canvas, 0.0, W, TOP_BAR, theme::c().rule_topbar);
+    let bar = theme::top_bar();
+    fill(canvas, RectF::new(0.0, 0.0, W, bar), background);
+    hairline(canvas, 0.0, W, bar, theme::c().rule_topbar);
 }
 
 /// The page rail: the current page's third of the bar's bottom edge in the
@@ -207,13 +209,15 @@ pub fn page_rail(canvas: &mut Canvas, page: usize) {
     let x = (page as f32 * (W + 8.0) / 3.0).round();
     fill(
         canvas,
-        RectF::new(x, TOP_BAR - 4.0, segment.round(), RAIL),
+        RectF::new(x, theme::top_bar() - 4.0, segment.round(), RAIL),
         theme::p().accent,
     );
 }
 
 /// Rows a top bar covers, its hairline and rail included.
-pub const TOP_BAR_ROWS: (i32, i32) = (0, TOP_BAR as i32 + HAIRLINE as i32);
+pub fn top_bar_rows() -> (i32, i32) {
+    (0, (theme::top_bar() + HAIRLINE) as i32)
+}
 
 /// ⋯: three 6.5 px dots 15 px apart (as `real-04-new-chat` draws them;
 /// the roadmap's 9 and 18 are larger).
@@ -627,6 +631,20 @@ pub fn wrap_plain(text: &str, ty: Type, width: f32) -> Vec<String> {
                 lines.push(std::mem::take(&mut line));
                 line = word.to_owned();
             }
+            // A word wider than a line breaks anywhere (large text).
+            while measure(&line, ty) > width && line.chars().count() > 1 {
+                let mut cut = line.len();
+                while cut > 0 && measure(&line[..cut], ty) > width {
+                    cut = line[..cut].char_indices().last().map_or(0, |(i, _)| i);
+                }
+                let cut = if cut == 0 {
+                    line.chars().next().map_or(1, char::len_utf8)
+                } else {
+                    cut
+                };
+                lines.push(line[..cut].to_owned());
+                line = line[cut..].to_owned();
+            }
         }
         lines.push(line);
     }
@@ -758,6 +776,19 @@ pub fn shadow_above(canvas: &mut Canvas, top: f32, blur: f32, alpha: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text_wraps_at_spaces_and_breaks_words_wider_than_a_line() {
+        let w = measure("lavender", T_META);
+        assert_eq!(
+            wrap_plain("Rose and lavender", T_META, w),
+            ["Rose and", "lavender"]
+        );
+        let lines = wrap_plain("lavender", T_META, w / 2.0);
+        assert_eq!(lines.concat(), "lavender");
+        assert!(lines.len() >= 2);
+        assert!(lines.iter().all(|line| measure(line, T_META) <= w / 2.0));
+    }
 
     #[test]
     fn the_page_rail_lights_one_third_of_the_bar() {

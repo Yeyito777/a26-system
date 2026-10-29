@@ -15,7 +15,7 @@ use super::super::list::activity::{self, FolderActivity, QueueInfo};
 use super::super::list::search::{self, Search};
 use super::super::proto::{self, Event, Folder, Queued, Summary};
 use super::super::store;
-use super::super::theme::{DIVIDER_ROW, HEADER_ROW, LIST_ROW};
+use super::super::theme::{self, DIVIDER_ROW};
 use super::super::ui::Haptic;
 use super::{Action, Effect, Model, Nav};
 use crate::control::KeyboardPurpose;
@@ -189,9 +189,9 @@ pub enum Row {
 impl Row {
     pub fn height(&self) -> f32 {
         match self {
-            Row::Pinned | Row::Results(_) => HEADER_ROW,
+            Row::Pinned | Row::Results(_) => theme::header_row(),
             Row::Divider { .. } => DIVIDER_ROW,
-            Row::Folder { .. } | Row::Conversation { .. } => LIST_ROW,
+            Row::Folder { .. } | Row::Conversation { .. } => theme::list_row(),
         }
     }
 }
@@ -319,7 +319,7 @@ pub struct Sidebar {
     pub tree_scroll: Option<f32>,
     /// The folder opened or closed last, and when (its chevron turns).
     pub toggled: Option<(String, Instant)>,
-    layout: Option<((u64, String), Rc<Layout>)>,
+    layout: Option<((u64, String, u64), Rc<Layout>)>,
     aggregates: Option<(u64, Rc<Aggregates>)>,
 }
 
@@ -529,7 +529,12 @@ impl Sidebar {
     /// The rows the list shows now (cached until something they depend on
     /// changes).
     pub fn layout(&mut self) -> Rc<Layout> {
-        let key = (self.structure, self.search.query().to_owned());
+        // Row heights follow the text size (its generation).
+        let key = (
+            self.structure,
+            self.search.query().to_owned(),
+            theme::generation(),
+        );
         if let Some((cached, layout)) = &self.layout
             && *cached == key
         {

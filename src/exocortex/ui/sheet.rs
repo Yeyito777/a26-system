@@ -40,6 +40,17 @@ const DRAG_CLOSES: f32 = 150.0;
 /// The header: grabber and title.
 pub const HEADER: f32 = 122.0;
 
+/// The header at the current text size (its title grows).
+pub fn header() -> f32 {
+    theme::grown(HEADER, 40.0)
+}
+
+/// An action list's item: a label and a detail line (100 px of text in
+/// 144), growing with the text.
+fn item_h() -> f32 {
+    theme::grown(ACTION_ITEM, 100.0)
+}
+
 /// What a sheet's content answers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
@@ -131,7 +142,7 @@ impl<C: SheetContent> Sheet<C> {
     /// The panel's height at rest.
     fn panel_h(&self, cx: &Cx) -> f32 {
         let bottom_pad = cx.height - cx.bottom() + S2;
-        (HEADER + self.content_h + bottom_pad)
+        (header() + self.content_h + bottom_pad)
             .min((cx.height * SHEET_MAX).round())
             .round()
     }
@@ -140,7 +151,10 @@ impl<C: SheetContent> Sheet<C> {
     /// reserve (or the keyboard); it moves with the panel.
     fn viewport(&self, cx: &Cx, top: f32) -> (f32, f32) {
         let panel_h = self.panel_h(cx);
-        (top + HEADER, top + panel_h - (cx.height - cx.bottom()) - S2)
+        (
+            top + header(),
+            top + panel_h - (cx.height - cx.bottom()) - S2,
+        )
     }
 
     fn max_scroll(&self, cx: &Cx) -> f32 {
@@ -287,7 +301,7 @@ impl<C: SheetContent> Overlay for Sheet<C> {
         };
         match *gesture {
             Gesture::Down { x, y } => {
-                if y >= top && y < top + HEADER {
+                if y >= top && y < top + header() {
                     self.drag = Some((y, 0.0));
                 }
                 self.pressed = item_at(self, x, y);
@@ -532,7 +546,11 @@ impl ActionList {
     }
 
     fn head(&self) -> f32 {
-        if self.subtitle.is_some() { 100.0 } else { 0.0 }
+        if self.subtitle.is_some() {
+            theme::grown(100.0, 60.0)
+        } else {
+            0.0
+        }
     }
 
     /// The index the Cancel row answers to.
@@ -552,9 +570,7 @@ impl SheetContent for ActionList {
     }
 
     fn layout(&mut self, _cx: &Cx, _width: f32) -> f32 {
-        self.head()
-            + self.items.len() as f32 * ACTION_ITEM
-            + if self.cancel { ACTION_ITEM } else { 0.0 }
+        self.head() + self.items.len() as f32 * item_h() + if self.cancel { item_h() } else { 0.0 }
     }
 
     fn draw(&self, canvas: &mut Canvas, _cx: &Cx, x: f32, top: f32, pressed: Option<usize>) {
@@ -580,7 +596,7 @@ impl SheetContent for ActionList {
             if pressed == Some(index) {
                 widgets::fill(
                     canvas,
-                    RectF::new(0.0, y + HAIRLINE, W, ACTION_ITEM - HAIRLINE),
+                    RectF::new(0.0, y + HAIRLINE, W, item_h() - HAIRLINE),
                     p.selection_background,
                 );
             }
@@ -590,12 +606,12 @@ impl SheetContent for ActionList {
                     canvas,
                     label,
                     W / 2.0,
-                    T_ROW.baseline(y + (ACTION_ITEM - T_ROW.line()) / 2.0),
+                    T_ROW.baseline(y + (item_h() - T_ROW.line()) / 2.0),
                     T_ROW,
                     p.muted,
                     1.0,
                 );
-                y += ACTION_ITEM;
+                y += item_h();
                 continue;
             };
             let mut text_x = x;
@@ -604,7 +620,7 @@ impl SheetContent for ActionList {
                     canvas,
                     icon,
                     x + ACTION_ICON / 2.0,
-                    y + ACTION_ITEM / 2.0,
+                    y + item_h() / 2.0,
                     ACTION_ICON,
                     item.tone.icon(),
                     1.0,
@@ -619,10 +635,10 @@ impl SheetContent for ActionList {
             let right = W - x - if item.checked { 76.0 } else { 0.0 };
             let (label_top, detail) = match &item.detail {
                 Some(detail) => (
-                    y + (ACTION_ITEM - T_ROW.line() - T_META.line()) / 2.0,
+                    y + (item_h() - T_ROW.line() - T_META.line()) / 2.0,
                     Some(detail),
                 ),
-                None => (y + (ACTION_ITEM - T_ROW.line()) / 2.0, None),
+                None => (y + (item_h() - T_ROW.line()) / 2.0, None),
             };
             let label = widgets::fit(&item.label, T_ROW, right - text_x);
             widgets::text(
@@ -651,13 +667,13 @@ impl SheetContent for ActionList {
                     canvas,
                     Icon::Check,
                     W - x - 30.0,
-                    y + ACTION_ITEM / 2.0,
+                    y + item_h() / 2.0,
                     52.0,
                     p.accent,
                     1.0,
                 );
             }
-            y += ACTION_ITEM;
+            y += item_h();
         }
     }
 
@@ -666,7 +682,7 @@ impl SheetContent for ActionList {
         if y < 0.0 {
             return None;
         }
-        let index = (y / ACTION_ITEM).floor() as usize;
+        let index = (y / item_h()).floor() as usize;
         (index < self.items.len() + usize::from(self.cancel)).then_some(index)
     }
 

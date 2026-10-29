@@ -34,7 +34,7 @@ use super::super::theme::{
 use super::super::ui::icons::{self, Icon, Style};
 use super::super::ui::overlay::{Body, Cx, Overlay, Response};
 use super::super::ui::widgets;
-use super::{CHAT_TOP, Hit};
+use super::{Hit, chat_top};
 
 /// The band above the island filled with the background.
 const BAND: f32 = 17.0;
@@ -1197,7 +1197,7 @@ impl Overlay for EditMenu {
             geometry.viewport.y,
             geometry.viewport.y + geometry.viewport.h,
         );
-        let y = (line_top - S2 - HANDLE_R * 2.0 - MENU_H).max(CHAT_TOP + S1);
+        let y = (line_top - S2 - HANDLE_R * 2.0 - MENU_H).max(chat_top() + S1);
         let left = (x - w / 2.0).clamp(S2, W - S2 - w).round();
         self.rect = RectF::new(left, y.round(), w, MENU_H);
         let mut edge = left;
@@ -1604,7 +1604,7 @@ mod tests {
             let rows: i32 = damage
                 .rows
                 .iter()
-                .filter(|rows| **rows != widgets::TOP_BAR_ROWS)
+                .filter(|rows| **rows != widgets::top_bar_rows())
                 .map(|(a, b)| b - a)
                 .sum();
             assert!(rows < 300, "only the island: {damage:?}");
