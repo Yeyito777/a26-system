@@ -537,7 +537,7 @@ impl Type {
     }
 }
 
-use Weight::{Mono, MonoBold, MonoItalic, MonoMedium, MonoSemiBold};
+use Weight::{Mono, MonoBold, MonoItalic, MonoMedium};
 
 /// "BEGINNING OF CONVERSATION".
 pub const T_EDGE: Type = Type::new(26.0, 36.0, Mono).tracked(1.6).uppercase();
@@ -555,14 +555,14 @@ pub const T_SUBTITLE: Type = Type::new(30.0, 40.0, Mono);
 pub const T_SMALL: Type = Type::new(32.0, 46.0, Mono);
 /// Tool lines, notice previews, the composer error, picker descriptions.
 pub const T_CAPTION: Type = Type::new(34.0, 48.0, Mono);
-/// Anchored menu labels.
-pub const T_MENU: Type = Type::new(33.0, 44.0, MonoSemiBold).tracked(2.0).uppercase();
+/// Anchored menu labels (the iPhone's 650 weight: Bold).
+pub const T_MENU: Type = Type::new(33.0, 44.0, MonoBold).tracked(2.0).uppercase();
 /// Thinking and notice bodies, sheet messages, buttons (SemiBold).
 pub const T_NOTE: Type = Type::new(36.0, 54.0, Mono);
 /// Transcript text, bubbles, settings values.
 pub const T_BODY: Type = Type::new(40.0, 60.0, Mono);
-/// The chat title.
-pub const T_TITLE: Type = Type::new(40.0, 52.0, MonoSemiBold);
+/// The chat title (the iPhone's 650 weight, Bold in a static face).
+pub const T_TITLE: Type = Type::new(40.0, 52.0, MonoBold);
 /// List titles, action items, picker names.
 pub const T_ROW: Type = Type::new(42.0, 56.0, MonoMedium);
 /// The composer's editor.

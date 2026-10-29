@@ -367,7 +367,8 @@ pub fn button(canvas: &mut Canvas, rect: RectF, button: &Button, background: Rgb
             );
         }
     }
-    let ty = T_NOTE.weight(text::Weight::MonoSemiBold);
+    // Bold, as `real-05-model-sheet`'s "Use for this draft".
+    let ty = T_NOTE.weight(text::Weight::MonoBold);
     let label_w = measure(button.label, ty);
     let icon_w = if button.icon.is_some() {
         44.0 + 17.0

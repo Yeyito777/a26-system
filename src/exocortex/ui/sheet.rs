@@ -45,10 +45,13 @@ pub fn header() -> f32 {
     theme::grown(HEADER, 40.0)
 }
 
-/// An action list's item: a label and a detail line (100 px of text in
-/// 144), growing with the text.
-fn item_h() -> f32 {
-    theme::grown(ACTION_ITEM, 100.0)
+/// An action list's row: 144 for a label (56 px of text), 155 with a
+/// detail line under it (`fake-09-chat-menu`), growing with the text.
+fn item_h(item: Option<&ActionItem>) -> f32 {
+    match item.and_then(|item| item.detail.as_ref()) {
+        Some(_) => theme::grown(ACTION_ITEM + 11.0, 100.0),
+        None => theme::grown(ACTION_ITEM, 56.0),
+    }
 }
 
 /// What a sheet's content answers.
@@ -570,7 +573,8 @@ impl SheetContent for ActionList {
     }
 
     fn layout(&mut self, _cx: &Cx, _width: f32) -> f32 {
-        self.head() + self.items.len() as f32 * item_h() + if self.cancel { item_h() } else { 0.0 }
+        let items: f32 = self.items.iter().map(|item| item_h(Some(item))).sum();
+        self.head() + items + if self.cancel { item_h(None) } else { 0.0 }
     }
 
     fn draw(&self, canvas: &mut Canvas, _cx: &Cx, x: f32, top: f32, pressed: Option<usize>) {
@@ -592,11 +596,12 @@ impl SheetContent for ActionList {
         let mut y = top + self.head();
         let rows = self.items.len() + usize::from(self.cancel);
         for index in 0..rows {
+            let h = item_h(self.items.get(index));
             widgets::hairline(canvas, 0.0, W, y, c.rule_sheet_row);
             if pressed == Some(index) {
                 widgets::fill(
                     canvas,
-                    RectF::new(0.0, y + HAIRLINE, W, item_h() - HAIRLINE),
+                    RectF::new(0.0, y + HAIRLINE, W, h - HAIRLINE),
                     p.selection_background,
                 );
             }
@@ -606,12 +611,12 @@ impl SheetContent for ActionList {
                     canvas,
                     label,
                     W / 2.0,
-                    T_ROW.baseline(y + (item_h() - T_ROW.line()) / 2.0),
+                    T_ROW.baseline(y + (h - T_ROW.line()) / 2.0),
                     T_ROW,
                     p.muted,
                     1.0,
                 );
-                y += item_h();
+                y += h;
                 continue;
             };
             let mut text_x = x;
@@ -620,7 +625,7 @@ impl SheetContent for ActionList {
                     canvas,
                     icon,
                     x + ACTION_ICON / 2.0,
-                    y + item_h() / 2.0,
+                    y + h / 2.0,
                     ACTION_ICON,
                     item.tone.icon(),
                     1.0,
@@ -634,11 +639,8 @@ impl SheetContent for ActionList {
             };
             let right = W - x - if item.checked { 76.0 } else { 0.0 };
             let (label_top, detail) = match &item.detail {
-                Some(detail) => (
-                    y + (item_h() - T_ROW.line() - T_META.line()) / 2.0,
-                    Some(detail),
-                ),
-                None => (y + (item_h() - T_ROW.line()) / 2.0, None),
+                Some(detail) => (y + (h - T_ROW.line() - T_META.line()) / 2.0, Some(detail)),
+                None => (y + (h - T_ROW.line()) / 2.0, None),
             };
             let label = widgets::fit(&item.label, T_ROW, right - text_x);
             widgets::text(
@@ -667,13 +669,13 @@ impl SheetContent for ActionList {
                     canvas,
                     Icon::Check,
                     W - x - 30.0,
-                    y + item_h() / 2.0,
+                    y + h / 2.0,
                     52.0,
                     p.accent,
                     1.0,
                 );
             }
-            y += item_h();
+            y += h;
         }
     }
 
@@ -682,8 +684,12 @@ impl SheetContent for ActionList {
         if y < 0.0 {
             return None;
         }
-        let index = (y / item_h()).floor() as usize;
-        (index < self.items.len() + usize::from(self.cancel)).then_some(index)
+        let rows = self.items.len() + usize::from(self.cancel);
+        let mut top = 0.0;
+        (0..rows).find(|&index| {
+            top += item_h(self.items.get(index));
+            y < top
+        })
     }
 
     fn activate(&mut self, _cx: &Cx, index: usize) -> Reply {
