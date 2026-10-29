@@ -176,6 +176,12 @@ pub trait Overlay {
         Vec::new()
     }
 
+    /// A haptic its last gesture asked for (a long press that selected
+    /// text, a zoom), taken once.
+    fn take_haptic(&mut self) -> Option<super::Haptic> {
+        None
+    }
+
     /// What to do once it has gone (a panel that watched something stops
     /// watching): taken when it is removed.
     fn farewell(&mut self) -> Option<Action> {
@@ -336,6 +342,15 @@ impl OverlayStack {
             moving |= shown.overlay.step(cx);
         }
         moving
+    }
+
+    /// The haptics the overlays asked for since last asked.
+    pub fn take_haptics(&mut self) -> Vec<super::Haptic> {
+        self.modal
+            .iter_mut()
+            .chain(&mut self.floating)
+            .filter_map(|shown| shown.overlay.take_haptic())
+            .collect()
     }
 
     /// The image previews the overlays show, the topmost's first.

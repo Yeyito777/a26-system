@@ -361,6 +361,10 @@ impl Context<'_> {
             let mut overlays = std::mem::take(&mut self.view.overlays);
             let cx = self.view.cx(self.model, self.width, self.height, now);
             let response = overlays.gesture(&gesture, &cx);
+            // What it felt like (the reader's long press, the viewer's zoom).
+            for haptic in overlays.take_haptics() {
+                self.model.ui.haptic(haptic);
+            }
             self.view.overlays = overlays;
             response
         };
