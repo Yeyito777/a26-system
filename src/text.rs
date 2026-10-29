@@ -214,16 +214,28 @@ fn pictographic(character: char) -> bool {
 
 /// Splits text into what each glyph stands for. An emoji sequence is a
 /// pictograph (or a keycap base) with its selectors, skin tone, tags and
-/// ZWJ-joined parts, or a pair of regional indicators (a flag).
-fn clusters(text: &str) -> Vec<Cluster> {
-    let mut out = Vec::new();
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
+/// ZWJ-joined parts, or a pair of regional indicators (a flag). Lazy, so a
+/// caller that stops early (`fit`) never looks at the rest.
+fn clusters(text: &str) -> Clusters<'_> {
+    Clusters {
+        characters: text.chars().peekable(),
+    }
+}
+
+struct Clusters<'a> {
+    characters: std::iter::Peekable<std::str::Chars<'a>>,
+}
+
+impl Iterator for Clusters<'_> {
+    type Item = Cluster;
+
+    fn next(&mut self) -> Option<Cluster> {
+        let characters = &mut self.characters;
+        let character = characters.next()?;
         let keycap = matches!(character, '0'..='9' | '#' | '*')
             && matches!(characters.peek(), Some('\u{fe0f}' | '\u{20e3}'));
         if !pictographic(character) && !keycap {
-            out.push(Cluster::Char(character));
-            continue;
+            return Some(Cluster::Char(character));
         }
         let mut sequence = vec![character];
         if regional_indicator(character) {
@@ -253,12 +265,11 @@ fn clusters(text: &str) -> Vec<Cluster> {
         }
         // A text-style selector asks for the plain character.
         if sequence.len() == 1 || sequence[1..] == ['\u{fe0e}'] {
-            out.push(Cluster::Char(character));
+            Some(Cluster::Char(character))
         } else {
-            out.push(Cluster::Emoji(sequence.into_boxed_slice()));
+            Some(Cluster::Emoji(sequence.into_boxed_slice()))
         }
     }
-    out
 }
 
 /// Flattens a TrueType/CFF outline into a `Path` in pixels, y down, with
@@ -809,24 +820,30 @@ pub fn centered_baseline(center_y: f32, weight: Weight, size: f32) -> f32 {
 /// Shortens `text` with an ellipsis so it fits in `max_width`, never
 /// splitting an emoji sequence.
 pub fn fit(text: &str, weight: Weight, size: f32, max_width: f32) -> String {
-    if measure(text, weight, size) <= max_width {
-        return text.to_owned();
-    }
-    let mut parts: Vec<String> = clusters(text)
-        .into_iter()
-        .map(|cluster| match cluster {
-            Cluster::Char(character) => character.to_string(),
-            Cluster::Emoji(sequence) => sequence.iter().collect(),
-        })
-        .collect();
-    while !parts.is_empty() {
-        parts.pop();
-        let candidate = parts.concat() + "…";
-        if measure(&candidate, weight, size) <= max_width {
-            return candidate;
+    // One pass, stopping once the text overflows: a tool call's summary can
+    // be a 10 KB command, and a row shows a few dozen characters of it.
+    TYPEFACES.with(|cell| {
+        let mut faces = cell.borrow_mut();
+        let ellipsis = faces.glyph(weight, size, &Cluster::Char('…')).advance;
+        let mut width = 0.0;
+        let mut end = 0;
+        // The longest prefix that fits with an ellipsis after it.
+        let mut kept = 0;
+        for cluster in clusters(text) {
+            width += faces.glyph(weight, size, &cluster).advance;
+            if width > max_width {
+                return format!("{}…", &text[..kept]);
+            }
+            end += match &cluster {
+                Cluster::Char(character) => character.len_utf8(),
+                Cluster::Emoji(sequence) => sequence.iter().map(|c| c.len_utf8()).sum(),
+            };
+            if width + ellipsis <= max_width {
+                kept = end;
+            }
         }
-    }
-    "…".into()
+        text.to_owned()
+    })
 }
 
 #[cfg(test)]
@@ -870,7 +887,7 @@ mod tests {
         let text = format!(
             "a{family}{flag}\u{2764}\u{fe0f}1\u{fe0f}\u{20e3}\u{1f44d}\u{1f3fd}\u{263a}\u{fe0e}b"
         );
-        let parts = clusters(&text);
+        let parts: Vec<Cluster> = clusters(&text).collect();
         assert_eq!(parts.len(), 8, "{parts:?}");
         assert_eq!(parts[0], Cluster::Char('a'));
         assert!(matches!(&parts[1], Cluster::Emoji(s) if s.len() == 5));
@@ -881,7 +898,10 @@ mod tests {
         assert_eq!(parts[6], Cluster::Char('\u{263a}'));
         assert_eq!(parts[7], Cluster::Char('b'));
         // Digits stay text unless they are keycaps.
-        assert_eq!(clusters("12"), vec![Cluster::Char('1'), Cluster::Char('2')]);
+        assert_eq!(
+            clusters("12").collect::<Vec<_>>(),
+            vec![Cluster::Char('1'), Cluster::Char('2')]
+        );
     }
 
     #[test]
