@@ -23,10 +23,8 @@ use crate::gfx::{Canvas, RectF};
 use super::super::anim::{Animator, Tween};
 use super::super::footer;
 use super::super::markdown::{self, MdBlock};
-use super::super::model::chat::{
-    COMPACTION_KIND, Disclosure, merged_thinking, order_queued, queue_label, thinking_key, visible,
-};
-use super::super::model::{Action, Chat, Model, Page, chat, rich::Rich};
+use super::super::model::chat::{COMPACTION_KIND, Disclosure, merged_thinking, thinking_key, visible};
+use super::super::model::{Action, Chat, Model, Page, chat, composer, rich::Rich};
 use super::super::proto::{Block, Entry, Metadata, ToolStyle};
 use super::super::theme::{
     self, BLOCK_GAP, JUMP, JUMP_INSET, ROW_GAP, TRANSCRIPT_BOTTOM, TRANSCRIPT_TOP, W,
@@ -34,7 +32,7 @@ use super::super::theme::{
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets;
 use super::blocks::{
-    Edge, FOOTER_GAP, Mark, Piece, StatusKind, Tone, draw_mark, lay_bubble, lay_context,
+    self, Edge, FOOTER_GAP, Mark, Piece, StatusKind, Tone, draw_mark, lay_bubble, lay_context,
     lay_divider, lay_edge, lay_footer, lay_live_footer, lay_load_error, lay_md_piece, lay_notice,
     lay_notification, lay_status, lay_thinking, lay_working, mark_frames, mark_key, notice_color,
     wall_ms,
@@ -1021,20 +1019,24 @@ impl ViewState {
             );
             gap = ROW_GAP;
         }
-        let queued = model.queued_here();
-        let provider = model.open_summary().map(|s| s.provider.as_str());
-        for queued in order_queued(&queued) {
+        // Queued messages (D's captions and actions: "queued: next turn",
+        // "Removing…"; a tap opens the message's queue actions).
+        for queued in model.queued_here() {
             y += gap;
-            let label = queue_label(queued, provider, now);
-            let key = hash_of(("queued", &queued.id, &queued.text, &label));
+            let caption = model.queued_caption(queued);
+            let sending = model.composer.optimistic(&queued.id);
+            let key = hash_of(("queued", &queued.id, &queued.text, &caption, sending));
             let id = queued.id.clone();
             y = single(self, &mut layout, y, key, Role::Queued(id.clone()), &|| {
-                let mut piece = lay_bubble(&queued.text, Tone::Queued, Some(&label), false);
+                let mut piece = lay_bubble(&queued.text, Tone::Queued, Some(&caption), false);
                 let h = piece.laid.h;
                 piece.laid.hits.push((
                     RectF::new(0.0, 0.0, W, h),
-                    Action::Chat(chat::Act::QueuedMenu(id.clone())),
+                    Action::Composer(composer::Act::Queued(id.clone())),
                 ));
+                if sending {
+                    blocks::queued_spinner(&mut piece, &caption);
+                }
                 piece
             });
             gap = ROW_GAP;
@@ -1783,7 +1785,7 @@ pub(crate) fn long_press(
     })?;
     match &item.role {
         Role::Message if item.stamp != 0 => Some(Action::Chat(chat::Act::MessageMenu(item.stamp))),
-        Role::Queued(id) => Some(Action::Chat(chat::Act::QueuedMenu(id.clone()))),
+        Role::Queued(id) => Some(Action::Composer(composer::Act::Queued(id.clone()))),
         _ => None,
     }
 }

@@ -68,21 +68,39 @@ pub fn send_message(req_id: &str, conv_id: &str, text: &str, started_at: u64) ->
     })
 }
 
-pub fn queue_message(req_id: &str, queue_id: &str, conv_id: &str, text: &str) -> Value {
+/// Queues `text` to join conversation `conv_id`'s running turn at `timing`
+/// (`next-turn` or `message-end`); `queue_id` names it until it is
+/// delivered (the daemon takes a resend with the same id once).
+pub fn queue_message(
+    req_id: &str,
+    queue_id: &str,
+    conv_id: &str,
+    text: &str,
+    timing: &str,
+) -> Value {
     json!({
         "type": "queue_message",
         "reqId": req_id,
         "queueId": queue_id,
         "convId": conv_id,
         "text": text,
-        "timing": "message-end",
+        "timing": timing,
     })
 }
 
+/// Takes a queued message out of the queue (PAR-259).
+pub fn unqueue_message(req_id: &str, queue_id: &str) -> Value {
+    json!({ "type": "unqueue_message", "reqId": req_id, "queueId": queue_id })
+}
+
+/// A new conversation with its first message, in `folder`, with only the
+/// model choices the user made for it (`overrides`; none: the daemon's
+/// defaults, PAR-277).
 pub fn new_conversation(
     req_id: &str,
     conv_id: &str,
-    selection: &Selection,
+    overrides: Option<&Selection>,
+    folder: Option<&str>,
     text: &str,
     started_at: u64,
 ) -> Value {
@@ -90,12 +108,24 @@ pub fn new_conversation(
         "type": "new_conversation",
         "reqId": req_id,
         "convId": conv_id,
-        "provider": selection.provider,
-        "model": selection.model,
         "initialMessage": { "text": text, "startedAt": started_at },
     });
-    if !selection.effort.is_empty() {
-        command["effort"] = json!(selection.effort);
+    if let Some(folder) = folder {
+        command["folderId"] = json!(folder);
+    }
+    if let Some(selection) = overrides {
+        for (key, value) in [
+            ("provider", &selection.provider),
+            ("model", &selection.model),
+            ("effort", &selection.effort),
+        ] {
+            if !value.is_empty() {
+                command[key] = json!(value);
+            }
+        }
+        if !selection.fast_mode.is_null() {
+            command["fastMode"] = selection.fast_mode.clone();
+        }
     }
     command
 }

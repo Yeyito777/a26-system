@@ -6,6 +6,8 @@
 pub mod anim;
 pub mod app;
 pub mod clipboard;
+pub mod drafts;
+pub mod editor;
 pub mod footer;
 pub mod gesture;
 pub mod handoff;

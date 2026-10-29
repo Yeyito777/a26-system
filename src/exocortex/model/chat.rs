@@ -37,8 +37,6 @@ pub enum Act {
     JumpToLatest,
     /// The message menu of the entry (or live reply) with this stamp.
     MessageMenu(u64),
-    /// The menu of a queued message (by its queue id).
-    QueuedMenu(String),
     /// A tool call's full output in the reader, or copied.
     ReadOutput(String),
     CopyOutput(String),
@@ -862,6 +860,7 @@ impl Model {
         self.shelf.keep(old);
         self.ui.close_all = true;
         self.page = Page::Chat;
+        self.restore_draft();
         previous
             .map(|id| proto::unsubscribe(&id))
             .into_iter()
@@ -896,6 +895,7 @@ impl Model {
                 });
                 let old = std::mem::replace(&mut self.chat, chat);
                 self.shelf.keep(old);
+                self.restore_draft();
             }
             return Vec::new();
         }
@@ -935,10 +935,6 @@ impl Model {
             Act::JumpToLatest => Vec::new(),
             Act::MessageMenu(stamp) => {
                 self.message_menu(stamp);
-                Vec::new()
-            }
-            Act::QueuedMenu(id) => {
-                self.queued_menu(&id);
                 Vec::new()
             }
             Act::ReadOutput(tool) => {
@@ -1079,24 +1075,6 @@ impl Model {
         );
         self.ui
             .open(Box::new(action_sheet(ActionList::new("", items).scoped())));
-    }
-
-    /// A queued message's menu (D adds its queue actions here).
-    fn queued_menu(&mut self, id: &str) {
-        let Some(queued) = self.composer.queued.iter().find(|q| q.id == id) else {
-            return;
-        };
-        let provider = self.open_summary().map(|s| s.provider.clone());
-        let label = queue_label(queued, provider.as_deref(), now_ms() as f64);
-        let items = vec![
-            ActionItem::new("Copy text", Action::Ui(UiAct::Copy(queued.text.clone())))
-                .icon(Icon::Copy),
-        ];
-        self.ui.open(Box::new(action_sheet(
-            ActionList::new("Queued message", items)
-                .subtitle(format!("Delivers {}", label.trim_start_matches("queued: ")))
-                .scoped(),
-        )));
     }
 
     /// A tool's output is not in the history the daemon sent, nor fetched
@@ -1811,99 +1789,6 @@ impl Model {
     }
 }
 
-/// How a queued message waits (PAR-143, the TUI's `queue.ts`): "queued:
-/// next turn", "queued: steer", "queued: message end", "queued: after
-/// <title>", "queued: at 14:05", "queued: global idle".
-pub fn queue_label(queued: &proto::Queued, provider: Option<&str>, now: f64) -> String {
-    if queued.source == "global-idle" {
-        let target = queued.wait_target.as_ref();
-        let kind = target
-            .and_then(|t| t.get("type"))
-            .and_then(Value::as_str)
-            .unwrap_or("global");
-        let label = target
-            .and_then(|t| t.get("label"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        return match kind {
-            "delay" => {
-                let delay = target
-                    .and_then(|t| t.get("delayMs"))
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
-                let created = if queued.created_at > 0.0 {
-                    queued.created_at
-                } else {
-                    now
-                };
-                format!(
-                    "queued: at {}",
-                    due_time(created + delay, now, delay < 3_600_000.0)
-                )
-            }
-            "conversation" => format!("queued: after {label}"),
-            "folder" => format!("queued: after folder {label}"),
-            _ => "queued: global idle".into(),
-        };
-    }
-    if queued.timing != "next-turn" {
-        return "queued: message end".into();
-    }
-    if queued.automation.is_some() || provider == Some("anthropic") {
-        "queued: next turn".into()
-    } else {
-        "queued: steer".into()
-    }
-}
-
-/// `14:05` (with seconds when asked), or `Oct 10 14:05` when not today.
-fn due_time(at: f64, now: f64, seconds: bool) -> String {
-    // SAFETY: localtime_r fills the zeroed tm from a valid time_t.
-    let tm = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        let time = (at / 1000.0).floor() as _;
-        libc::localtime_r(&time, &mut tm);
-        tm
-    };
-    let time = if seconds {
-        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
-    } else {
-        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
-    };
-    if super::super::footer::local_day(at) == super::super::footer::local_day(now) {
-        return time;
-    }
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    format!(
-        "{} {} {time}",
-        MONTHS[tm.tm_mon.clamp(0, 11) as usize],
-        tm.tm_mday
-    )
-}
-
-/// Display order of queued messages (PAR-143): next turn, message end,
-/// a specific idle target, global idle; FIFO within each.
-pub fn order_queued<'a>(list: &[&'a proto::Queued]) -> Vec<&'a proto::Queued> {
-    let bucket = |q: &proto::Queued| {
-        if q.source != "global-idle" {
-            usize::from(q.timing != "next-turn")
-        } else {
-            let global = q
-                .wait_target
-                .as_ref()
-                .and_then(|t| t.get("type"))
-                .and_then(Value::as_str)
-                .is_none_or(|kind| kind == "global");
-            if global { 3 } else { 2 }
-        }
-    };
-    let mut out: Vec<&proto::Queued> = list.to_vec();
-    out.sort_by_key(|q| bucket(q));
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2150,39 +2035,6 @@ mod tests {
         model.ui.opening.clear();
         model.handle(Action::Chat(Act::ReadOutput("t1".into())));
         assert_eq!(model.ui.opening.len(), 1);
-    }
-
-    #[test]
-    fn queued_labels_and_order_follow_the_tui() {
-        let queued = |id: &str, timing: &str, source: &str, target: Option<Value>| proto::Queued {
-            id: id.into(),
-            timing: timing.into(),
-            source: source.into(),
-            wait_target: target,
-            ..proto::Queued::default()
-        };
-        let next = queued("a", "next-turn", "daemon", None);
-        let end = queued("b", "message-end", "daemon", None);
-        let idle = queued("c", "message-end", "global-idle", None);
-        let after = queued(
-            "d",
-            "message-end",
-            "global-idle",
-            Some(serde_json::json!({"type":"conversation","label":"Deploy"})),
-        );
-        assert_eq!(
-            queue_label(&next, Some("anthropic"), 0.0),
-            "queued: next turn"
-        );
-        assert_eq!(queue_label(&next, Some("openai"), 0.0), "queued: steer");
-        assert_eq!(queue_label(&end, None, 0.0), "queued: message end");
-        assert_eq!(queue_label(&idle, None, 0.0), "queued: global idle");
-        assert_eq!(queue_label(&after, None, 0.0), "queued: after Deploy");
-        let order: Vec<&str> = order_queued(&[&idle, &end, &after, &next])
-            .iter()
-            .map(|q| q.id.as_str())
-            .collect();
-        assert_eq!(order, ["a", "b", "d", "c"]);
     }
 
     #[test]

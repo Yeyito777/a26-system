@@ -14,7 +14,7 @@ use crate::text::Weight;
 
 use super::super::anim;
 use super::super::footer;
-use super::super::markdown::{self, MdBlock, Span, Style};
+use super::super::markdown::{self, MdBlock, Style};
 use super::super::model::{Action, Model, chat};
 use super::super::proto::Metadata;
 use super::super::theme::{
@@ -24,7 +24,7 @@ use super::super::theme::{
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets;
 use super::W;
-use super::markdown_layout::{Run, lay_md_block, line_width, wrap};
+use super::markdown_layout::{Run, lay_md_block, line_width, plain, wrap};
 use super::ops::{Laid, Op};
 
 /// The widest bubble: the row less the 24 pt leading gap.
@@ -165,13 +165,6 @@ pub(crate) fn push_runs(
         }
     }
     top + lines.len() as f32 * line_h
-}
-
-fn plain(text: &str) -> Vec<Span> {
-    vec![Span {
-        text: text.to_owned(),
-        style: Style::Plain,
-    }]
 }
 
 /// Plain text wrapped to `width` in `ty`, as lines of runs.
@@ -350,6 +343,26 @@ pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool
         laid.h += 17.0 + ty.line();
     }
     laid.into()
+}
+
+/// A mini spinner before a queued bubble's caption while the daemon has not
+/// confirmed it (D's `optimistic`).
+pub(crate) fn queued_spinner(piece: &mut Piece, caption: &str) {
+    let ty = T_META.weight(theme::T_ITALIC);
+    let w = widgets::measure(caption, ty);
+    let size = 28.0;
+    let cy = piece.laid.h - ty.line() / 2.0;
+    piece.marks.push(Mark {
+        y: cy - size / 2.0 - 2.0,
+        h: size + 4.0,
+        kind: MarkKind::Spinner {
+            cx: W - MARGIN - w - 17.0 - size / 2.0,
+            cy,
+            size,
+            color: theme::p().muted,
+            background: theme::p().app_background,
+        },
+    });
 }
 
 /// A notification's folded row (PAR-402): a chevron, its label and the
