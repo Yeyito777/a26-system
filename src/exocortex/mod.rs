@@ -33,6 +33,7 @@ pub mod screens;
 pub mod sheets;
 pub mod store;
 pub mod theme;
+pub mod toolcall;
 pub mod ui;
 pub mod view;
 pub mod viewer;
