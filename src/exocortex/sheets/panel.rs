@@ -303,11 +303,29 @@ pub fn wrap_ranges(text: &str, ty: Type, width: f32) -> Vec<(usize, usize)> {
     lines
 }
 
-const SECTION: f32 = 110.0;
-const SECTION_LINE: f32 = 108.0;
-const SUB: f32 = 90.0;
+const SECTION_BASE: f32 = 110.0;
+const SECTION_LINE_BASE: f32 = 108.0;
+const SUB_BASE: f32 = 90.0;
 const NAV_MIN: f32 = 144.0;
-const TASK: f32 = 133.0;
+const TASK_BASE: f32 = 133.0;
+
+// What holds text grows with the text size (`theme::grown`): a section's
+// title line (40), a sub-title's (40), a task's line (56).
+fn section_h() -> f32 {
+    theme::grown(SECTION_BASE, 40.0)
+}
+
+fn section_line() -> f32 {
+    theme::grown(SECTION_LINE_BASE, 40.0)
+}
+
+fn sub_h() -> f32 {
+    theme::grown(SUB_BASE, 40.0)
+}
+
+fn task_h() -> f32 {
+    theme::grown(TASK_BASE, 56.0)
+}
 const BUTTON_GAP: f32 = 22.0;
 const PAD_Y: f32 = 20.0;
 const RAIL_PAD: (f32, f32) = (28.0, 34.0);
@@ -360,8 +378,8 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
     let mut keys = Vec::new();
     let mut parts = Vec::new();
     let height = match &row {
-        Row::Section { .. } => SECTION,
-        Row::Sub(_) => SUB,
+        Row::Section { .. } => section_h(),
+        Row::Sub(_) => sub_h(),
         Row::Text { text, style, .. } => {
             lines = wrap(text, style.ty(), width);
             11.0 + lines.len() as f32 * style.ty().line() + 11.0
@@ -400,7 +418,7 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
                 .sum();
             2.0 * RAIL_PAD.0 + text_h
         }
-        Row::Task { .. } => TASK,
+        Row::Task { .. } => task_h(),
         Row::Pair {
             left, right, style, ..
         } => {
@@ -439,7 +457,7 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
                 + FIELD_PAD
         }
         Row::Action { .. } => theme::grown(TARGET, 60.0),
-        Row::GridHead(_) => theme::grown(SECTION, 40.0),
+        Row::GridHead(_) => section_h(),
         Row::Heat(weeks) => {
             let (cell, gap) = heat_cell(weeks.len(), width);
             HEAT_PAD.0 + 7.0 * cell + 6.0 * gap + HEAT_PAD.1
@@ -589,7 +607,10 @@ pub fn targets(laid: &Laid, width: f32) -> Vec<(RectF, Tap)> {
                     ..
                 } => {
                     let w = (widgets::measure(label, Style::Caption.ty()) + 56.0).max(TARGET);
-                    targets.push((RectF::new(width - w + 28.0, top, w, SECTION), tap.clone()));
+                    targets.push((
+                        RectF::new(width - w + 28.0, top, w, section_h()),
+                        tap.clone(),
+                    ));
                 }
                 Row::Nav { tap, .. } => {
                     targets.push((RectF::new(0.0, top, width, laid.height), tap.clone()));
@@ -607,11 +628,11 @@ pub fn targets(laid: &Laid, width: f32) -> Vec<(RectF, Tap)> {
                 Row::Task { tap, more, .. } => {
                     let more_w = if more.is_some() { TARGET } else { 0.0 };
                     if let Some(tap) = tap {
-                        targets.push((RectF::new(0.0, top, width - more_w, TASK), tap.clone()));
+                        targets.push((RectF::new(0.0, top, width - more_w, task_h()), tap.clone()));
                     }
                     if let Some(more) = more {
                         targets.push((
-                            RectF::new(width - more_w + 34.0, top, more_w, TASK),
+                            RectF::new(width - more_w + 34.0, top, more_w, task_h()),
                             more.clone(),
                         ));
                     }
@@ -720,7 +741,7 @@ pub fn draw_row(
     match &laid.row {
         Row::Section { title, button } => {
             let ty = theme::T_SECTION;
-            let baseline = ty.baseline(y + 24.0 + (SECTION_LINE - 24.0 - ty.line()) / 2.0);
+            let baseline = ty.baseline(y + 24.0 + (section_line() - 24.0 - ty.line()) / 2.0);
             widgets::text(canvas, title, x, baseline, ty, p.accent, 1.0);
             if let Some((label, tap)) = button {
                 let ty = Style::Caption.ty();
@@ -729,13 +750,13 @@ pub fn draw_row(
                     canvas,
                     label,
                     right,
-                    ty.baseline(y + 24.0 + (SECTION_LINE - 24.0 - ty.line()) / 2.0),
+                    ty.baseline(y + 24.0 + (section_line() - 24.0 - ty.line()) / 2.0),
                     ty,
                     p.secondary_accent,
                     alpha,
                 );
             }
-            widgets::hairline(canvas, x, right, y + SECTION_LINE, c.rule_sheet_row);
+            widgets::hairline(canvas, x, right, y + section_line(), c.rule_sheet_row);
         }
         Row::Sub(text) => {
             let ty = theme::T_EYEBROW;
@@ -879,13 +900,18 @@ pub fn draw_row(
             if tap.as_ref().is_some_and(down) {
                 widgets::fill(
                     canvas,
-                    RectF::new(0.0, y, W - if more.is_some() { TARGET } else { 0.0 }, TASK),
+                    RectF::new(
+                        0.0,
+                        y,
+                        W - if more.is_some() { TARGET } else { 0.0 },
+                        task_h(),
+                    ),
                     p.selection_background,
                 );
             }
             let ty = Style::Caption.ty();
             let bold = Style::CaptionBold.ty();
-            let baseline = ty.baseline(y + (TASK - ty.line()) / 2.0);
+            let baseline = ty.baseline(y + (task_h() - ty.line()) / 2.0);
             let label_w = widgets::text(canvas, label, x, baseline, bold, *color, 1.0);
             let time_right = right - if more.is_some() { TARGET - 34.0 } else { 0.0 };
             let time_w = widgets::text_right(
@@ -902,9 +928,9 @@ pub fn draw_row(
             widgets::text(canvas, &title, title_x, baseline, ty, p.text, 1.0);
             if let Some(more) = more {
                 let alpha = if down(more) { 0.5 } else { 1.0 };
-                widgets::ellipsis(canvas, right - 30.0, y + TASK / 2.0, p.muted, alpha);
+                widgets::ellipsis(canvas, right - 30.0, y + task_h() / 2.0, p.muted, alpha);
             }
-            widgets::hairline(canvas, x, right, y + TASK - HAIRLINE, row_rule);
+            widgets::hairline(canvas, x, right, y + task_h() - HAIRLINE, row_rule);
         }
         Row::Pair {
             left,
