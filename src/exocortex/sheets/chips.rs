@@ -111,7 +111,6 @@ fn chips(model: &Model) -> Vec<Chip> {
     else {
         return chips;
     };
-    let p = theme::p();
     let provider = model.resolve().provider;
     if let Some((five, week)) = usage::compact(model.usage_of(&provider)) {
         let low = five.unwrap_or(100.0).min(week.unwrap_or(100.0));
@@ -147,34 +146,9 @@ fn chips(model: &Model) -> Vec<Chip> {
             status: widgets::fit(&status, T_CAPTION, 305.0),
         });
     }
-    let items = model.activity_items(conv, Instant::now());
-    if !items.is_empty() {
-        let mut glyphs: Vec<(&'static str, Rgb)> = Vec::new();
-        let has = |kind: &str| items.iter().any(|i| i.kind == kind);
-        if let Some(goal) = items.iter().find(|i| i.kind == "goal") {
-            let active = goal.label.starts_with('◆');
-            glyphs.push((if active { "◆" } else { "◇" }, goal.color));
-        }
-        if let Some(item) = items
-            .iter()
-            .find(|i| matches!(i.kind, "subagent" | "agent"))
-        {
-            glyphs.push(("◆", item.color));
-        }
-        if let Some(item) = items.iter().find(|i| i.kind == "chrono") {
-            glyphs.push(("◷", item.color));
-        }
-        if has("bash") {
-            let item = items
-                .iter()
-                .find(|i| i.kind == "bash")
-                .map_or(p.tool, |i| i.color);
-            glyphs.push(("$", item));
-        }
-        chips.push(Chip::Tasks {
-            glyphs,
-            count: items.len(),
-        });
+    let (glyphs, count) = model.activity_glance(conv);
+    if count > 0 {
+        chips.push(Chip::Tasks { glyphs, count });
     }
     chips
 }
@@ -520,6 +494,41 @@ mod tests {
     }
 
     #[test]
+    fn the_tasks_chip_agrees_with_the_activity_panel() {
+        let mut model = Model::new();
+        model.on_connected();
+        let now = Instant::now();
+        model.apply(
+            parse_event(r#"{"type":"conversation_updated","summary":{"id":"c","title":"T","goal":{"objective":"o","status":"paused","turns":1},"tasks":[{"id":"s","kind":"subagent","title":"a","startedAt":1},{"id":"w","kind":"chrono","chronoMode":"wait","title":"w","startedAt":1},{"id":"k","kind":"chrono","chronoMode":"schedule","title":"k","startedAt":1},{"id":"b","kind":"background","toolName":"Agent","title":"b","startedAt":1},{"id":"x","kind":"background","toolName":"exec_command","title":"x","startedAt":1}],"integrations":[{"id":"i","toolName":"gmail"}]}}"#),
+            now,
+        );
+        let items = model.activity_items("c", now);
+        let mut expected: Vec<(&str, Rgb)> = Vec::new();
+        let first = |kinds: &[&str]| items.iter().find(|i| kinds.contains(&i.kind));
+        if let Some(goal) = first(&["goal"]) {
+            expected.push((
+                if goal.label.starts_with('◆') {
+                    "◆"
+                } else {
+                    "◇"
+                },
+                goal.color,
+            ));
+        }
+        for (kinds, glyph) in [
+            (&["subagent", "agent"][..], "◆"),
+            (&["chrono"], "◷"),
+            (&["bash"], "$"),
+        ] {
+            if let Some(item) = first(kinds) {
+                expected.push((glyph, item.color));
+            }
+        }
+        assert_eq!(model.activity_glance("c"), (expected, items.len()));
+        assert_eq!(items.len(), 6, "the wait is not listed");
+    }
+
+    #[test]
     fn a_scroll_under_the_chips_draws_what_a_full_frame_does() {
         use crate::exocortex::view::{ViewState, frame};
         use crate::gfx::Canvas;
@@ -565,6 +574,7 @@ mod tests {
         for to in steps {
             view.chat_scroll.offset = to;
             let new = frame::record(&mut model, &mut view, None, SIZE, now);
+            let mut shadow = canvas.pixels.clone();
             let damage = frame::update(&mut canvas, &mut model, &mut view, None, &old, &new, now)
                 .expect("incremental");
             let whole = full(&mut model, &mut view);
@@ -572,6 +582,18 @@ mod tests {
                 whole.pixels == canvas.pixels,
                 "differs from a full frame at {to}"
             );
+            // The window (the last frame, moved as the damage says) differs
+            // only where the damage says.
+            let width = SIZE.0;
+            if let Some((y0, y1, dy)) = damage.moved {
+                let rows = y1 - y0 - dy.abs();
+                let (src, dst) = if dy > 0 { (y0, y0 + dy) } else { (y0 - dy, y0) };
+                shadow.copy_within(
+                    (src * width) as usize..((src + rows) * width) as usize,
+                    (dst * width) as usize,
+                );
+            }
+            frame::assert_unchanged_outside(&shadow, &canvas.pixels, width as usize, &damage);
             chips_drawn |= damage
                 .areas
                 .iter()
@@ -627,8 +649,10 @@ mod tests {
                 std::hint::black_box(super::chips(&model));
             }
             println!("chips(): {:.1} µs", t.elapsed().as_secs_f64() * 1e6 / 400.0);
-            let mut overlay = ChatChips::default();
-            overlay.shown = ChatChips::place(super::chips(&model));
+            let overlay = ChatChips {
+                shown: ChatChips::place(super::chips(&model)),
+                ..ChatChips::default()
+            };
             let t = Instant::now();
             for _ in 0..400 {
                 std::hint::black_box(overlay.look());

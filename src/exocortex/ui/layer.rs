@@ -31,6 +31,8 @@ pub struct Sprite {
     keep: Vec<u32>,
     /// Each row's runs of one kind: `x0, x1` (relative), kind.
     runs: Vec<Vec<(i32, i32, Kind)>>,
+    /// A hash of each row (two equal rows look the same over the same page).
+    rows: Vec<u64>,
 }
 
 impl Sprite {
@@ -68,11 +70,23 @@ impl Sprite {
             }
             runs.push(row);
         }
+        let rows = (0..h as usize)
+            .map(|y| {
+                let at = y * w as usize..(y + 1) * w as usize;
+                black.pixels[at.clone()]
+                    .iter()
+                    .chain(&keep[at])
+                    .fold(0xcbf2_9ce4_8422_2325_u64, |hash, v| {
+                        (hash ^ u64::from(*v)).wrapping_mul(0x0100_0000_01b3)
+                    })
+            })
+            .collect();
         Self {
             rect,
             base: black.pixels,
             keep,
             runs,
+            rows,
         }
     }
 
@@ -87,8 +101,12 @@ impl Sprite {
                 count[kind as usize] += b - a;
             }
         }
+        let faint: Vec<usize> = [240, 248, 250, 252, 254]
+            .iter()
+            .map(|t| self.keep.iter().filter(|k| **k >= *t && **k < 256).count())
+            .collect();
         format!(
-            "{:?}: clear {}, solid {}, blend {}, {runs} runs",
+            "{:?}: clear {}, solid {}, blend {}, {runs} runs; keep >= 240/248/250/252/254: {faint:?}",
             self.rect, count[0], count[1], count[2]
         )
     }
@@ -129,8 +147,8 @@ fn blend(out: &mut [u32], under: &[u32], base: &[u32], keep: &[u32]) {
     let (under, base, keep) = (&under[..n], &base[..n], &keep[..n]);
     for i in 0..n {
         let page = under[i];
-        let rb = ((page & 0x00ff_00ff) * keep[i] >> 8) & 0x00ff_00ff;
-        let g = ((page & 0x0000_ff00) * keep[i] >> 8) & 0x0000_ff00;
+        let rb = (((page & 0x00ff_00ff) * keep[i]) >> 8) & 0x00ff_00ff;
+        let g = (((page & 0x0000_ff00) * keep[i]) >> 8) & 0x0000_ff00;
         out[i] = base[i] + (rb | g);
     }
 }
@@ -202,7 +220,6 @@ impl Layer {
             return;
         };
         painted.complete |= area == rect;
-        let w = (rect.2 - rect.0) as usize;
         let width = canvas.width as usize;
         for y in area.1..area.3 {
             let at = painted.row(y) + (area.0 - rect.0) as usize;
@@ -263,6 +280,12 @@ impl Layer {
         let w = (x1 - x0) as usize;
         let width = canvas.width as usize;
         let span = |y: i32| y as usize * width + x0 as usize;
+        // Rows of the canvas (and the window) to send again.
+        let mut changed: Vec<(i32, i32)> = Vec::new();
+        let mut mark = |y: i32| match changed.last_mut() {
+            Some(last) if last.1 == y => last.1 = y + 1,
+            _ => changed.push((y, y + 1)),
+        };
         for y in carried.map_or(0..0, |(c0, c1)| c0..c1) {
             if (y0..y1).contains(&y) || drawn(y) {
                 continue;
@@ -271,6 +294,7 @@ impl Layer {
             let from = painted.row(y - dy);
             let at = span(y);
             canvas.pixels[at..at + w].copy_from_slice(&painted.under[from..from + w]);
+            mark(y);
         }
         // What was under the layer moved with the page: row y now has what
         // row y - dy had. Rows moved in from outside it, and rows drawn
@@ -278,30 +302,38 @@ impl Layer {
         let h = (y1 - y0) as i64;
         painted.origin = (painted.origin as i64 - dy as i64).rem_euclid(h) as usize;
         for y in y0..y1 {
-            if drawn(y) || (dy != 0 && !(y0..y1).contains(&(y - dy))) {
-                let into = painted.row(y);
-                let at = span(y);
-                painted.under[into..into + w].copy_from_slice(&canvas.pixels[at..at + w]);
-            }
-        }
-        for y in y0..y1 {
+            let source = y - dy;
+            let fresh = drawn(y) || (dy != 0 && !(y0..y1).contains(&source));
             let at = span(y);
             let from = painted.row(y);
+            if fresh {
+                painted.under[from..from + w].copy_from_slice(&canvas.pixels[at..at + w]);
+            }
+            // The row the move brought here was this one of the layer over
+            // this page: it is right, here and in the window, as it is.
+            let r = (y - y0) as usize;
+            if !fresh && (dy == 0 || sprite.rows[r] == sprite.rows[(source - y0) as usize]) {
+                continue;
+            }
             sprite.composite(
-                (y - sprite.rect.1) as usize,
+                r,
                 0,
                 w as i32,
                 &painted.under[from..from + w],
                 &mut canvas.pixels[at..at + w],
             );
+            mark(y);
         }
         #[cfg(test)]
         REPAINTS.with(|n| n.set(n.get() + 1));
-        // One area when the carried rows touch its own.
-        Some(match carried {
-            Some((c0, c1)) if c0 <= y1 && c1 >= y0 => vec![reach],
-            Some((c0, c1)) => vec![painted.rect, (x0, c0, x1, c1)],
-            None => vec![painted.rect],
-        })
+        changed.sort_unstable();
+        let mut merged: Vec<(i32, i32)> = Vec::new();
+        for (a, b) in changed {
+            match merged.last_mut() {
+                Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        Some(merged.into_iter().map(|(a, b)| (x0, a, x1, b)).collect())
     }
 }

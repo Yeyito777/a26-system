@@ -223,6 +223,55 @@ impl Model {
         items
     }
 
+    /// What the chat's tasks chip shows, without building the rows (it
+    /// asks every frame): the kinds of work, in `activity_items`' order and
+    /// colours (the goal ◆ or ◇, subagents ◆, Chrono ◷, commands $), and how
+    /// many rows the panel has.
+    pub fn activity_glance(&self, conv: &str) -> (Vec<(&'static str, u32)>, usize) {
+        let mut glyphs = Vec::new();
+        let mut count = 0;
+        let summary = self.sidebar.conversations.get(conv);
+        let goal = match self.ops.goal.goals.get(conv) {
+            Some(goal) => goal.as_ref(),
+            None => summary.and_then(|s| s.goal.as_ref()),
+        };
+        if let Some(goal) = goal.filter(|g| g.status != "complete") {
+            count += 1;
+            let glyph = if goal.status == "active" {
+                "◆"
+            } else {
+                "◇"
+            };
+            glyphs.push((glyph, self.tool_color("goal", GOAL)));
+        }
+        let (mut agents, mut chrono, mut bash) = (false, false, false);
+        for task in summary
+            .map_or(&[][..], |s| &s.tasks[..])
+            .iter()
+            .filter(|t| shown(t))
+        {
+            count += 1;
+            if task.kind == "subagent" || agent(task) {
+                agents = true;
+            } else if task.kind == "chrono" {
+                chrono = true;
+            } else {
+                bash = true;
+            }
+        }
+        count += summary.map_or(0, |s| s.integrations.len());
+        if agents {
+            glyphs.push(("◆", self.tool_color("exo", EXO)));
+        }
+        if chrono {
+            glyphs.push(("◷", self.tool_color("chrono", CHRONO)));
+        }
+        if bash {
+            glyphs.push(("$", self.tool_color("bash", BASH)));
+        }
+        (glyphs, count)
+    }
+
     /// How many rows the panel has (the chat menu's detail).
     pub fn activity_count(&self, conv: &str) -> usize {
         self.activity_items(conv, Instant::now()).len()
