@@ -124,8 +124,10 @@ pub struct TranscriptView {
     /// The jump button: shown or not, and the fade since.
     jump: Option<(bool, Tween)>,
     /// The scroll offset the last frame showed (the button waits for the
-    /// transcript to stop moving).
+    /// transcript to stop moving), and whether it had moved then and the
+    /// button would show once it is still.
     last_offset: Option<f32>,
+    held: bool,
     /// The transcript's rows at the last frame (for `animate`).
     bounds: (f32, f32),
 }
@@ -1090,6 +1092,8 @@ const FOLLOW_SLACK: f32 = 33.0;
 /// The jump button shows beyond 120 pt from the tail (PAR-169).
 const JUMP_THRESHOLD: f32 = 332.0;
 const JUMP_FADE: Duration = Duration::from_millis(180);
+/// How long the transcript must be still before the button comes back.
+const JUMP_SETTLE: Duration = Duration::from_millis(120);
 
 impl ViewState {
     pub fn chat_max(&mut self, model: &Model, height: f32) -> f32 {
@@ -1289,7 +1293,9 @@ pub(crate) fn frame(
         .is_some_and(|last| last != offset)
         || view.chat_scroll.dragging();
     view.transcript.last_offset = Some(offset);
-    let wanted = max - offset > JUMP_THRESHOLD && !loading && !moving;
+    let far = max - offset > JUMP_THRESHOLD && !loading;
+    view.transcript.held = far && moving;
+    let wanted = far && !moving;
     let shown = view.transcript.jump.as_ref().is_some_and(|(on, _)| *on);
     if wanted && !shown {
         let tween = Tween::new(now, JUMP_FADE, 0.0, 1.0);
@@ -1418,6 +1424,10 @@ pub fn animate(model: &Model, view: &ViewState, now: Instant, animator: &mut Ani
     }
     if let Some((_, tween)) = &view.transcript.jump {
         animator.follow(tween, now);
+    }
+    // Held back while the transcript moved: a frame once it may be still.
+    if view.transcript.held {
+        animator.request(now + JUMP_SETTLE);
     }
     let (top, bottom) = view.transcript.bounds;
     let offset = view.chat_scroll.value(now);
@@ -2116,6 +2126,10 @@ mod tests {
             });
             assert!(rows(&damage) <= step.abs() as i32 + 2, "{damage:?}");
         }
+        // Moving, it asks for a frame to look again once still.
+        let mut animator = Animator::default();
+        animate(&model, &view, t, &mut animator);
+        assert_eq!(animator.take(), Some(t + JUMP_SETTLE));
         // Still again: it fades back in, in its own columns.
         let damage = update(&mut model, &mut view, (t, t + JUMP_FADE), |_, _| {});
         assert!(damage.moved.is_none());
