@@ -8,7 +8,7 @@ use std::time::Instant;
 use serde_json::Value;
 
 use super::super::model::{Action, Model, UiAct, ops};
-use super::super::proto::{self, Entry, Event};
+use super::super::proto::{self, Event};
 use super::super::requests::{self, Owner};
 use super::super::theme;
 use super::super::ui::menu::Confirm;
@@ -45,7 +45,7 @@ const PREVIEW_LINES: usize = 14;
 
 impl Model {
     /// The conversation's own instructions: what the daemon last loaded,
-    /// else the window's instructions entry.
+    /// else the window's (`Chat::own_instructions`).
     pub fn conversation_instructions(&self, conv: &str) -> Option<String> {
         if let Some((Some(id), loaded)) = &self.ops.system.loaded
             && id == conv
@@ -55,10 +55,7 @@ impl Model {
         if self.chat.id.as_deref() != Some(conv) {
             return None;
         }
-        self.chat.entries.iter().find_map(|entry| match entry {
-            Entry::SystemInstructions { text } if !text.is_empty() => Some(text.clone()),
-            _ => None,
-        })
+        self.chat.own_instructions().map(str::to_owned)
     }
 
     /// The panel opens: ask for the effective prompt and the instructions.

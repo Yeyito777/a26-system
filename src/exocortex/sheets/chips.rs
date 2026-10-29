@@ -20,7 +20,7 @@ use crate::text::Weight;
 use super::super::anim::Animator;
 use super::super::gesture::Gesture;
 use super::super::model::{Action, Model, Page, ops};
-use super::super::theme::{self, HAIRLINE, T_CAPTION, T_EYEBROW, T_META, TOP_BAR, W};
+use super::super::theme::{self, T_CAPTION, T_EYEBROW, T_META, W};
 use super::super::ui::layer::{Layer, Sprite};
 use super::super::ui::overlay::{Body, Cx, Overlay, Response};
 use super::super::ui::widgets;
@@ -174,7 +174,7 @@ impl ChatChips {
     /// Where the chips' faces are, right-aligned under the header.
     fn place(chips: Vec<Chip>) -> Vec<(RectF, Chip)> {
         let mut right = W - 11.0;
-        let top = TOP_BAR + HAIRLINE + 6.0 + (TARGET_H - FACE_H) / 2.0;
+        let top = theme::below_bar() + 6.0 + (TARGET_H - FACE_H) / 2.0;
         let mut out: Vec<(RectF, Chip)> = chips
             .into_iter()
             .rev()

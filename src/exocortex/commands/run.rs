@@ -223,7 +223,8 @@ impl Model {
             return;
         }
         if self.chat.id.is_some() && self.page == Page::Chat {
-            self.chat.push(Entry::System {
+            // After a streaming reply, not inside it (C2, PAR-161).
+            self.chat.push_notice(Entry::System {
                 text: text.to_owned(),
                 color: match level {
                     Level::Info => None,
@@ -232,7 +233,6 @@ impl Model {
                 },
                 metadata: None,
             });
-            self.chat.touch();
         } else if level == Level::Info {
             self.ui.toast(text);
         } else {
@@ -1134,10 +1134,7 @@ impl Model {
     }
 
     fn instructions_command(&mut self, text: &str) -> Outcome {
-        let current = self.chat.entries.iter().find_map(|e| match e {
-            Entry::SystemInstructions { text } => Some(text.trim().to_owned()),
-            _ => None,
-        });
+        let current = self.chat.own_instructions().map(|t| t.trim().to_owned());
         if text.is_empty() {
             let shown = match current.filter(|t| !t.is_empty()) {
                 Some(body) => format!("Current instructions:\n{body}"),
@@ -1428,6 +1425,20 @@ mod tests {
         assert_eq!(sent[0]["type"], "set_goal");
         assert_eq!(sent[0]["maxTimeMs"], 7_200_000);
         assert_eq!(sent[0]["objective"], "ship it");
+        // /instructions alone shows the conversation's own (the last of the
+        // window's; the folder's context alone is not its own).
+        model.chat.instructions = vec!["# Context from AGENTS.md:\nfolder".into()];
+        send(&mut model, "/instructions");
+        assert!(matches!(
+            model.chat.entries.last(),
+            Some(Entry::System { text, .. }) if text == "No system instructions set for this conversation."
+        ));
+        model.chat.instructions.push("Answer in French.".into());
+        send(&mut model, "/instructions");
+        assert!(matches!(
+            model.chat.entries.last(),
+            Some(Entry::System { text, .. }) if text == "Current instructions:\nAnswer in French."
+        ));
         let sent = send(&mut model, "/instructions be brief");
         assert_eq!(sent[0]["type"], "set_system_instructions");
         assert_eq!(sent[0]["text"], "be brief");

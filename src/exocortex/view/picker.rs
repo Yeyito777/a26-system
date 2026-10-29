@@ -25,17 +25,29 @@ use super::super::theme::{
 use super::super::ui::icons::{self, Icon, Style};
 use super::super::ui::overlay::{Body, Cx, Overlay, Response};
 use super::super::ui::widgets;
-use super::CHAT_TOP;
+use super::chat_top;
 use super::composer;
 
 const IN_FOR: Duration = Duration::from_millis(160);
 const OUT_FOR: Duration = Duration::from_millis(120);
-/// The head (tabs or title, ✕) and a row.
+/// The head (tabs or title, ✕).
 const HEAD: f32 = TARGET;
-const ROW: f32 = 155.0;
-/// At most this tall, and not shown when there is less room than this.
-const MAX_H: f32 = 664.0;
+/// A row (`fake-16`: 166 px): a name over its description, centred; its
+/// text part grows with the text size.
+const ROW: f32 = 166.0;
+const ROW_TEXT_GAP: f32 = 6.0;
+/// Not shown when there is less room than this.
 const MIN_H: f32 = 244.0;
+
+fn row() -> f32 {
+    // T_ROW's and T_CAPTION's lines at the default size, and the gap.
+    theme::grown(ROW, 56.0 + ROW_TEXT_GAP + 48.0)
+}
+
+/// At most the head and three and a half rows.
+fn max_h() -> f32 {
+    (HEAD + 3.5 * row()).round()
+}
 /// Gap above the island (or its error label).
 const GAP: f32 = 17.0;
 const SHADOW: f32 = 61.0;
@@ -113,7 +125,7 @@ impl Picker {
     }
 
     fn content_h(&self) -> f32 {
-        self.rows().len() as f32 * ROW + self.hint_h()
+        self.rows().len() as f32 * row() + self.hint_h()
     }
 
     fn max_offset(&self) -> f32 {
@@ -135,7 +147,7 @@ impl Picker {
             }
             return None;
         }
-        let index = ((y - r.y - HEAD + self.offset) / ROW).floor();
+        let index = ((y - r.y - HEAD + self.offset) / row()).floor();
         (index >= 0.0 && (index as usize) < self.rows().len())
             .then_some(Target::Row(index as usize))
     }
@@ -157,9 +169,14 @@ impl Picker {
 
     fn tab_width(&self, macros: bool) -> f32 {
         let (label, count) = self.tab_label(macros);
-        let ty = T_CAPTION.weight(crate::text::Weight::MonoSemiBold);
-        widgets::measure(&label, ty) + S1 + widgets::measure(&count, T_CAPTION)
+        widgets::measure(&label, tab_type()) + S1 + widgets::measure(&count, T_CAPTION)
     }
+}
+
+/// The head's labels: the tabs, or what is completed (`fake-16`, `fake-17`:
+/// Bold).
+fn tab_type() -> crate::exocortex::theme::Type {
+    T_CAPTION.weight(crate::text::Weight::MonoBold)
 }
 
 impl Overlay for Picker {
@@ -216,9 +233,9 @@ impl Overlay for Picker {
         }
         let g = composer::geometry(model, cx.height, cx.keyboard);
         let bottom = g.band_top() + 17.0 - GAP;
-        let room = bottom - CHAT_TOP - S3;
-        let wanted = HEAD + self.rows().len().min(3) as f32 * ROW + self.hint_h();
-        let h = wanted.min(room).min(MAX_H).round();
+        let room = bottom - chat_top() - S3;
+        let wanted = HEAD + self.rows().len().min(3) as f32 * row() + self.hint_h();
+        let h = wanted.min(room).min(max_h()).round();
         if h < MIN_H.min(wanted) {
             self.rect = RectF::new(0.0, 0.0, 0.0, 0.0);
             return;
@@ -282,7 +299,7 @@ impl Overlay for Picker {
         );
         // The head: tabs, or what is being completed.
         let baseline = T_CAPTION.baseline(r.y + (HEAD - T_CAPTION.line()) / 2.0);
-        let semi = T_CAPTION.weight(crate::text::Weight::MonoSemiBold);
+        let bold = tab_type();
         let dim = |percent| theme::mix(p.text, percent, p.surface_background);
         if self.tabs() {
             let mut x = r.x + PAD;
@@ -294,7 +311,7 @@ impl Overlay for Picker {
                     &label,
                     x,
                     baseline,
-                    semi,
+                    bold,
                     if on { p.accent } else { dim(50) },
                     alpha,
                 );
@@ -311,7 +328,7 @@ impl Overlay for Picker {
             }
         } else {
             let mut x = r.x + PAD;
-            x += widgets::text(canvas, &state.title, x, baseline, semi, dim(70), alpha) + S1;
+            x += widgets::text(canvas, &state.title, x, baseline, bold, dim(70), alpha) + S1;
             let rows = self.rows();
             if !rows.is_empty() {
                 x += widgets::text(
@@ -362,9 +379,12 @@ impl Overlay for Picker {
         let row_rule = theme::mix(p.border, 28, p.surface_background);
         widgets::clipped(canvas, list, |canvas| {
             let top = r.y + HEAD - self.offset;
+            let row = row();
+            // The name and its description, centred in the row.
+            let pad = ((row - T_ROW.line() - ROW_TEXT_GAP - T_CAPTION.line()) / 2.0).round();
             for (index, item) in self.rows().iter().enumerate() {
-                let y = top + index as f32 * ROW;
-                if y + ROW < list.y || y > list.y + list.h {
+                let y = top + index as f32 * row;
+                if y + row < list.y || y > list.y + list.h {
                     continue;
                 }
                 if self.pressed == Some(Target::Row(index)) {
@@ -372,7 +392,7 @@ impl Overlay for Picker {
                         r.x as i32,
                         y as i32,
                         r.w as i32,
-                        ROW as i32,
+                        row as i32,
                         p.selection_background,
                         alpha,
                     );
@@ -384,7 +404,7 @@ impl Overlay for Picker {
                     canvas,
                     &name,
                     r.x + PAD,
-                    T_ROW.baseline(y + 22.0),
+                    T_ROW.baseline(y + pad),
                     T_ROW,
                     p.accent,
                     alpha,
@@ -395,7 +415,7 @@ impl Overlay for Picker {
                         canvas,
                         &desc,
                         r.x + PAD,
-                        T_CAPTION.baseline(y + 22.0 + T_ROW.line() + 6.0),
+                        T_CAPTION.baseline(y + pad + T_ROW.line() + ROW_TEXT_GAP),
                         T_CAPTION,
                         theme::c().text_dim,
                         alpha,
@@ -405,14 +425,14 @@ impl Overlay for Picker {
                     canvas,
                     "↖",
                     r.x + r.w - PAD,
-                    T_ROW.baseline(y + (ROW - T_ROW.line()) / 2.0),
+                    T_ROW.baseline(y + (row - T_ROW.line()) / 2.0),
                     T_CAPTION,
                     dim(35),
                     alpha,
                 );
                 canvas.fill_rect(
                     r.x as i32,
-                    (y + ROW - HAIRLINE) as i32,
+                    (y + row - HAIRLINE) as i32,
                     r.w as i32,
                     HAIRLINE as i32,
                     row_rule,
@@ -420,7 +440,7 @@ impl Overlay for Picker {
                 );
             }
             if let Some((_, warning)) = &state.hint {
-                let mut y = top + self.rows().len() as f32 * ROW + S2;
+                let mut y = top + self.rows().len() as f32 * row + S2;
                 for line in &self.hint {
                     widgets::text(
                         canvas,

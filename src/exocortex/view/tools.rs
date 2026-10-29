@@ -1,8 +1,10 @@
-//! Tool call rows (WP-C2, roadmap §3.6.10, PAR-123–125, 146): a box in
-//! the tool's colour with its rail, the call's label and summary (at most
-//! three lines folded), ERR or a spinner, and opened, its output with Read
-//! full output and Copy; a run of calls folds into one row that opens to
-//! them.
+//! Tool call rows (WP-C2, roadmap §3.6.10, PAR-123–126, 146, 147): a box
+//! in the tool's colour with its rail; the call's lines as the TUI shows
+//! them (`toolcall.rs`: a bash command per segment, each in its tool's
+//! label and colour), folded to three rows for a shell call and to eight
+//! of a call longer than twelve; ERR or a spinner; a subagent's
+//! conversation to open; opened, its output with Read full output and
+//! Copy.
 
 use std::collections::HashMap;
 
@@ -11,27 +13,26 @@ use crate::text::Weight;
 
 use super::super::markdown::{Span, Style};
 use super::super::model::chat::{Chat, OUTPUT_MISSING};
-use super::super::model::{Action, chat};
-use super::super::proto::{Block, Presentation, ToolStyle};
-use super::super::theme::{
-    self, HAIRLINE, RAIL, T_CAPTION, T_EYEBROW, T_SMALL, TRANSCRIPT_PAD as MARGIN, mix,
-};
+use super::super::model::{Action, Nav, chat};
+use super::super::proto::{Block, ToolStyle};
+use super::super::theme::{self, HAIRLINE, RAIL, T_CAPTION, T_SMALL, TARGET, mix};
+use super::super::toolcall::{self, COLLAPSE_AFTER_ROWS, COLLAPSED_ROWS, CallDisplay};
 use super::super::ui::icons::Icon;
 use super::W;
 use super::blocks::{Mark, MarkKind, Piece, push_runs, text_op};
-use super::markdown_layout::wrap;
+use super::markdown_layout::{Run, wrap};
 use super::ops::Op;
 use super::transcript::{Context, ToolRef};
 
-/// Runs of this many tool calls fold into one row.
-pub(crate) const GROUP_MIN: usize = 3;
+use super::super::theme::TRANSCRIPT_PAD as MARGIN;
+
 /// A tool row's head at least (44 pt).
 pub(crate) const TOOL_ROW: f32 = 122.0;
 /// Head padding: top, right, bottom, left.
 const PAD: (f32, f32, f32, f32) = theme::TOOL_PAD;
 /// The right column (ERR, the spinner, the chevron).
 const BADGES: f32 = 77.0;
-/// Summary rows shown folded.
+/// A shell call's rows shown folded.
 const FOLDED_ROWS: usize = 3;
 /// Rows shown at most opened (a whole script).
 const OPEN_ROWS: usize = 400;
@@ -70,38 +71,6 @@ pub(crate) fn tool_label(
         return (server, p.tool);
     }
     (name.to_owned(), p.tool)
-}
-
-/// What a call shows after its label: `presentation.detail`, its summary,
-/// else the input's most telling field.
-pub(crate) fn tool_detail(
-    summary: &str,
-    input: &serde_json::Value,
-    presentation: Option<&Presentation>,
-) -> String {
-    if let Some(detail) = presentation.and_then(|p| p.detail.as_ref())
-        && !detail.trim().is_empty()
-    {
-        return detail.trim_end().to_owned();
-    }
-    if !summary.trim().is_empty() {
-        return summary.trim_end().to_owned();
-    }
-    for key in [
-        "command",
-        "file_path",
-        "path",
-        "pattern",
-        "url",
-        "query",
-        "description",
-        "prompt",
-    ] {
-        if let Some(value) = input.get(key).and_then(serde_json::Value::as_str) {
-            return value.trim_end().to_owned();
-        }
-    }
-    String::new()
 }
 
 /// A run of tool calls (and their results) starting at `from`.
@@ -179,57 +148,111 @@ pub(crate) fn output_state<'a>(
     }
 }
 
-/// The call's lines: label (Bold) and detail, wrapped to `width`; folded,
-/// at most three rows, and how many more there are.
-fn call_lines(
-    label: &str,
-    detail: &str,
-    width: f32,
-    open: bool,
-) -> (Vec<Vec<super::markdown_layout::Run>>, usize) {
+/// A call's rows: its logical lines wrapped to `width`, each its label
+/// (Bold) then its text, in its colour; at most `keep` of them, and how
+/// many rows it has in all. Only what can show is wrapped (a summary may be
+/// a whole script): the rest is counted from its lengths.
+fn call_rows(display: &CallDisplay, width: f32, keep: usize) -> (Vec<(Vec<Run>, Rgb)>, usize) {
+    let p = theme::p();
     let size = T_CAPTION.px();
     let advance = crate::text::measure("M", Weight::Mono, size).max(1.0);
     let columns = ((width / advance).floor() as usize).max(8);
-    let keep = if open { OPEN_ROWS } else { FOLDED_ROWS };
-    // Wrap only what can show (a summary may be a whole script); count the
-    // rest's rows from its lengths.
     let budget = columns * (keep + 1);
-    let mut shown = String::new();
-    let mut rest_rows = 0;
-    for (index, line) in detail.split('\n').enumerate() {
-        let chars = line.chars().count()
-            + if index == 0 {
-                label.chars().count() + 1
-            } else {
-                0
-            };
-        if index <= keep {
-            if index > 0 {
-                shown.push('\n');
-            }
-            shown.extend(line.chars().take(budget));
-            rest_rows += chars.saturating_sub(budget).div_ceil(columns);
+    let mut rows: Vec<(Vec<Run>, Rgb)> = Vec::new();
+    let mut total = 0;
+    for line in &display.lines {
+        let color = line
+            .style
+            .color
+            .as_deref()
+            .and_then(theme::parse_hex)
+            .unwrap_or(p.tool);
+        let (label, rest) = if line.has_label {
+            let label = line.style.label.as_str();
+            (label, line.text.get(label.len()..).unwrap_or_default())
         } else {
-            rest_rows += chars.div_ceil(columns).max(1);
+            ("", line.text.as_str())
+        };
+        for (index, hard) in rest.split('\n').enumerate() {
+            let label = if index == 0 { label } else { "" };
+            if total > keep {
+                total += (label.chars().count() + hard.chars().count())
+                    .div_ceil(columns)
+                    .max(1);
+                continue;
+            }
+            let shown: String = hard.chars().take(budget).collect();
+            let cut = hard.chars().count().saturating_sub(budget);
+            let mut spans = Vec::new();
+            if !label.is_empty() {
+                spans.push(Span {
+                    text: label.to_owned(),
+                    style: Style::Bold,
+                    link: None,
+                });
+            }
+            spans.push(Span {
+                text: if shown.is_empty() { " ".into() } else { shown },
+                style: Style::Plain,
+                link: None,
+            });
+            let wrapped = wrap(&spans, width, size);
+            total += wrapped.len() + cut.div_ceil(columns);
+            rows.extend(wrapped.into_iter().map(|row| (row, color)));
         }
     }
-    let mut spans = vec![Span {
-        text: label.to_owned(),
-        style: Style::Bold,
-        link: None,
-    }];
-    if !shown.is_empty() {
-        spans.push(Span {
-            text: format!(" {shown}"),
-            style: Style::Plain,
-            link: None,
-        });
+    rows.truncate(keep);
+    (rows, total.max(1))
+}
+
+/// How many of a call's rows show: folded, three of a shell call, all of
+/// a call of twelve or fewer, else eight (PAR-126); opened, all of them.
+fn rows_shown(display: &CallDisplay, total: usize, open: bool) -> usize {
+    if open {
+        OPEN_ROWS
+    } else if display.shell {
+        FOLDED_ROWS
+    } else if total <= COLLAPSE_AFTER_ROWS {
+        COLLAPSE_AFTER_ROWS
+    } else {
+        COLLAPSED_ROWS
     }
-    let mut lines = wrap(&spans, width, size);
-    let total = lines.len() + rest_rows;
-    let hidden = total.saturating_sub(keep);
-    lines.truncate(keep);
-    (lines, hidden)
+}
+
+/// The conversation an `exo` call started (PAR-147), as its row shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Child {
+    /// Not a subagent's start.
+    None,
+    /// A subagent's start whose result (`{"conversation_id": …}`) is not
+    /// here yet, or names a conversation the list does not have: its row
+    /// keeps the space (so the row's height never changes), dimmed.
+    Unknown,
+    Known(String),
+}
+
+/// Which conversation an `exo` call started, if the list has it.
+pub(crate) fn subagent_child(
+    tool_name: &str,
+    input: &serde_json::Value,
+    output: &Output,
+    known: impl Fn(&str) -> bool,
+) -> Child {
+    if tool_name != "exo" || input.get("subagent").is_none() {
+        return Child::None;
+    }
+    let id = match output {
+        Output::Text(text) if text.contains("conversation_id") => {
+            serde_json::from_str::<serde_json::Value>(text)
+                .ok()
+                .and_then(|v| v.get("conversation_id")?.as_str().map(str::to_owned))
+        }
+        _ => None,
+    };
+    match id {
+        Some(id) if known(&id) => Child::Known(id),
+        _ => Child::Unknown,
+    }
 }
 
 /// The bytes of `output` a row previews (on a character boundary).
@@ -254,13 +277,14 @@ pub(crate) fn expandable(output: &Output) -> bool {
     }
 }
 
-/// One tool call's row (and, opened, its output), from its top.
+/// One tool call's row (and, opened, its output), from its top. `child`:
+/// the subagent conversation it started.
 pub(crate) fn lay_tool(
     blocks: &[Block],
     tool: &ToolRef,
-    indent: f32,
     open: bool,
     output: &Output,
+    child: &Child,
     context: &Context,
 ) -> Piece {
     let mut piece = Piece::default();
@@ -277,28 +301,44 @@ pub(crate) fn lay_tool(
     };
     let p = theme::p();
     let app = p.app_background;
-    let (label, color) = tool_label(
+    let display = toolcall::call_display(
         tool_name,
+        summary,
+        input,
+        presentation.as_ref(),
         context.styles,
-        presentation.as_ref().and_then(|p| p.tool_style.as_ref()),
+        &context.model.ops.external_styles,
     );
+    let color = display
+        .color
+        .as_deref()
+        .and_then(theme::parse_hex)
+        .unwrap_or(p.tool);
     let failed = tool
         .result
         .is_some_and(|at| matches!(&blocks[at], Block::ToolResult { is_error: true, .. }));
-    let x0 = MARGIN + indent;
+    let x0 = MARGIN;
     let x1 = W - MARGIN;
     let width = x1 - x0;
     let tx = x0 + HAIRLINE + PAD.3;
     let text_w = x1 - HAIRLINE - PAD.1 - BADGES - tx;
-    let detail = tool_detail(summary, input, presentation.as_ref());
     let expand = expandable(output);
     let open = open && expand;
-    let (lines, hidden) = call_lines(&label, &detail, text_w, open);
+    // Folded, enough rows to tell twelve from more.
+    let wrapped = if open {
+        OPEN_ROWS
+    } else {
+        COLLAPSE_AFTER_ROWS + 1
+    };
+    let (mut rows, total) = call_rows(&display, text_w, wrapped);
+    let keep = rows_shown(&display, total, open);
+    rows.truncate(keep);
+    let hidden = total.saturating_sub(rows.len());
     let ty = T_CAPTION;
     let line_h = ty.line();
     let top = HAIRLINE + PAD.0;
-    let rows = lines.len() + usize::from(hidden > 0);
-    let head = (top + rows as f32 * line_h + PAD.2 + HAIRLINE).max(TOOL_ROW);
+    let shown = rows.len() + usize::from(hidden > 0);
+    let head = (top + shown as f32 * line_h + PAD.2 + HAIRLINE).max(TOOL_ROW);
     let ops = &mut piece.laid.ops;
     // The box and its rail; the body's rows are added below.
     ops.push(Op::Rect {
@@ -307,12 +347,23 @@ pub(crate) fn lay_tool(
         color: mix(color, 5, app),
         alpha: 1.0,
     });
-    let after = push_runs(ops, &lines, tx, top, ty, Some(color), 1.0);
-    if failed && let Some(last) = lines.last() {
+    for (index, (row, row_color)) in rows.iter().enumerate() {
+        push_runs(
+            ops,
+            std::slice::from_ref(row),
+            tx,
+            top + index as f32 * line_h,
+            ty,
+            Some(*row_color),
+            1.0,
+        );
+    }
+    let after = top + rows.len() as f32 * line_h;
+    if failed && let Some((last, _)) = rows.last() {
         let end = tx + super::markdown_layout::line_width(last);
         ops.push(text_op(
             end + super::super::ui::widgets::measure(" ", ty),
-            ty.baseline(top + (lines.len() - 1) as f32 * line_h),
+            ty.baseline(top + (rows.len() - 1) as f32 * line_h),
             "✗",
             ty,
             p.error,
@@ -369,6 +420,34 @@ pub(crate) fn lay_tool(
             RectF::new(x0, 0.0, width, head),
             Action::Chat(chat::Act::ToggleExpanded(tool.key.clone())),
         ));
+    }
+    let mut head = head;
+    // A subagent it started: its conversation (PAR-147).
+    if *child != Child::None {
+        let label = "Open subagent conversation";
+        let w = super::super::ui::widgets::measure(label, T_SMALL);
+        let known = match child {
+            Child::Known(id) => Some(id),
+            _ => None,
+        };
+        ops.push(text_op(
+            tx,
+            T_SMALL.baseline(head - 22.0 + (TARGET - T_SMALL.line()) / 2.0),
+            label,
+            T_SMALL,
+            if known.is_some() {
+                p.secondary_accent
+            } else {
+                mix(p.muted, 60, mix(color, 5, app))
+            },
+        ));
+        if let Some(id) = known {
+            piece.laid.hits.push((
+                RectF::new(tx - 17.0, head - 22.0, w + 34.0, TARGET),
+                Action::Nav(Nav::OpenConversation(id.clone())),
+            ));
+        }
+        head += TARGET - 22.0;
     }
     let mut h = head;
     if open {
@@ -544,86 +623,4 @@ fn body(
             22.0 + ty.line() + 22.0
         }
     }
-}
-
-/// The folded row of a run of tool calls: how many, which tools, failures
-/// (`4 TOOL CALLS  $, Read · 1 failed`).
-pub(crate) fn lay_group(
-    blocks: &[Block],
-    calls: &[ToolRef],
-    key: &str,
-    open: bool,
-    context: &Context,
-) -> Piece {
-    let mut piece = Piece::default();
-    let mut names: Vec<String> = Vec::new();
-    for tool in calls {
-        if let Block::ToolCall {
-            tool_name,
-            presentation,
-            ..
-        } = &blocks[tool.call]
-        {
-            let (label, _) = tool_label(
-                tool_name,
-                context.styles,
-                presentation.as_ref().and_then(|p| p.tool_style.as_ref()),
-            );
-            if !names.contains(&label) {
-                names.push(label);
-            }
-        }
-    }
-    let failed = calls
-        .iter()
-        .filter(|tool| {
-            tool.result
-                .is_some_and(|at| matches!(&blocks[at], Block::ToolResult { is_error: true, .. }))
-        })
-        .count();
-    let p = theme::p();
-    let h = 100.0;
-    let cy = h / 2.0;
-    let ops = &mut piece.laid.ops;
-    ops.push(Op::Icon {
-        icon: if open {
-            Icon::ChevronDown
-        } else {
-            Icon::ChevronRight
-        },
-        cx: MARGIN + 16.0,
-        cy,
-        size: 33.0,
-        color: p.muted,
-        alpha: 1.0,
-    });
-    let label = format!("{} tool calls", calls.len());
-    let x = MARGIN + 33.0 + 22.0;
-    let label_w = super::super::ui::widgets::measure(&label, T_EYEBROW);
-    ops.push(text_op(
-        x,
-        T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0),
-        &label,
-        T_EYEBROW,
-        p.muted,
-    ));
-    let mut detail = names.join(", ");
-    if failed > 0 {
-        detail = format!("{detail} · {failed} failed");
-    }
-    let dx = x + label_w + 22.0;
-    let detail = super::super::ui::widgets::fit(&detail, T_SMALL, W - MARGIN - dx);
-    ops.push(text_op(
-        dx,
-        T_SMALL.baseline(cy - T_SMALL.line() / 2.0),
-        &detail,
-        T_SMALL,
-        if failed > 0 { p.error } else { p.muted },
-    ));
-    piece.laid.hits.push((
-        RectF::new(0.0, 0.0, W, h),
-        Action::Chat(chat::Act::ToggleExpanded(key.to_owned())),
-    ));
-    piece.laid.h = h;
-    piece
 }

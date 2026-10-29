@@ -18,7 +18,7 @@ use super::anim::Animator;
 use super::gesture::{Axis, Gesture};
 use super::images::{Pic, State, Want};
 use super::model::{Action, UiAct, rich};
-use super::theme::{self, T_META, T_NOTE, T_SMALL, TARGET, TOP_BAR};
+use super::theme::{self, T_META, T_NOTE, T_SMALL, TARGET};
 use super::ui::Haptic;
 use super::ui::icons::{self, Icon};
 use super::ui::overlay::{Body, Cx, Overlay, Response};
@@ -89,7 +89,12 @@ impl Viewer {
     /// Where the image goes: under the top bar, over the footer.
     fn area(&self, cx: &Cx) -> RectF {
         let bottom = cx.bottom() - FOOTER;
-        RectF::new(0.0, TOP_BAR, cx.width, (bottom - TOP_BAR).max(1.0))
+        RectF::new(
+            0.0,
+            theme::top_bar(),
+            cx.width,
+            (bottom - theme::top_bar()).max(1.0),
+        )
     }
 
     /// The preview fitted to the window.
@@ -215,7 +220,7 @@ impl Viewer {
     }
 
     fn control_at(&self, cx: &Cx, x: f32, y: f32) -> Option<Control> {
-        if y < TOP_BAR && x < TARGET + 22.0 {
+        if y < theme::top_bar() && x < TARGET + 22.0 {
             return Some(Control::Close);
         }
         (self.failed(cx) && self.retry_rect(cx).contains(x, y)).then_some(Control::Retry)
@@ -338,12 +343,16 @@ impl Overlay for Viewer {
             );
         }
         // The bar: ✕ and the position.
-        widgets::fill(canvas, RectF::new(0.0, 0.0, cx.width, TOP_BAR), background);
+        widgets::fill(
+            canvas,
+            RectF::new(0.0, 0.0, cx.width, theme::top_bar()),
+            background,
+        );
         icons::draw(
             canvas,
             Icon::X,
             72.0,
-            TOP_BAR / 2.0,
+            theme::top_bar() / 2.0,
             theme::ICON,
             p.text,
             if self.pressed == Some(Control::Close) {
@@ -357,7 +366,7 @@ impl Overlay for Viewer {
                 canvas,
                 &format!("{}/{}", self.index + 1, self.pics.len()),
                 cx.width / 2.0,
-                T_NOTE.baseline(TOP_BAR / 2.0 - T_NOTE.line() / 2.0),
+                T_NOTE.baseline(theme::top_bar() / 2.0 - T_NOTE.line() / 2.0),
                 T_NOTE,
                 p.text,
                 1.0,

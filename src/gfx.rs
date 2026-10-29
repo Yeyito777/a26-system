@@ -654,11 +654,13 @@ impl Path {
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let length = (dx * dx + dy * dy).sqrt().max(1e-3);
         let (nx, ny) = (-dy / length * width / 2.0, dx / length * width / 2.0);
+        // Wound as `circle` is, so the caps add to the body where they
+        // overlap it (the other way they cancel it: a hole at each end).
         self.polygon(&[
-            (a.0 + nx, a.1 + ny),
-            (b.0 + nx, b.1 + ny),
-            (b.0 - nx, b.1 - ny),
             (a.0 - nx, a.1 - ny),
+            (b.0 - nx, b.1 - ny),
+            (b.0 + nx, b.1 + ny),
+            (a.0 + nx, a.1 + ny),
         ]);
         for (x, y) in [a, b] {
             self.circle(x, y, width / 2.0);
@@ -809,6 +811,27 @@ pub fn ease_spring(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stroke is solid all along: its round caps add to its body rather
+    /// than cancelling it where they overlap (a hole at each end and joint).
+    #[test]
+    fn strokes_are_solid_at_their_ends_and_joints() {
+        let mut path = Path::new();
+        path.stroke_polyline(&[(10.0, 10.0), (40.0, 10.0), (40.0, 40.0)], 6.0);
+        let (x0, y0, w, _, mask) = path.rasterize().unwrap();
+        let at = |x: i32, y: i32| mask[((y - y0) * w + (x - x0)) as usize];
+        for (x, y) in [
+            (10, 10),
+            (11, 10),
+            (25, 10),
+            (40, 10),
+            (39, 11),
+            (40, 40),
+            (40, 25),
+        ] {
+            assert_eq!(at(x, y), 255, "({x}, {y})");
+        }
+    }
 
     #[test]
     fn blend_endpoints_are_exact() {
