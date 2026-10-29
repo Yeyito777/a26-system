@@ -1208,6 +1208,14 @@ impl Model {
         )));
     }
 
+    /// A rewind of the open conversation is on its way.
+    pub fn rewinding(&self) -> bool {
+        self.composer
+            .rewinding
+            .as_ref()
+            .is_some_and(|(_, conv)| Some(conv) == self.chat.id.as_ref())
+    }
+
     /// Whether the sent message with `stamp` can be rewound now
     /// (PAR-266): its user message index, or why not.
     pub fn can_rewind(&self, stamp: u64) -> Result<u64, String> {

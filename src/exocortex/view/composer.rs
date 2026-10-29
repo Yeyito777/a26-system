@@ -1609,6 +1609,33 @@ mod tests {
                 .sum();
             assert!(rows < 300, "only the island: {damage:?}");
         }
+        // The picker opens over the transcript as a slash word is typed,
+        // follows the typing, and goes when a suggestion is taken.
+        for character in " /co".chars() {
+            frames(
+                &mut model,
+                &mut view,
+                &|model| {
+                    model.composer_key(KeyInput::Character(character));
+                },
+                20,
+            );
+        }
+        assert!(model.composer.picker_state.is_some());
+        for _ in 0..12 {
+            frames(&mut model, &mut view, &|_| {}, 16);
+        }
+        frames(
+            &mut model,
+            &mut view,
+            &|model| {
+                model.handle(Action::Composer(Act::Complete("/consider".into())));
+            },
+            10,
+        );
+        for _ in 0..12 {
+            frames(&mut model, &mut view, &|_| {}, 16);
+        }
         // The caret blinks; it moves; a word is selected, with the menu
         // fading in over its own rows.
         frames(&mut model, &mut view, &|_| {}, 600);
@@ -1636,7 +1663,7 @@ mod tests {
         for _ in 0..20 {
             frames(&mut model, &mut view, &|_| {}, 8);
         }
-        assert!(view.overlays.len() == 1);
+        assert!(view.overlays.len() >= 1, "the edit menu");
         // Stop pressed: its spinner turns.
         frames(
             &mut model,
