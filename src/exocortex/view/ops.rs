@@ -184,10 +184,38 @@ pub fn quantized(mut laid: Laid) -> Laid {
         rect.y = snap(rect.y);
         rect.h = snap(rect.h);
     }
+    for hit in &mut laid.scrolled_hits {
+        for rect in [&mut hit.clip, &mut hit.rect] {
+            rect.y = snap(rect.y);
+            rect.h = snap(rect.h);
+        }
+    }
     laid.h = snap(laid.h);
     laid.ink = (ink.0.floor(), ink.1.max(laid.h).ceil());
     laid.xkeys = keys;
     laid
+}
+
+/// A tap target inside a scroller: `rect` is in its content, which shows
+/// in `clip` (relative to the piece) moved by the scrollers' offsets.
+#[derive(Debug, Clone)]
+pub struct ScrolledHit {
+    pub clip: RectF,
+    pub xscroll: Option<u64>,
+    pub yscroll: Option<u64>,
+    pub rect: RectF,
+    pub action: Action,
+}
+
+impl ScrolledHit {
+    /// Whether (`x`, `y`), relative to the piece, is on it.
+    pub fn contains(&self, x: f32, y: f32, offsets: &HashMap<u64, f32>) -> bool {
+        let offset = |key: Option<u64>| key.and_then(|k| offsets.get(&k)).copied().unwrap_or(0.0);
+        self.clip.contains(x, y)
+            && self
+                .rect
+                .contains(x + offset(self.xscroll), y + offset(self.yscroll))
+    }
 }
 
 /// One laid-out transcript piece (a bubble, a markdown block, a tool or
@@ -207,6 +235,8 @@ pub struct Laid {
     /// Its vertical scrollers (a tall table's rows, C1): how far each can
     /// scroll and where a drag moves it, relative to the piece.
     pub ymax: Vec<(u64, f32, RectF)>,
+    /// Tap targets inside scrollers (links in a wide or tall table).
+    pub scrolled_hits: Vec<ScrolledHit>,
     /// The image previews it shows (fetched while it is near the screen).
     pub images: Vec<super::super::images::Want>,
 }

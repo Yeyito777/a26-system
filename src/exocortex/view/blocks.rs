@@ -124,7 +124,7 @@ fn run_weight(style: Style, ty: Type) -> Weight {
     match style {
         Style::Bold => Weight::MonoBold,
         Style::Italic => theme::T_ITALIC,
-        Style::Plain | Style::Code | Style::Link | Style::Strike => ty.weight,
+        Style::Plain | Style::Code | Style::Link | Style::Strike | Style::Math => ty.weight,
     }
 }
 
@@ -561,6 +561,9 @@ fn lay_note_markdown(
             ),
             MdBlock::Code { lines, .. } => (0.0, None, plain(&lines.join("\n"))),
             MdBlock::Table(_) => (0.0, None, plain("(a table: OPEN shows it)")),
+            MdBlock::Math(tex) => (0.0, None, plain(&super::super::math::inline(tex))),
+            MdBlock::Long { preview, .. } => (0.0, None, plain(preview)),
+            MdBlock::More { .. } => continue,
             MdBlock::Rule => (0.0, None, plain("———")),
         };
         let marker_w = if let Some(marker) = &marker {
@@ -661,6 +664,7 @@ pub(crate) fn lay_notice(
                     w: widgets::measure(&fitted, ty),
                     text: fitted,
                     style: Style::Plain,
+                    link: None,
                 }];
             }
         }
