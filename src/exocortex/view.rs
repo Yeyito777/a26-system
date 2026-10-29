@@ -161,10 +161,11 @@ struct Placed {
     index: u32,
 }
 
-/// Where the reader is: pieces on screen (entry stamp, piece) and how far
-/// below the transcript's top edge each starts.
+/// Where the reader is: pieces on screen (entry stamp, index in the entry,
+/// the piece itself) and how far below the transcript's top edge each
+/// starts.
 pub struct Anchor {
-    pieces: Vec<(u64, u32, f32)>,
+    pieces: Vec<(u64, u32, Rc<Laid>, f32)>,
 }
 
 #[derive(Default)]
@@ -1543,11 +1544,11 @@ impl ViewState {
         let offset = self.chat_scroll.value(now);
         let items = &self.layout.items;
         let first = items.partition_point(|item| item.y + item.laid.h <= offset);
-        let pieces: Vec<(u64, u32, f32)> = items[first..]
+        let pieces: Vec<(u64, u32, Rc<Laid>, f32)> = items[first..]
             .iter()
             .filter(|item| item.stamp != 0)
             .take(6)
-            .map(|item| (item.stamp, item.index, item.y - offset))
+            .map(|item| (item.stamp, item.index, item.laid.clone(), item.y - offset))
             .collect();
         (!pieces.is_empty()).then_some(Anchor { pieces })
     }
@@ -1557,13 +1558,19 @@ impl ViewState {
     /// Returns false when none of its pieces is still there.
     pub fn restore(&mut self, model: &Model, anchor: &Anchor, now: Instant) -> bool {
         self.layout(model);
-        let found = anchor.pieces.iter().find_map(|(stamp, index, delta)| {
-            self.layout
-                .items
-                .iter()
-                .find(|item| item.stamp == *stamp && item.index == *index)
-                .map(|item| item.y - delta)
-        });
+        // The same piece of the same entry; nearest its old index (a row
+        // opened above it in the entry moves it down the list).
+        let found = anchor
+            .pieces
+            .iter()
+            .find_map(|(stamp, index, laid, delta)| {
+                self.layout
+                    .items
+                    .iter()
+                    .filter(|item| item.stamp == *stamp && Rc::ptr_eq(&item.laid, laid))
+                    .min_by_key(|item| item.index.abs_diff(*index))
+                    .map(|item| item.y - delta)
+            });
         let Some(offset) = found else {
             return false;
         };
@@ -3295,7 +3302,7 @@ mod tests {
         view.follow = false;
         view.chat_scroll.offset = 700.0;
         let anchor = view.anchor(&model, now).expect("an anchor");
-        let (stamp, index, delta) = anchor.pieces[0];
+        let (stamp, index, _, delta) = anchor.pieces[0].clone();
         let older = model.load_older();
         let request = older[0]["reqId"].as_str().unwrap().to_owned();
         model.apply(
@@ -3311,6 +3318,28 @@ mod tests {
             .unwrap();
         assert!(item.y > 700.0, "older history above it");
         assert_eq!(item.y - view.chat_scroll.value(now), delta);
+    }
+
+    #[test]
+    fn opening_a_row_above_keeps_the_reader_on_the_same_piece() {
+        let now = Instant::now();
+        let mut model = chat_model();
+        let mut view = ViewState::new();
+        view.layout(&model);
+        // The reply's text, after its folded run of calls, at the top.
+        let text = view.layout.items[2].laid.clone();
+        view.follow = false;
+        view.chat_scroll.offset = view.layout.items[2].y;
+        let anchor = view.anchor(&model, now).unwrap();
+        model.handle(Action::ToggleExpanded("group:t0".into()));
+        assert!(view.restore(&model, &anchor, now));
+        let item = view
+            .layout
+            .items
+            .iter()
+            .find(|item| Rc::ptr_eq(&item.laid, &text))
+            .unwrap();
+        assert_eq!(item.y, view.chat_scroll.value(now));
     }
 
     /// Draws the frame, applies `change`, updates the frame incrementally,
