@@ -27,7 +27,8 @@ parse).
 
 The app declares `targeted-unwind`, `sidebar-reorder-delta`,
 `sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`
-and `sidebar-incremental` (with a navigate-view `sidebarView`), then `ping`s.
+and `sidebar-incremental` (with a tree `sidebarView` naming the folders open
+on the list), then `ping`s.
 Its bootstrap, and every reconnection's, is that, with `load_conversation`
 for the conversation on screen before the `ping`, in the same write, so its
 window comes ahead of the list. A window or an older page the daemon has not
@@ -36,29 +37,98 @@ lands), and scrolling up asks for the older page again.
 
 | Screen | Daemon traffic |
 | --- | --- |
-| The list | `conversations_list` (first page, then the rest), kept current by `conversation_updated`, `conversation_deleted`, `sidebar_items_reordered`, `sidebar_state_patched`, `conversation_moved` |
+| The list | `conversations_list` (first page, then the rest), kept current by `conversation_updated`, `conversation_deleted`, `sidebar_items_reordered`, `sidebar_state_patched`, `conversation_moved`, `queue_updated` (queued counts) |
+| List commands | `pin_conversation`, `pin_folder`, `pin_sidebar_items`, `mark_conversation`, `mute_conversation`, `mute_folder`, `move_sidebar_items` (refused: a `conversations_list` with its reqId), `delete_conversation`, `delete_conversations`, `delete_folder`, each followed by a `ping` with its reqId (`updateStatusOnly`); `rename_conversation`, `create_folder` (with the items to move in), `rename_folder` (acked); `clone_conversation`, `undo_delete`, `redo_delete` (answered by `conversation_restored` or a state patch); `load_folder_instructions`, `set_folder_instructions`; `list_conversations` to start over (pull to refresh, Retry) |
 | A conversation | `load_conversation` with `turns`, the `viewport` and an `initialBackfill` (which subscribes and marks it read): a window of about two screens, then the older page behind it from the same snapshot; older pages (15 turns) with `load_conversation_history` as the user scrolls up, joined where a page ends inside an entry; the stream (`streaming_started`, `block_start`, `text_chunk`, `thinking_chunk`, `streaming_sync`, `tool_call`, `tool_result`, `message_complete`, `streaming_stopped`, `user_message`, `system_message`, `history_updated`, whose `pendingAI: null` ends the live reply); after each stop the newest page again, so the history settles on the daemon's copy. Leaving it `unsubscribe`s. |
-| Sending | `send_message` (shown at once, confirmed by the daemon's `user_message` or `streaming_started` with the same `startedAt`); while it works, Send asks "Deliver message": **Next turn** (Steer now on other providers) or **Message end**, `queue_message` with that `timing` (shown as queued until delivered; sent directly if the turn ended meanwhile); a new conversation is `new_conversation` with its first message and only the draft's explicit model choices (in the folder the list showed). Refused or unconfirmed in 20 s: the text goes back into the draft it came from, with the error above the composer |
+| Sending | `send_message` (shown at once, confirmed by the daemon's `user_message` or `streaming_started` with the same `startedAt`); while it works, Send asks "Deliver message": **Next turn** (Steer now on other providers) or **Message end**, `queue_message` with that `timing` (shown as queued until delivered; sent directly if the turn ended meanwhile); a new conversation is `new_conversation` with its first message and only the draft's explicit model choices (in the folder whose "+" was tapped). Refused or unconfirmed in 20 s: the text goes back into the draft it came from, with the error above the composer |
 | The queue | a queued bubble tapped: Edit in composer, Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it) |
 | Stop | `abort` with the stream's `expectedStartedAt`; a spinner until `ack`, `streaming_stopped` or `message_complete`; a second press says it is already stopping |
 | Panels (E) | Activity: `list_tasks`, `stop_task`, `abort` for a subagent; Goal: `set_goal` (its `goal_updated` reaches subscribers only: the open conversation); Chrono: `chrono` list, create, cancel; BTW: `btw_query`, `btw_followup`, `btw_close` (sent again after a reconnection until settled); System prompt: `get_system_prompt`, `load_instructions`, `set_system_instructions`; Accounts: `accounts {watch}` while it shows; Usage: `usage_update` (pushed), `get_token_stats` when Settings or a usage panel opens; the inspector's "Use as daemon default" and reset: `set_conversation_defaults`, `reset_conversation_defaults`, confirmed only by a `conversation_defaults` with their reqId |
 | The model inspector | `tools_available`'s providers, models, efforts and speeds, and `conversationDefaults` (or `conversation_defaults`); Apply sends `set_model`, `set_effort`, `set_fast_mode` for what changed; a draft changes nothing on the wire until its first message |
-| A tool row opened | `load_tool_outputs` for that call (history leaves outputs out) |
+| Tool outputs | `load_tool_outputs` for a row opened, and for rows within a screen of what shows (six at a time, one request in flight; history leaves outputs out); one that does not come says so ("no longer available", "timed out") and a tap asks again |
 
 The app has three pages, left to right as on the iPhone: Settings, the
 list, a conversation. Back (the top bar's chevron, Moon's Back, a swipe from
-the left edge) goes a page left, up a folder first; the list's ⋯ menu opens
+the left edge) goes a page left, ending a search on the list first; the
+list's ⋯ menu opens
 Settings too. Everything is drawn in the Whale theme and JetBrains Mono
 (roadmap §3); sheets, menus, dialogs, toasts and the reader open over the
 pages.
 
-Tool calls show as one row each (label as the TUI styles it, summary, ERR
-when it failed); a run of three or more folds into one row ("7 tool calls ·
-$, Read"). Thinking shows as a folded row. Replies are markdown
-(`src/exocortex/markdown.rs`): headings, paragraphs (a newline is a line
-break), bullet, numbered and task lists, quotes, rules, fenced code and
-tables, with bold, italic, code and link spans. Automated prompts (subagent
-reports, notifications) are one gray line.
+The list is the iPhone's (`real-01-sidebar`): pinned rows under a PINNED
+header and a divider, folders opening in place (the open ones kept in
+`ui.json`'s `list.expanded`), each row with the TUI's activity dot (accent
+streaming, warning waiting, success unread; a muted folder mutes what is in
+it) and badges (◆ subagents, $ background commands, ◷ Chrono), a folder with
+its count, unread badge and "+" for a new chat in it. The search field
+filters titles and folder names (results 160 ms after the last key). A long
+press opens a row's menu (pin, mark and mute side by side; rename, emoji
+mark, move to folder, clone, select, copy id, delete; a folder's has its
+inspector, with its own instructions); deleting offers Undo. Select mode
+(the ⋯ menu's Select chats) checks rows and moves, pins, groups into a new
+folder or deletes them. Pulling the list down past the top asks for it
+again.
+
+A change shows at once (`list/pending.rs`): the fields it expects are
+projected over the daemon's values after every event until the daemon shows
+or answers them, so other traffic cannot flicker it back; placement follows
+the daemon's rules (a pin goes to the bottom of the pinned section, a move
+to the top of its folder's unpinned section). A message sent bumps its
+conversation and a new conversation shows at once (`Model::handle` shows
+the list what goes out, `list_observe`). Most list commands answer nothing,
+so each is followed by a `ping` with its reqId: the daemon handles a
+client's commands in order, so a change the daemon's state does not show by
+the `pong` was not made: it is taken back, the user told, and the list asked
+for again. An unanswered change goes after 10 s.
+
+The transcript is the iPhone's (roadmap §3.6.6–3.6.14, `fake-02…08`): the
+user's bubbles right-aligned with an accent rail (sent ones not yet echoed
+at 86 %, queued ones at 58 % with "queued: next turn"); automated prompts
+folded into a row ("CHRONO  Chrono wake: …") that opens to the automated
+bubble with "⚙ Chrono · from …" under it (a parent's delegation is shown as
+that bubble); replies as markdown (`src/exocortex/markdown.rs`); thinking
+boxes ("THINKING", OPEN for the reader; Settings' Expand thinking opens
+them); a tool row per call in its tool's colour (label and summary, three
+lines folded, ERR and ✗ when it failed, a spinner while it runs; opened,
+Read full output, Copy and a 6000-byte preview); a run of three or more
+calls folds into one row ("4 TOOL CALLS  $, Read"); system notices as
+coloured boxes (three lines, open to all of it and Copy), the compaction
+divider, `[Context:` text dim, model-only notices not at all; one metadata
+footer per run of replies (`OPUS-5.5 | 76.2 TOK/S | 2:03PM`, `footer.rs`,
+model names from `model_display.rs`), a tap on it or a long press on a
+message opens Copy message / Edit in composer / Read in full. The live
+reply shows WORKING until it shows something, the retry, compaction and
+connection-wait lines, and a footer whose duration ticks. A jump-to-latest
+button shows more than 120 pt from the end once the transcript is still.
+
+The replies' markdown (`src/exocortex/markdown.rs`, GFM as the iPhone renders it): headings in
+the accent colours, paragraphs (a newline is a line break), bullet,
+numbered and task lists nested to 12 levels, quotes, rules, fenced (``` and
+~~~) and indented code, tables, with bold, italic, strikethrough, inline
+code and underlined link spans. A code block has a header (its language,
+WRAP / NO WRAP, OPEN in the reader, COPY), keeps its lines and scrolls
+sideways, and over 8000 characters shows a preview. A table is a grid
+(header row, cells wrapped and aligned per its delimiter row, at most 12
+columns) that scrolls sideways when wide; over 10 rows it is at most 997 px
+tall and its rows scroll inside it under the header; "Open full response"
+opens the reply in the reader.
+
+
+Images a model attached (the `attach` tool) show after its message, and
+the user's pasted images under their bubble: thumbnails fitted in 465 px
+(pasted ones as 233 px filled squares), wrapping onto more rows. Each is a
+`get_image` PNG preview of the size drawn, asked for while it is within a
+screen of the viewport (nearest first, three at a time, retried with
+backoff while "not found" or unanswered), decoded on the link thread while
+the event is parsed, and kept in a cache bounded by its pixels
+(`images.rs`). A tap opens the viewer (`viewer.rs`): i/N, swipe between a
+message's images, double tap to zoom 2.5x (with a sharper preview) and drag
+to pan, swipe down, Back or ✕ to close.
+
+The reader (`reader.rs`) shows a text as written (wrapped at spaces or
+anywhere), how many characters, Copy, and Find: a field on Moon's keyboard,
+i/N, previous and next, every match marked and the current one scrolled
+into view (`find.rs`, the engine Find in chat uses).
 
 The composer is a text area on Moon's `keyboard show multiline` (Return is
 a line break; only the Send button sends). Its editor (`editor.rs`) keeps a
@@ -105,8 +175,13 @@ are discarded.
   up to 150 ms) shows its messages. The daemon is asked before Moon is asked
   to snapshot the page.
 - **Entries have stamps.** Every history entry has a stamp (`Chat::stamps`)
-  that changes only when the entry does: a window that resends an entry
-  unchanged keeps its stamp. The view caches an entry's plan by stamp.
+  that changes only when what it shows does: a window that resends an entry
+  unchanged keeps its stamp (a reply's metadata alone does not change it).
+  The view caches an entry's plan by stamp. The live reply has a stamp too,
+  and the entry it is committed into keeps it, through completion and the
+  daemon's copy: one identity per turn, so the reader's place and the pieces
+  on screen survive (an injected message splits the reply: the part so far
+  is committed, and the rest goes on under a new stamp).
 - **Pieces.** The transcript is laid out as pieces: a markdown block, a tool
   or thinking row (an opened run of tool calls is a row per call), a bubble,
   a notice. Each is cached by a hash of what it shows (`ViewState::pieces`),
@@ -116,6 +191,23 @@ are discarded.
   are visited. The reader's place, when not following the newest message, is
   a piece (entry stamp and index) and its distance from the top; it is kept
   when anything changes above it (older history, a fresh window).
+  Following resumes within 12 pt of the end.
+- **Marks.** What changes with time inside a piece (a spinner, the WORKING
+  shimmer, the live footer's clock and rate, a status line's clock) is a
+  mark (`blocks::Mark`): placed with its piece, keyed per frame
+  (`transcript::TranscriptFrame`) and drawn again alone, so a second ticking
+  costs its own line of rows and no layout pass. The jump button is drawn
+  over the transcript in its own columns; it steps aside while the
+  transcript moves (a floating button over moving rows would cost its rows
+  in every frame of a scroll) and fades back in once it is still.
+- **The list's rows.** The rows (`sidebar::Layout`) are rebuilt only when
+  rows may come, go or move (a pin, a sort order, a folder opened, the
+  search), and folder activity is added up once per change
+  (`Sidebar::aggregates`). A list frame records, for each row on screen, a
+  hash of what it draws (`Look`): the next frame moves the rows a scroll
+  moved and draws again only the rows whose look changed, a pulsing dot only
+  its own rows, a relative time turning over (a frame each minute) only its
+  row. Only rows on screen are looked at, however many there are.
 - **A fast core.** While in front, the UI thread asks for a minimum
   utilization clamp (`sched_setattr`, `UTIL_CLAMP_MIN`), so energy-aware
   scheduling runs its short bursts on a fast core at a high clock: on a slow
@@ -152,8 +244,8 @@ the interfaces below. Every file's header says whose it is.
 | `view/mod.rs`, `view/frame.rs`, `view/ops.rs` | A | page composition and hit testing, the frame pipeline, laid-out pieces |
 | `model/mod.rs` | A | `Model`, `Action`, the pages, the connection, the event fan-out, `Ui` |
 | `proto/mod.rs`, `proto/fixtures.jsonl` | A | `Event`, `parse_event`, the bootstrap |
-| `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs` | B | the list, folders, search |
-| `view/markdown_layout.rs`, `markdown.rs`, `reader.rs` | C1 | markdown as pieces, code, tables; the reader (A's is minimal) |
+| `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands (`list/actions.rs`), changes shown before the daemon answers (`list/pending.rs`), menus, prompts and pickers (`list/menus.rs`), the folder inspector (`list/sheets.rs`) |
+| `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks, tables; images in the transcript, their cache and the viewer; the reader and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
 | `view/composer.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
@@ -231,15 +323,22 @@ additions are the only shared edits.
   (`frame(now)`, `slow_frame(now)` for a 30 Hz pulse, `follow(&tween, now)`,
   `request(at)`); nothing animating means no frames.
 - **Pieces** (`view/ops.rs`). A transcript piece is a `Laid` (height,
-  `Op`s, hits, ink rows, horizontal scroller keys) relative to its top,
-  passed through `ops::quantized`. Ops: `Text` (with tracking), `Rect`,
-  `Border`, `Line`, `Icon`, `Image` (an `ImageHandle`), `Chevron`, and
-  `Clip { rect, xscroll: Some(key), ops }`, whose content the view scrolls
-  sideways by `ViewState::xscroll[key]` (code blocks, tables: C1 clamps).
-  C1's entry point is `markdown_layout::lay(source, x, width, top, MdStyle)
-  -> Laid`; C2's is the transcript's planning in `transcript.rs` and
-  `blocks.rs`. Pieces are cached by a hash of what they show, so a piece's
-  key must include everything it draws.
+  `Op`s, hits, ink rows, scroller keys, how far its scrollers go, the image
+  previews it shows) relative to its top, passed through `ops::quantized`.
+  Ops: `Text` (with tracking), `Rect`, `Border`, `Line`, `Icon`, `Image` (a
+  weak `ImageHandle`: the image cache decides what stays in memory),
+  `Chevron`, and `Clip { rect, xscroll, yscroll, ops }`, whose content the
+  view scrolls sideways (code blocks, wide tables) or up (a tall table's
+  rows) by `ViewState::xscroll[key]`, clamped to the piece's `xmax` /
+  `ymax`; a frame redraws only the pieces whose scrollers moved. Hits are
+  checked in x and y. C1's entry points are `markdown_layout::lay(source,
+  x, width, top, MdStyle) -> Laid` and `lay_block(block, x, width, rich)`
+  (one markdown block; its cache key must include `state_key(block,
+  rich)`, which says whether a code block wraps), and `media::lay_strip`
+  for a message's images (keyed by `Strip::state_key`); C2's is the
+  transcript's planning in `transcript.rs` and `blocks.rs`, whose layout key
+  includes `model.rich.version()`. Pieces are cached by a hash of what they
+  show, so a piece's key must include everything it draws.
 - **The rules every drawing follows** (they keep partial frames equal to
   full ones, which `EXOCORTEX_APP_VERIFY=1` and the tests check):
   draw only inside the canvas's clip, and nest clips with
