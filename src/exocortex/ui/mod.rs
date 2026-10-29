@@ -5,10 +5,11 @@
 //! the event loop calls the functions here, each of which hands its request
 //! to a thread of its own so the UI thread never waits on Moon.
 
-// The pages take these up in the next commit.
-#![allow(dead_code)]
-
 pub mod icons;
+pub mod menu;
+pub mod overlay;
+pub mod sheet;
+pub mod toast;
 pub mod widgets;
 
 use crate::control;

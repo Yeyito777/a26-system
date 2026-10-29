@@ -1,29 +1,41 @@
-//! The model sheet: the conversation's effort, then the models of every
-//! signed-in provider.
+//! The model sheet (WP-E's inspector to be, PAR-275): the conversation's
+//! effort as a segmented control, then the models of every signed-in
+//! provider, the current one checked. Tapping one sets it (or, for a new
+//! conversation, chooses it).
 
-use std::time::Instant;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-use crate::gfx::{Canvas, Path, RectF};
-use crate::text::{self, Weight};
-use crate::ui::{
-    BLUE, MARGIN, SECONDARY, SECONDARY_ALPHA, SEPARATOR, TERTIARY_ALPHA, WHITE, baseline,
-};
+use crate::gfx::{Canvas, RectF};
 
-use super::super::model::{Action, Model};
-use super::super::view::{Hit, ViewState, W, pressed_action};
+use super::super::model::{Action, Model, ops};
+use super::super::theme::{self, HAIRLINE, T_BODY, T_SECTION, T_SMALL, TARGET};
+use super::super::ui::icons::{self, Icon};
+use super::super::ui::overlay::Cx;
+use super::super::ui::sheet::{Reply, Sheet, SheetContent};
+use super::super::ui::widgets;
 
-// Model sheet.
-pub(crate) const SHEET_TOP: f32 = 300.0;
-pub(crate) const SHEET_HEADER: f32 = 150.0;
-pub(crate) const SHEET_ROW: f32 = 118.0;
-pub(crate) const SHEET_SECTION: f32 = 84.0;
-pub(crate) const CHIP_H: f32 = 84.0;
+const SECTION: f32 = 101.0;
+const ROW: f32 = 133.0;
 
-pub(crate) fn sheet_content(model: &Model) -> Vec<(f32, SheetItem)> {
+#[derive(Debug, Clone, PartialEq)]
+enum Item {
+    Section(String),
+    Efforts(Vec<String>),
+    Model {
+        provider: String,
+        id: String,
+        label: String,
+    },
+}
+
+/// What the sheet shows, laid out top to bottom.
+fn items(model: &Model) -> Vec<(f32, Item)> {
     let mut items = Vec::new();
     let mut y = 0.0;
     let selection = model.selection();
     let efforts: Vec<String> = model
+        .ops
         .providers
         .iter()
         .find(|p| p.id == selection.provider)
@@ -36,220 +48,266 @@ pub(crate) fn sheet_content(model: &Model) -> Vec<(f32, SheetItem)> {
         })
         .unwrap_or_default();
     if !efforts.is_empty() {
-        items.push((y, SheetItem::Section("Effort".into())));
-        y += SHEET_SECTION;
-        items.push((y, SheetItem::Efforts(efforts)));
-        y += CHIP_H + 40.0;
+        items.push((y, Item::Section("Effort".into())));
+        y += SECTION;
+        items.push((y, Item::Efforts(efforts)));
+        y += TARGET + 22.0;
     }
     // The conversation's own provider first.
     let mut providers = model.usable_providers();
     providers.sort_by_key(|p| p.id != selection.provider);
     for provider in providers {
-        items.push((y, SheetItem::Section(provider.label.clone())));
-        y += SHEET_SECTION;
+        items.push((y, Item::Section(provider.label.clone())));
+        y += SECTION;
         for m in &provider.models {
             items.push((
                 y,
-                SheetItem::Model {
+                Item::Model {
                     provider: provider.id.clone(),
                     id: m.id.clone(),
                     label: m.label.clone(),
                 },
             ));
-            y += SHEET_ROW;
+            y += ROW;
         }
-        y += 24.0;
     }
-    items.push((y, SheetItem::End));
+    items.push((y, Item::Section(String::new())));
     items
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum SheetItem {
-    Section(String),
-    Efforts(Vec<String>),
-    Model {
-        provider: String,
-        id: String,
-        label: String,
-    },
-    End,
+/// The model sheet's content.
+pub struct Inspector {
+    items: Vec<(f32, Item)>,
+    selection: (String, String, String),
+    width: f32,
+    title: String,
 }
 
-pub fn sheet_max(model: &Model, height: f32) -> f32 {
-    let content = sheet_content(model).last().map_or(0.0, |(y, _)| *y);
-    let visible = height - SHEET_TOP - SHEET_HEADER;
-    (content + 60.0 - visible).max(0.0)
+/// The model sheet.
+pub fn inspector() -> Sheet<Inspector> {
+    Sheet::new(Inspector {
+        items: Vec::new(),
+        selection: Default::default(),
+        width: 0.0,
+        title: "Model".into(),
+    })
 }
 
-pub(crate) fn effort_chips(efforts: &[String], top: f32) -> Vec<(RectF, String)> {
-    let mut x = MARGIN + 10.0;
-    let mut out = Vec::new();
-    for effort in efforts {
-        let w = text::measure(effort, Weight::Medium, 34.0) + 56.0;
-        out.push((RectF::new(x, top, w, CHIP_H - 16.0), effort.clone()));
-        x += w + 16.0;
-    }
-    // Too many for one line: shrink them evenly.
-    let right = out.last().map_or(0.0, |(r, _)| r.x + r.w);
-    if right > W - MARGIN {
-        let scale = (W - 2.0 * MARGIN - 10.0) / (right - MARGIN);
-        for (rect, _) in &mut out {
-            rect.x = MARGIN + (rect.x - MARGIN) * scale;
-            rect.w *= scale;
-        }
-    }
-    out
-}
-
-pub(crate) fn sheet_rect(height: f32) -> RectF {
-    RectF::new(0.0, SHEET_TOP, W, height - SHEET_TOP + 60.0)
-}
-
-pub(crate) fn draw_sheet(
-    canvas: &mut Canvas,
-    model: &Model,
-    view: &mut ViewState,
-    pressed: Option<&Hit>,
-    height: f32,
-    now: Instant,
-) {
-    canvas.fill_rect(0, 0, W as i32, height as i32, 0x000000, 0.55);
-    let sheet = sheet_rect(height);
-    canvas.fill_rrect(sheet, 40.0, 0x1c1c1e, 1.0);
-    canvas.fill_rrect(
-        RectF::new(W / 2.0 - 60.0, SHEET_TOP + 18.0, 120.0, 12.0),
-        6.0,
-        0x5a5a5e,
-        1.0,
-    );
-    text::draw(
-        canvas,
-        "Model",
-        MARGIN + 10.0,
-        SHEET_TOP + 104.0,
-        Weight::Bold,
-        56.0,
-        WHITE,
-        1.0,
-    );
-    let pressed = pressed_action(pressed).cloned();
-    let done_alpha = if pressed == Some(Action::HidePicker) {
-        0.4
-    } else {
-        1.0
-    };
-    text::draw_right(
-        canvas,
-        "Done",
-        W - MARGIN - 10.0,
-        SHEET_TOP + 100.0,
-        Weight::SemiBold,
-        46.0,
-        BLUE,
-        done_alpha,
-    );
-    let top = SHEET_TOP + SHEET_HEADER;
-    let bottom = height - 40.0;
-    let offset = view.sheet_scroll.value(now);
-    let selection = model.selection();
-    canvas.set_clip(0, top as i32, W as i32, bottom as i32);
-    for (y, item) in sheet_content(model) {
-        let y = top + y - offset;
-        if y > bottom || y + SHEET_ROW < top {
-            continue;
-        }
-        match item {
-            SheetItem::Section(title) => {
-                text::draw(
-                    canvas,
-                    &title.to_uppercase(),
-                    MARGIN + 10.0,
-                    y + 58.0,
-                    Weight::Regular,
-                    34.0,
-                    SECONDARY,
-                    SECONDARY_ALPHA,
-                );
+impl Inspector {
+    /// What is at content index `index`: an effort segment or a model.
+    fn targets(&self) -> Vec<(RectF, Action)> {
+        let mut targets = Vec::new();
+        for (y, item) in &self.items {
+            match item {
+                Item::Efforts(efforts) => {
+                    let w = self.width / efforts.len() as f32;
+                    for (index, effort) in efforts.iter().enumerate() {
+                        targets.push((
+                            RectF::new(index as f32 * w, *y, w, TARGET),
+                            Action::Ops(ops::Act::PickEffort(effort.clone())),
+                        ));
+                    }
+                }
+                Item::Model { provider, id, .. } => targets.push((
+                    RectF::new(0.0, *y, self.width, ROW),
+                    Action::Ops(ops::Act::PickModel(provider.clone(), id.clone())),
+                )),
+                Item::Section(_) => {}
             }
-            SheetItem::Efforts(efforts) => {
-                for (rect, effort) in effort_chips(&efforts, y) {
-                    let rect = RectF::new(rect.x, rect.y, rect.w, rect.h);
-                    let current = effort == selection.effort;
-                    let down = pressed == Some(Action::PickEffort(effort.clone()));
-                    canvas.fill_rrect(
-                        rect,
-                        rect.h / 2.0,
-                        if current { BLUE } else { 0x2c2c2e },
-                        if down { 0.6 } else { 1.0 },
-                    );
-                    text::draw_centered(
+        }
+        targets
+    }
+}
+
+impl SheetContent for Inspector {
+    fn title(&self) -> String {
+        self.title.clone()
+    }
+
+    fn layout(&mut self, cx: &Cx, width: f32) -> f32 {
+        self.width = width;
+        let selection = cx.model.selection();
+        self.selection = (selection.provider, selection.model, selection.effort);
+        self.title = match cx.model.open_summary() {
+            Some(summary) => format!("{} model", summary.display_title()),
+            None => "New chat model".into(),
+        };
+        self.items = items(cx.model);
+        self.items.last().map_or(0.0, |(y, _)| *y)
+    }
+
+    fn draw(&self, canvas: &mut Canvas, _cx: &Cx, x: f32, top: f32, pressed: Option<usize>) {
+        let p = theme::p();
+        let c = theme::c();
+        let (provider, model, effort) = &self.selection;
+        let mut target = 0;
+        for (y, item) in &self.items {
+            let y = top + y;
+            match item {
+                Item::Section(title) => {
+                    if !title.is_empty() {
+                        widgets::text(
+                            canvas,
+                            title,
+                            x,
+                            T_SECTION.baseline(y + 44.0),
+                            T_SECTION,
+                            p.accent,
+                            1.0,
+                        );
+                    }
+                }
+                Item::Efforts(efforts) => {
+                    let labels: Vec<&str> = efforts.iter().map(String::as_str).collect();
+                    let selected = efforts
+                        .iter()
+                        .position(|e| e == effort)
+                        .unwrap_or(usize::MAX);
+                    let pressed_segment = pressed
+                        .filter(|index| (target..target + efforts.len()).contains(index))
+                        .map(|index| index - target);
+                    widgets::segmented(
                         canvas,
-                        &effort,
-                        rect.x + rect.w / 2.0,
-                        baseline(rect.y + rect.h / 2.0, Weight::Medium, 34.0),
-                        Weight::Medium,
-                        34.0,
-                        WHITE,
+                        RectF::new(x, y, self.width, TARGET),
+                        &labels,
+                        selected,
+                        pressed_segment,
+                    );
+                    target += efforts.len();
+                }
+                Item::Model {
+                    provider: p_id,
+                    id,
+                    label,
+                } => {
+                    if pressed == Some(target) {
+                        widgets::fill(
+                            canvas,
+                            RectF::new(0.0, y, x * 2.0 + self.width, ROW),
+                            c.row_pressed,
+                        );
+                    }
+                    let current = p_id == provider && id == model;
+                    let label = widgets::fit(label, T_BODY, self.width * 0.55);
+                    widgets::text(
+                        canvas,
+                        &label,
+                        x,
+                        T_BODY.baseline(y + (ROW - T_BODY.line()) / 2.0),
+                        T_BODY,
+                        p.text,
                         1.0,
                     );
-                }
-            }
-            SheetItem::Model {
-                provider,
-                id,
-                label,
-            } => {
-                let rect = RectF::new(MARGIN, y, W - 2.0 * MARGIN, SHEET_ROW);
-                if pressed == Some(Action::PickModel(provider.clone(), id.clone())) {
-                    canvas.fill_rrect(rect, 20.0, 0x3a3a3c, 1.0);
-                }
-                text::draw(
-                    canvas,
-                    &label,
-                    MARGIN + 30.0,
-                    baseline(y + SHEET_ROW / 2.0, Weight::Regular, 46.0),
-                    Weight::Regular,
-                    46.0,
-                    WHITE,
-                    1.0,
-                );
-                let id_text = text::fit(&id, Weight::Regular, 32.0, 380.0);
-                let current = selection.provider == provider && selection.model == id;
-                text::draw_right(
-                    canvas,
-                    &id_text,
-                    W - MARGIN - 90.0,
-                    baseline(y + SHEET_ROW / 2.0, Weight::Regular, 32.0),
-                    Weight::Regular,
-                    32.0,
-                    SECONDARY,
-                    TERTIARY_ALPHA,
-                );
-                if current {
-                    let mut check = Path::new();
-                    let (cx, cy) = (W - MARGIN - 44.0, y + SHEET_ROW / 2.0);
-                    check.stroke_polyline(
-                        &[
-                            (cx - 18.0, cy),
-                            (cx - 5.0, cy + 14.0),
-                            (cx + 18.0, cy - 14.0),
-                        ],
-                        7.0,
+                    let id_text = widgets::fit(id, T_SMALL, self.width * 0.4 - 70.0);
+                    widgets::text_right(
+                        canvas,
+                        &id_text,
+                        x + self.width - 76.0,
+                        T_SMALL.baseline(y + (ROW - T_SMALL.line()) / 2.0),
+                        T_SMALL,
+                        p.muted,
+                        1.0,
                     );
-                    canvas.fill_path(&check, BLUE, 1.0);
+                    if current {
+                        icons::draw(
+                            canvas,
+                            Icon::Check,
+                            x + self.width - 30.0,
+                            y + ROW / 2.0,
+                            52.0,
+                            p.accent,
+                            1.0,
+                        );
+                    }
+                    widgets::hairline(
+                        canvas,
+                        x,
+                        x + self.width,
+                        y + ROW - HAIRLINE,
+                        c.rule_field_row,
+                    );
+                    target += 1;
                 }
-                canvas.fill_rect(
-                    (MARGIN + 30.0) as i32,
-                    (y + SHEET_ROW - 2.0) as i32,
-                    (W - 2.0 * MARGIN - 30.0) as i32,
-                    2,
-                    SEPARATOR,
-                    1.0,
-                );
             }
-            SheetItem::End => {}
         }
     }
-    canvas.reset_clip();
+
+    fn item_at(&self, _cx: &Cx, x: f32, y: f32) -> Option<usize> {
+        self.targets()
+            .iter()
+            .position(|(rect, _)| rect.contains(x, y))
+    }
+
+    fn activate(&mut self, _cx: &Cx, index: usize) -> Reply {
+        match self.targets().into_iter().nth(index) {
+            // Picking an effort keeps the sheet; a model closes it.
+            Some((_, action @ Action::Ops(ops::Act::PickEffort(_)))) => Reply::Action(action),
+            Some((_, action)) => Reply::CloseWith(action),
+            None => Reply::None,
+        }
+    }
+
+    fn key(&self, _cx: &Cx) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (&self.selection, format!("{:?}", self.items), &self.title).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn scoped(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exocortex::proto::parse_event;
+    use std::time::Instant;
+
+    #[test]
+    fn the_model_sheet_lists_signed_in_providers_and_picks() {
+        let mut model = Model::new();
+        model.on_connected();
+        model.apply(
+            parse_event(r#"{"type":"tools_available","providers":[{"id":"anthropic","label":"Anthropic","defaultModel":"m","models":[{"id":"m","label":"Haiku","defaultEffort":"high","supportedEfforts":[{"effort":"low"},{"effort":"high"}]}]},{"id":"openai","label":"OpenAI","defaultModel":"g","models":[{"id":"g","label":"GPT","defaultEffort":"low","supportedEfforts":[]}]}],"authByProvider":{"anthropic":true,"openai":false},"tools":[],"conversationDefaults":{"defaults":{"provider":"anthropic","model":"m","effort":"high"}}}"#),
+            Instant::now(),
+        );
+        let listed = items(&model);
+        assert!(
+            listed
+                .iter()
+                .any(|(_, item)| matches!(item, Item::Model { id, .. } if id == "m"))
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|(_, item)| matches!(item, Item::Model { id, .. } if id == "g")),
+            "not signed in"
+        );
+        let mut sheet = inspector();
+        let cx = Cx {
+            model: &model,
+            width: 1080.0,
+            height: 2216.0,
+            keyboard: false,
+            now: Instant::now(),
+        };
+        let content = &mut sheet.content;
+        content.layout(&cx, 992.0);
+        // The second effort segment, then the model row.
+        let high = content.item_at(&cx, 600.0, SECTION + 20.0).unwrap();
+        assert_eq!(
+            content.activate(&cx, high),
+            Reply::Action(Action::Ops(ops::Act::PickEffort("high".into())))
+        );
+        let row_y = SECTION + TARGET + 22.0 + SECTION + 10.0;
+        let row = content.item_at(&cx, 300.0, row_y).unwrap();
+        assert_eq!(
+            content.activate(&cx, row),
+            Reply::CloseWith(Action::Ops(ops::Act::PickModel(
+                "anthropic".into(),
+                "m".into()
+            )))
+        );
+    }
 }

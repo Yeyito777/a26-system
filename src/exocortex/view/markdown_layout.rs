@@ -1,26 +1,32 @@
-//! Markdown laid out as pieces: wrapped, styled runs of text, headings,
-//! list items, quotes, rules and code boxes.
+//! Markdown laid out as pieces (WP-C1): wrapped, styled runs of text,
+//! headings, list items, quotes, rules and code boxes, in Whale (roadmap
+//! §3.3, §3.6.7). Others use `wrap`, `Run` and `font` (the composer's and
+//! bubbles' text) read-only; C1 owns the rest.
+//!
+//! Everything here bakes the current theme's colours and sizes into its
+//! ops: the view caches pieces by `theme::generation()`.
 
 use crate::gfx::{RectF, Rgb};
 use crate::text::{self, Weight};
-use crate::ui::{BLUE, SECONDARY, SECONDARY_ALPHA, SEPARATOR, TERTIARY_ALPHA, WHITE};
 
 #[cfg(test)]
 use super::super::markdown;
 use super::super::markdown::{MdBlock, Span, Style};
-use super::ops::Op;
+use super::super::theme::{
+    self, HAIRLINE, LIST_INDENT, MARKDOWN_GAP, MARKER_GAP, QUOTE_BAR, QUOTE_INDENT, T_BODY,
+    T_CAPTION, T_CODE, T_H1, T_H2, T_H3, T_H4, T_INLINE_CODE,
+};
+use super::ops::{self, Op};
 
 // Text.
-pub(crate) const BODY: f32 = 44.0;
-pub(crate) const BODY_LINE: f32 = 61.0;
+pub(crate) const BODY: f32 = 40.0;
+pub(crate) const BODY_LINE: f32 = 60.0;
 pub(crate) const CODE: f32 = 34.0;
-pub(crate) const CODE_LINE: f32 = 48.0;
-pub(crate) const SMALL: f32 = 36.0;
+pub(crate) const CODE_LINE: f32 = 52.0;
+/// Tool lines, notices.
+pub(crate) const SMALL: f32 = 34.0;
 pub(crate) const SMALL_LINE: f32 = 48.0;
-pub(crate) const PARAGRAPH_GAP: f32 = 26.0;
-pub(crate) const CODE_BG: Rgb = 0x1c1c1e;
-pub(crate) const INLINE_CODE_BG: Rgb = 0x2c2c2e;
-pub(crate) const INLINE_CODE: Rgb = 0xffb86b;
+pub(crate) const PARAGRAPH_GAP: f32 = MARKDOWN_GAP;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Run {
@@ -30,13 +36,19 @@ pub struct Run {
     pub style: Style,
 }
 
-pub(crate) fn font(style: Style, size: f32) -> (Weight, f32, Rgb) {
+/// A span style's face, size and colour at body size `size`.
+pub fn font(style: Style, size: f32) -> (Weight, f32, Rgb) {
+    let p = theme::p();
     match style {
-        Style::Plain => (Weight::Regular, size, WHITE),
-        Style::Bold => (Weight::SemiBold, size, WHITE),
-        Style::Italic => (Weight::Italic, size, WHITE),
-        Style::Code => (Weight::Mono, (size * 0.86).round(), INLINE_CODE),
-        Style::Link => (Weight::Regular, size, BLUE),
+        Style::Plain => (Weight::Mono, size, p.text),
+        Style::Bold => (Weight::MonoBold, size, p.text),
+        Style::Italic => (theme::T_ITALIC, size, p.text),
+        Style::Code => (
+            Weight::Mono,
+            (size * T_INLINE_CODE.px() / T_BODY.px()).round(),
+            p.secondary_accent,
+        ),
+        Style::Link => (Weight::Mono, size, p.link),
     }
 }
 
@@ -158,6 +170,7 @@ pub(crate) fn line_width(line: &[Run]) -> f32 {
 }
 
 /// Pushes a wrapped paragraph's runs as text ops; returns its height.
+/// `color` overrides the text's (not code's or links').
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_lines(
     ops: &mut Vec<Op>,
@@ -169,20 +182,21 @@ pub(crate) fn push_lines(
     color: Option<Rgb>,
     alpha: f32,
 ) -> f32 {
+    let c = theme::c();
     for (index, line) in lines.iter().enumerate() {
-        let base = top + index as f32 * line_h + line_h * 0.72;
+        let base = top + index as f32 * line_h + (line_h + size * 0.74) / 2.0;
         for run in line {
             let (weight, fsize, default) = font(run.style, size);
             if run.style == Style::Code {
                 ops.push(Op::Rect {
                     rect: RectF::new(
-                        x + run.x - 6.0,
-                        base - fsize * 0.95,
-                        run.w + 12.0,
-                        fsize * 1.32,
+                        x + run.x - 8.0,
+                        base - fsize * 0.86,
+                        run.w + 16.0,
+                        fsize * 1.24,
                     ),
-                    radius: 10.0,
-                    color: INLINE_CODE_BG,
+                    radius: 0.0,
+                    color: c.inline_code_bg,
                     alpha: 1.0,
                 });
             }
@@ -197,6 +211,7 @@ pub(crate) fn push_lines(
                 text: run.text.clone(),
                 weight,
                 size: fsize,
+                tracking: 0.0,
                 color,
                 alpha,
             });
@@ -231,7 +246,7 @@ pub(crate) fn lay_markdown(ops: &mut Vec<Op>, source: &str, x: f32, width: f32, 
 pub(crate) fn md_gap(previous: &MdBlock, block: &MdBlock) -> f32 {
     match (previous, block) {
         (MdBlock::Item(..), MdBlock::Item(..)) => 8.0,
-        (_, MdBlock::Heading(..)) => PARAGRAPH_GAP + 12.0,
+        (_, MdBlock::Heading(..)) => PARAGRAPH_GAP + 10.0,
         _ => PARAGRAPH_GAP,
     }
 }
@@ -244,6 +259,8 @@ pub(crate) fn lay_md_block(
     width: f32,
     top: f32,
 ) -> f32 {
+    let p = theme::p();
+    let c = theme::c();
     let mut y = top;
     match block {
         MdBlock::Paragraph(spans) => {
@@ -251,55 +268,42 @@ pub(crate) fn lay_md_block(
             y += push_lines(ops, &lines, x, y, BODY, BODY_LINE, None, 1.0);
         }
         MdBlock::Heading(level, spans) => {
-            let (size, line, weight_spans) = match level {
-                1 => (58.0, 74.0, true),
-                2 => (52.0, 68.0, true),
-                3 => (47.0, 63.0, true),
-                _ => (BODY, BODY_LINE, true),
+            let (ty, color) = match level {
+                1 => (T_H1, p.accent),
+                2 => (T_H2, p.accent),
+                3 => (T_H3, p.secondary_accent),
+                _ => (T_H4, p.secondary_accent),
             };
             let spans: Vec<Span> = spans
                 .iter()
                 .map(|span| Span {
                     text: span.text.clone(),
-                    style: if weight_spans && span.style == Style::Plain {
+                    style: if span.style == Style::Plain {
                         Style::Bold
                     } else {
                         span.style
                     },
                 })
                 .collect();
-            let lines = wrap(&spans, width, size);
-            y += push_lines(ops, &lines, x, y, size, line, None, 1.0);
+            let lines = wrap(&spans, width, ty.px());
+            y += push_lines(ops, &lines, x, y, ty.px(), ty.line(), Some(color), 1.0);
         }
         MdBlock::Item(depth, marker, spans) => {
-            let indent = f32::from(*depth) * 48.0;
-            let marker_w = if marker.ends_with('.') {
-                text::measure(marker, Weight::Regular, BODY).max(34.0) + 16.0
-            } else {
-                48.0
-            };
+            let indent = f32::from(*depth) * MARKER_GAP;
+            let marker_w = text::measure(marker, Weight::Mono, BODY).max(LIST_INDENT - 10.0) + 10.0;
             let shown = if marker == "•" && *depth > 0 {
                 "◦"
             } else {
                 marker
             };
-            ops.push(Op::Text {
-                x: x + indent + if marker.ends_with('.') { 0.0 } else { 6.0 },
-                baseline: y + BODY_LINE * 0.72,
-                text: shown.to_owned(),
-                weight: Weight::Regular,
-                size: BODY,
-                color: if marker.ends_with('.') {
-                    WHITE
-                } else {
-                    SECONDARY
-                },
-                alpha: if marker.ends_with('.') {
-                    1.0
-                } else {
-                    SECONDARY_ALPHA
-                },
-            });
+            ops.push(ops::text(
+                x + indent,
+                y + (BODY_LINE + BODY * 0.74) / 2.0,
+                shown,
+                Weight::Mono,
+                BODY,
+                p.accent,
+            ));
             let lines = wrap(spans, width - indent - marker_w, BODY);
             y += push_lines(
                 ops,
@@ -313,45 +317,37 @@ pub(crate) fn lay_md_block(
             );
         }
         MdBlock::Quote(spans) => {
-            let lines = wrap(spans, width - 36.0, BODY);
+            let lines = wrap(spans, width - QUOTE_INDENT, BODY);
             let h = push_lines(
                 ops,
                 &lines,
-                x + 36.0,
+                x + QUOTE_INDENT,
                 y,
                 BODY,
                 BODY_LINE,
-                Some(SECONDARY),
-                0.85,
+                Some(c.text_quote),
+                1.0,
             );
-            ops.push(Op::Rect {
-                rect: RectF::new(x + 4.0, y + 4.0, 7.0, h - 8.0),
-                radius: 3.5,
-                color: SECONDARY,
-                alpha: TERTIARY_ALPHA,
-            });
+            ops.push(ops::rect(RectF::new(x, y, QUOTE_BAR, h), c.quote_bar));
             y += h;
         }
         MdBlock::Code(lines) => {
-            y += lay_code(ops, lines, x, width, y, INLINE_CODE_BG_BLOCK, usize::MAX);
+            y += lay_code(ops, lines, x, width, y, c.code_bg, usize::MAX);
         }
         MdBlock::Rule => {
-            ops.push(Op::Rect {
-                rect: RectF::new(x, y + 12.0, width, 2.0),
-                radius: 0.0,
-                color: SEPARATOR,
-                alpha: 1.0,
-            });
+            ops.push(ops::rect(
+                RectF::new(x, y + 12.0, width, HAIRLINE),
+                c.rule_strong,
+            ));
             y += 26.0;
         }
     }
     y
 }
 
-pub(crate) const INLINE_CODE_BG_BLOCK: Rgb = CODE_BG;
-
-/// Monospaced lines in a rounded box, broken at the box's width (code is
-/// never reflowed by words). At most `max_lines`, then a count of the rest.
+/// Monospaced lines in a box (code, a tool's input or output), broken at
+/// the box's width (code is never reflowed by words). At most
+/// `max_lines`, then a count of the rest.
 pub(crate) fn lay_code(
     ops: &mut Vec<Op>,
     lines: &[String],
@@ -361,9 +357,11 @@ pub(crate) fn lay_code(
     background: Rgb,
     max_lines: usize,
 ) -> f32 {
-    let pad = 28.0;
+    let p = theme::p();
+    let c = theme::c();
+    let (pad_y, pad_x) = (28.0, 34.0);
     let advance = text::measure("M", Weight::Mono, CODE).max(1.0);
-    let columns = (((width - 2.0 * pad) / advance).floor() as usize).max(8);
+    let columns = (((width - 2.0 * pad_x) / advance).floor() as usize).max(8);
     let mut rows: Vec<String> = Vec::new();
     for line in lines {
         let characters: Vec<char> = line.chars().collect();
@@ -379,27 +377,31 @@ pub(crate) fn lay_code(
         rows.truncate(max_lines);
         rows.push(format!("… {hidden} more lines"));
     }
-    let h = rows.len().max(1) as f32 * CODE_LINE + 2.0 * pad - 12.0;
-    ops.push(Op::Rect {
+    let h = rows.len().max(1) as f32 * CODE_LINE + 2.0 * pad_y;
+    ops.push(ops::rect(RectF::new(x, top, width, h), background));
+    ops.push(Op::Border {
         rect: RectF::new(x, top, width, h),
-        radius: 24.0,
-        color: background,
-        alpha: 1.0,
+        width: HAIRLINE,
+        color: c.rule_code,
     });
     for (index, row) in rows.iter().enumerate() {
         if row.is_empty() {
             continue;
         }
         let muted = hidden > 0 && index == rows.len() - 1;
-        ops.push(Op::Text {
-            x: x + pad,
-            baseline: top + pad - 6.0 + index as f32 * CODE_LINE + CODE_LINE * 0.7,
-            text: row.clone(),
-            weight: if muted { Weight::Regular } else { Weight::Mono },
-            size: CODE,
-            color: if muted { SECONDARY } else { 0xe5e5ea },
-            alpha: if muted { SECONDARY_ALPHA } else { 1.0 },
-        });
+        let (size, color) = if muted {
+            (T_CAPTION.px(), p.muted)
+        } else {
+            (T_CODE.px(), p.text)
+        };
+        ops.push(ops::text(
+            x + pad_x,
+            top + pad_y + index as f32 * CODE_LINE + (CODE_LINE + size * 0.74) / 2.0,
+            row.clone(),
+            Weight::Mono,
+            size,
+            color,
+        ));
     }
     h
 }

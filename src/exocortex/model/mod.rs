@@ -1,47 +1,146 @@
 //! The Exocortex app's state: the daemon's conversation list (folders,
 //! pinned and recent order as the TUI shows them), the open conversation's
-//! history window and live reply, the model choices, and what the UI asks the
-//! daemon for. Events in, commands out; no I/O here, so all of it is tested.
+//! history window and live reply, the composer, the model choices, and what
+//! the UI asks the daemon for. Events in, commands out; no I/O here, so all
+//! of it is tested.
+//!
+//! Each work package owns a part (roadmap §4): the list is `sidebar.rs`
+//! (B), the open conversation `chat.rs` (C2), the composer `composer.rs`
+//! (D), models, settings and the operations panels `ops.rs` (E). Each
+//! defines its state struct (a field of `Model`), its actions (a variant
+//! of `Action`), its `handle_*` for them and its `apply_*` for daemon
+//! events, so a package edits its own file. This file (A) holds the
+//! connection, the pages, the fan-out and requests, and what the model
+//! asks of the interface (`Ui`: overlays to open, effects such as haptics).
 
 pub mod chat;
 pub mod composer;
 pub mod ops;
 pub mod sidebar;
 
-use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::proto::{self, Event, Provider, Queued, Selection, Summary};
+use super::proto::{self, Event, Summary};
+use super::requests::{self, Owner, Pending, Requests};
+use super::store::Persist;
+use super::ui::Haptic;
+use super::ui::overlay::Overlay;
+use crate::control::KeyboardPurpose;
 
-pub use chat::{Chat, Echo, Live};
+pub use chat::{Chat, Echo, Live, Shelf};
+pub use composer::Composer;
+pub use ops::Ops;
 pub use sidebar::{Row, Sidebar};
 
+/// The three pages, left to right (PAR-001): Settings | List | Chat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Settings,
     List,
     Chat,
 }
 
-/// Something the user did.
+/// Something the user did (or a screen asked for): one variant per area,
+/// each area's own enum in its file.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    OpenFolder(String),
+    /// Pages (A).
+    Nav(Nav),
+    /// The conversation list (B, `sidebar::Act`).
+    List(sidebar::Act),
+    /// The open conversation (C2, `chat::Act`).
+    Chat(chat::Act),
+    /// The composer (D, `composer::Act`).
+    Composer(composer::Act),
+    /// Models, settings and the operations panels (E, `ops::Act`).
+    Ops(ops::Act),
+    /// The interface itself (A).
+    Ui(UiAct),
+}
+
+/// Moving between pages.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Nav {
+    /// The top bar's back, Moon's Back, the left-edge swipe: out of a chat,
+    /// up a folder, or from the list to Settings.
+    Back,
     OpenConversation(String),
     NewConversation,
-    Back,
-    Send,
-    Abort,
-    ToggleExpanded(String),
-    ShowPicker,
-    HidePicker,
-    PickModel(String, String),
-    PickEffort(String),
+    OpenSettings,
+    /// From Settings back to the list.
+    CloseSettings,
+}
+
+/// The interface's own actions.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Some are for the work packages (links: C1).
+pub enum UiAct {
+    /// Closes the topmost overlay.
+    Dismiss,
+    /// Copies text to the clipboard ("Copied", a selection haptic).
+    Copy(String),
+    /// Opens an http(s) link in Moon's Browser.
+    OpenUrl(String),
+    /// Opens the reader on a text (C1 completes the reader).
+    Read { title: String, text: String },
+    /// Shows a toast.
+    Toast(String),
+}
+
+/// What the model asks the event loop to do for it (it does no I/O).
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // HideKeyboard is for the work packages.
+pub enum Effect {
+    Haptic(Haptic),
+    Copy(String),
+    OpenUrl(String),
+    ShowKeyboard(KeyboardPurpose),
+    HideKeyboard,
+}
+
+/// What the model asks of the interface: overlays to open or close and
+/// effects to perform; the event loop takes them after every change.
+#[derive(Default)]
+pub struct Ui {
+    pub opening: Vec<Box<dyn Overlay>>,
+    /// Close every modal overlay (a page changed).
+    pub close_all: bool,
+    /// Close the topmost modal overlay.
+    pub close_top: bool,
+    /// Close the conversation-scoped overlays (the conversation changed).
+    pub close_scoped: bool,
+    pub effects: Vec<Effect>,
+}
+
+impl Ui {
+    pub fn open(&mut self, overlay: Box<dyn Overlay>) {
+        self.opening.push(overlay);
+    }
+
+    pub fn toast(&mut self, text: impl Into<String>) {
+        self.open(Box::new(super::ui::toast::Toast::new(text.into(), false)));
+    }
+
+    pub fn error_toast(&mut self, text: impl Into<String>) {
+        self.open(Box::new(super::ui::toast::Toast::new(text.into(), true)));
+    }
+
+    pub fn effect(&mut self, effect: Effect) {
+        self.effects.push(effect);
+    }
+
+    pub fn haptic(&mut self, haptic: Haptic) {
+        self.effects.push(Effect::Haptic(haptic));
+    }
 }
 
 pub struct Model {
     pub connected: bool,
+    /// The daemon answered the bootstrap's ping: sending and commands are
+    /// allowed (PAR-020). Stop is not gated on it.
+    pub ready: bool,
     /// "Reconnecting…" shows: disconnected, and not for a quiet reconnection
     /// that has not taken long yet.
     pub offline: bool,
@@ -50,35 +149,21 @@ pub struct Model {
     quiet_until: Option<Instant>,
     /// Ever connected: "Connecting…" is said differently the first time.
     pub was_connected: bool,
-    pub sidebar: Sidebar,
+    /// The bootstrap ping's reqId, whose pong makes the connection ready.
+    ping: Option<String>,
     pub page: Page,
-    /// The folder path of the list, innermost last.
-    pub folders: Vec<String>,
+    pub ui: Ui,
+    pub requests: Requests,
+    /// The kept files (settings.json, ui.json, drafts.json).
+    pub persist: Persist,
+    pub sidebar: Sidebar,
     pub chat: Chat,
-    pub providers: Vec<Provider>,
-    pub tool_styles: HashMap<String, proto::ToolStyle>,
-    pub auth: HashMap<String, bool>,
-    pub defaults: Selection,
-    /// The model a new conversation will use.
-    pub draft_selection: Option<Selection>,
-    pub queued: Vec<Queued>,
-    pub composer: String,
-    pub drafts: HashMap<String, String>,
-    pub picker: bool,
-    next_request: u64,
-    /// Requests whose answer opens the chat (load) or replaces it.
-    load_request: Option<String>,
-    /// When it was sent (it is given up on after `ANSWER_WITHIN`).
-    load_sent: Option<Instant>,
-    refresh_request: Option<String>,
-    /// Conversations opened before, most recent last: reopening one shows
-    /// it at once while the daemon's fresh window is on its way.
-    shelf: Vec<Chat>,
-    /// Bumped when tool styles change (they label tool rows).
-    pub styles_version: u64,
+    /// Conversations opened before, to show at once when reopened.
+    pub shelf: Shelf,
+    pub composer: Composer,
+    pub ops: Ops,
     /// A conversation to open once connected (a notification's target).
     pub pending_open: Option<String>,
-    pub notice: Option<(String, Instant)>,
 }
 
 impl Default for Model {
@@ -90,7 +175,8 @@ impl Default for Model {
 /// A conversation's window, or an older page, that has not come in this
 /// long is given up on: the chat says so (a late one still lands), and
 /// scrolling up asks again.
-pub const ANSWER_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
+#[allow(dead_code)]
+pub const ANSWER_WITHIN: Duration = requests::LOAD_WITHIN;
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -102,40 +188,26 @@ impl Model {
     pub fn new() -> Self {
         Self {
             connected: false,
+            ready: false,
             offline: true,
             quiet_until: None,
             was_connected: false,
-            sidebar: Sidebar::default(),
+            ping: None,
             page: Page::List,
-            folders: Vec::new(),
+            ui: Ui::default(),
+            requests: Requests::default(),
+            persist: Persist::default(),
+            sidebar: Sidebar::default(),
             chat: Chat::default(),
-            providers: Vec::new(),
-            tool_styles: HashMap::new(),
-            auth: HashMap::new(),
-            defaults: Selection::default(),
-            draft_selection: None,
-            queued: Vec::new(),
-            composer: String::new(),
-            drafts: HashMap::new(),
-            picker: false,
-            next_request: 0,
-            load_request: None,
-            load_sent: None,
-            refresh_request: None,
-            shelf: Vec::new(),
-            styles_version: 0,
+            shelf: Shelf::default(),
+            composer: Composer::default(),
+            ops: Ops::default(),
             pending_open: None,
-            notice: None,
         }
     }
 
-    fn request_id(&mut self) -> String {
-        self.next_request += 1;
-        format!("app-{}", self.next_request)
-    }
-
     pub fn current_folder(&self) -> Option<&str> {
-        self.folders.last().map(String::as_str)
+        self.sidebar.current_folder()
     }
 
     pub fn open_summary(&self) -> Option<&Summary> {
@@ -154,20 +226,21 @@ impl Model {
     /// The open conversation's window is still on its way (what shows is
     /// what was kept from before).
     pub fn chat_pending(&self) -> bool {
-        self.load_request.is_some()
+        self.chat.load_request.is_some()
     }
 
     /// The conversation shown in the chat, if any, for the bridge.
     pub fn shown_conversation(&self) -> Option<&str> {
         match self.page {
             Page::Chat => self.chat.id.as_deref(),
-            Page::List => None,
+            Page::List | Page::Settings => None,
         }
     }
 
     /// The bootstrap, sent on every (re)connection.
     pub fn on_connected(&mut self) -> Vec<Value> {
         self.connected = true;
+        self.ready = false;
         self.offline = false;
         self.quiet_until = None;
         self.was_connected = true;
@@ -179,34 +252,37 @@ impl Model {
         // all in the same write.
         let reopen = self.pending_open.take().or_else(|| match self.page {
             Page::Chat => self.chat.id.clone(),
-            Page::List => None,
+            Page::List | Page::Settings => None,
         });
         if let Some(id) = reopen {
             commands.extend(self.open(id));
         }
-        commands.push(proto::ping(&format!("ping-{}", now_ms())));
+        let ping = format!("ping-{}", now_ms());
+        self.requests.track(
+            &ping,
+            Owner::App,
+            "ping",
+            requests::DEFAULT_WITHIN,
+            Instant::now(),
+        );
+        commands.push(proto::ping(&ping));
+        self.ping = Some(ping);
         commands
     }
 
     pub fn on_disconnected(&mut self) {
         self.connected = false;
+        self.ready = false;
+        self.ping = None;
         self.offline = self.quiet_until.is_none();
-        self.load_request = None;
-        self.load_sent = None;
-        self.refresh_request = None;
-        self.chat.older_request = None;
-        self.chat.older_sent = None;
-        self.chat.outputs_requested.clear();
-        // The live tail is unknown until the conversation is reloaded (a
-        // quiet reconnection keeps showing it until then).
-        if self.quiet_until.is_none() {
-            self.chat.live = None;
-        }
+        // Nothing in flight will be answered.
+        self.requests.clear();
+        self.chat_disconnected(self.quiet_until.is_some());
     }
 
     /// The app is about to reconnect on purpose: what is on screen stays,
     /// without "Reconnecting…", for up to `grace`.
-    pub fn reconnect_quietly(&mut self, now: Instant, grace: std::time::Duration) {
+    pub fn reconnect_quietly(&mut self, now: Instant, grace: Duration) {
         self.quiet_until = Some(now + grace);
     }
 
@@ -225,299 +301,186 @@ impl Model {
 
     pub fn handle(&mut self, action: Action) -> Vec<Value> {
         match action {
-            Action::OpenFolder(id) => {
-                self.folders.push(id);
+            Action::Nav(nav) => self.handle_nav(nav),
+            Action::List(act) => self.handle_list(act),
+            Action::Chat(act) => self.handle_chat(act),
+            Action::Composer(act) => self.handle_composer(act),
+            Action::Ops(act) => self.handle_ops(act),
+            Action::Ui(act) => {
+                self.handle_ui(act);
                 Vec::new()
             }
-            Action::OpenConversation(id) => self.open(id),
-            Action::NewConversation => {
-                self.save_draft();
-                let previous = self.chat.id.clone();
-                let draft = Chat {
-                    loaded: true,
-                    ..Chat::default()
-                };
-                let old = std::mem::replace(&mut self.chat, draft);
-                self.shelve(old);
-                self.load_request = None;
-                self.draft_selection = None;
-                self.page = Page::Chat;
-                previous
-                    .map(|id| proto::unsubscribe(&id))
-                    .into_iter()
-                    .collect()
+        }
+    }
+
+    fn handle_nav(&mut self, nav: Nav) -> Vec<Value> {
+        match nav {
+            Nav::OpenConversation(id) => self.open(id),
+            Nav::NewConversation => self.new_conversation(),
+            Nav::OpenSettings => {
+                self.ui.close_all = true;
+                self.page = Page::Settings;
+                Vec::new()
             }
-            Action::Back => {
-                self.picker = false;
+            Nav::CloseSettings => {
+                self.ui.close_all = true;
+                self.page = Page::List;
+                Vec::new()
+            }
+            Nav::Back => {
+                self.ui.close_all = true;
                 match self.page {
-                    Page::Chat => {
-                        self.save_draft();
+                    Page::Chat => self.leave_chat(),
+                    Page::Settings => {
                         self.page = Page::List;
-                        let id = self.chat.id.clone();
-                        let old = std::mem::take(&mut self.chat);
-                        self.shelve(old);
-                        self.load_request = None;
-                        // Not viewing it any more: the daemon may mark it unread.
-                        id.filter(|_| self.connected)
-                            .map(|id| proto::unsubscribe(&id))
-                            .into_iter()
-                            .collect()
+                        Vec::new()
                     }
+                    // Up a folder; at the top, Settings (left of the list).
                     Page::List => {
-                        self.folders.pop();
+                        if !self.sidebar.up() {
+                            self.page = Page::Settings;
+                        }
                         Vec::new()
                     }
                 }
             }
-            Action::Send => self.send(),
-            Action::Abort => match (&self.chat.id, self.connected) {
-                (Some(id), true) => {
-                    let started = self.chat.live.as_ref().map(|live| live.started_at);
-                    vec![proto::abort(id, started)]
-                }
-                _ => Vec::new(),
-            },
-            Action::ToggleExpanded(key) => {
-                let mut commands = Vec::new();
-                if !self.chat.expanded.remove(&key) {
-                    self.chat.expanded.insert(key.clone());
-                    if let Some(tool) = key.strip_prefix("tool:")
-                        && self.wants_output(tool)
-                        && let (Some(id), true) = (self.chat.id.clone(), self.connected)
-                    {
-                        self.chat.outputs_requested.insert(tool.to_owned());
-                        let request = self.request_id();
-                        commands.push(proto::load_tool_outputs(&request, &id, &[tool.to_owned()]));
-                    }
-                }
-                self.chat.touch();
-                commands
+        }
+    }
+
+    fn handle_ui(&mut self, act: UiAct) {
+        match act {
+            UiAct::Dismiss => self.ui.close_top = true,
+            UiAct::Copy(text) => {
+                self.ui.effect(Effect::Copy(text));
+                self.ui.haptic(Haptic::Selection);
+                self.ui.toast("Copied");
             }
-            Action::ShowPicker => {
-                self.picker = true;
-                Vec::new()
-            }
-            Action::HidePicker => {
-                self.picker = false;
-                Vec::new()
-            }
-            Action::PickModel(provider, model) => {
-                self.picker = false;
-                let effort = self
-                    .providers
-                    .iter()
-                    .find(|p| p.id == provider)
-                    .and_then(|p| p.models.iter().find(|m| m.id == model))
-                    .map(|m| m.default_effort.clone())
-                    .unwrap_or_default();
-                match (&self.chat.id, self.connected) {
-                    (Some(id), true) => vec![proto::set_model(id, &provider, &model)],
-                    (Some(_), false) => Vec::new(),
-                    (None, _) => {
-                        self.draft_selection = Some(Selection {
-                            provider,
-                            model,
-                            effort,
-                        });
-                        Vec::new()
-                    }
+            UiAct::OpenUrl(url) => {
+                if super::ui::openable(&url) {
+                    self.ui.effect(Effect::OpenUrl(url));
+                } else {
+                    self.ui.toast("Only web links open in the Browser.");
                 }
             }
-            Action::PickEffort(effort) => match (&self.chat.id, self.connected) {
-                (Some(id), true) => vec![proto::set_effort(id, &effort)],
-                (Some(_), false) => Vec::new(),
-                (None, _) => {
-                    let mut selection = self.selection();
-                    selection.effort = effort;
-                    self.draft_selection = Some(selection);
-                    Vec::new()
-                }
-            },
+            UiAct::Read { title, text } => {
+                self.ui
+                    .open(Box::new(super::reader::Reader::new(title, text)));
+            }
+            UiAct::Toast(text) => self.ui.toast(text),
         }
     }
 
     /// Whether an event can change what is on screen (a chat is not
     /// redrawn for other conversations' sidebar traffic).
     pub fn affects_view(&self, event: &Event) -> bool {
-        if self.page == Page::List || self.picker {
+        if self.page != Page::Chat {
             return true;
         }
         let open = self.chat.id.as_deref();
         match event {
             Event::ConversationUpdated { summary, .. }
-            | Event::ConversationRestored { summary } => Some(summary.id.as_str()) == open,
+            | Event::ConversationRestored { summary, .. } => Some(summary.id.as_str()) == open,
             Event::ConversationsList { .. }
             | Event::ConversationMoved { .. }
             | Event::SidebarItemsReordered { .. }
             | Event::SidebarStatePatched { .. }
             | Event::ConversationPinned { .. }
+            | Event::ConversationMarked(_)
             | Event::ConnectivityStatus { .. }
+            | Event::UsageUpdate(_)
+            | Event::Ack { .. }
             | Event::Pong { .. } => false,
-            Event::ConversationDeleted { conv_id } => Some(conv_id.as_str()) == open,
+            Event::ConversationDeleted { conv_id, .. } => Some(conv_id.as_str()) == open,
             _ => true,
         }
     }
 
-    /// Applies one daemon event; returns commands it calls for.
+    /// Applies one daemon event; returns commands it calls for. Every area
+    /// sees it: the list, the operations, the composer (by reference), and
+    /// last the open conversation (by value: windows are big).
     pub fn apply(&mut self, event: Event, now: Instant) -> Vec<Value> {
-        self.sidebar.apply(&event);
-        match event {
-            Event::ToolsAvailable {
-                providers,
-                tools,
-                auth_by_provider,
-                conversation_defaults,
-            } => {
-                let styles: HashMap<String, proto::ToolStyle> = tools
-                    .into_iter()
-                    .map(|tool| (tool.name.to_ascii_lowercase(), tool))
-                    .collect();
-                if styles != self.tool_styles {
-                    self.tool_styles = styles;
-                    self.styles_version += 1;
-                    self.chat.touch();
-                }
-                self.providers = providers;
-                self.auth = auth_by_provider;
-                if let Some(snapshot) = conversation_defaults {
-                    self.defaults = snapshot.defaults;
-                }
-                Vec::new()
-            }
-            Event::ConversationDefaults { defaults } => {
-                self.defaults = defaults;
-                Vec::new()
-            }
-            Event::QueueUpdated { messages } => {
-                self.queued = messages;
-                self.chat.touch();
-                Vec::new()
-            }
-            Event::ConversationDeleted { conv_id } => {
-                self.shelf
-                    .retain(|chat| chat.id.as_deref() != Some(&conv_id));
-                if self.chat.id.as_deref() == Some(&conv_id) {
-                    self.page = Page::List;
-                    self.chat = Chat::default();
-                }
-                Vec::new()
-            }
-            Event::ConversationLoaded {
-                req_id,
-                conv_id,
-                window,
-                ..
-            } => {
-                if self.chat.id.as_deref() != Some(&conv_id) {
-                    return Vec::new();
-                }
-                let backfill = window.initial_backfill_req_id.clone();
-                let streaming = matches!(window.pending_ai, Some(Some(_)));
-                let fresh = req_id.is_some() && req_id == self.load_request;
-                if fresh {
-                    self.load_request = None;
-                    self.load_sent = None;
-                    self.chat.live = None;
-                    self.chat.echoes.clear();
-                    self.chat.error = None;
-                }
-                let before = (self.chat.start, self.chat.start_block);
-                self.chat.splice(window, fresh);
-                if fresh {
-                    // The older page follows, unless the history from before
-                    // was kept: it would not join on, so it is not waited for.
-                    let kept = (self.chat.start, self.chat.start_block) == before;
-                    self.chat.older_request = if kept { None } else { backfill };
-                    if self.chat.older_request.is_none() {
-                        self.chat.older_sent = None;
-                    }
-                }
-                if !streaming && !self.open_summary().is_some_and(|s| s.streaming) {
-                    self.chat.live = None;
-                }
-                Vec::new()
-            }
-            Event::ConversationHistoryLoaded {
-                req_id,
-                conv_id,
-                window,
-            } => {
-                if self.chat.id.as_deref() != Some(&conv_id) {
-                    return Vec::new();
-                }
-                if req_id.is_some() && req_id == self.chat.older_request {
-                    self.chat.older_request = None;
-                    self.chat.older_sent = None;
-                    if !self.chat.prepend(window) {
-                        // The history moved under the page: start over.
-                        return self.reload();
-                    }
-                } else if req_id.is_some() && req_id == self.refresh_request {
-                    self.refresh_request = None;
-                    let live = self.chat.live.take();
-                    self.chat.splice(window, false);
-                    if self.open_summary().is_some_and(|s| s.streaming) {
-                        self.chat.live = live;
-                    }
-                }
-                Vec::new()
-            }
-            Event::HistoryUpdated { conv_id, window } => {
-                if self.chat.id.as_deref() == Some(&conv_id) && self.chat.loaded {
-                    let had_live = self.chat.live.is_some();
-                    let pending = window.pending_ai.clone();
-                    self.chat.splice(window, false);
-                    match pending {
-                        // The daemon says the turn is over.
-                        Some(None) => self.chat.live = None,
-                        None if had_live && !self.open_summary().is_some_and(|s| s.streaming) => {
-                            self.chat.live = None;
-                        }
-                        _ => {}
-                    }
-                }
-                Vec::new()
-            }
-            Event::ConversationUnwound { conv_id, .. } => {
-                self.shelf
-                    .retain(|chat| chat.id.as_deref() != Some(&conv_id));
-                if self.chat.id.as_deref() == Some(&conv_id) {
-                    self.reload()
-                } else {
-                    Vec::new()
-                }
-            }
-            Event::ToolOutputsLoaded { conv_id, outputs } => {
-                if self.chat.id.as_deref() == Some(&conv_id) {
-                    for output in outputs {
-                        self.chat.outputs.insert(output.tool_call_id, output.output);
-                    }
-                    self.chat.touch();
-                }
-                Vec::new()
+        // An answer settles its request; its owner handles it below.
+        let settled = event.req_id().and_then(|id| {
+            self.requests
+                .settle(id)
+                .map(|pending| (id.to_owned(), pending))
+        });
+        let mut commands = Vec::new();
+        match &event {
+            Event::Pong { req_id, .. } if req_id.is_some() && *req_id == self.ping => {
+                self.ready = true;
             }
             Event::Error {
                 req_id,
                 conv_id,
                 message,
             } => {
-                if req_id.is_some() && req_id == self.load_request {
-                    self.load_request = None;
-                    self.load_sent = None;
-                    self.chat.error = Some(message.clone());
-                    self.chat.loaded = true;
-                    self.chat.touch();
-                } else if req_id.is_some() && req_id == self.chat.older_request {
-                    self.chat.older_request = None;
-                    self.chat.older_sent = None;
-                    self.chat.has_older = false;
-                } else if conv_id.is_some() && conv_id == self.chat.id {
-                    self.notice = Some((message, now));
+                if !self.route_error(req_id.as_deref(), settled.as_ref(), message) {
+                    // About the open conversation, or ours: say so.
+                    let ours = settled.is_some();
+                    if ours || (conv_id.is_some() && *conv_id == self.chat.id) {
+                        self.ui.error_toast(message.clone());
+                    }
                 }
-                Vec::new()
+                return commands;
             }
-            event => self.apply_stream(event),
+            _ => {}
         }
+        commands.extend(self.apply_list(&event, now));
+        commands.extend(self.apply_ops(&event, now));
+        commands.extend(self.apply_composer(&event, now));
+        commands.extend(self.apply_chat(event, now));
+        commands
+    }
+
+    /// An error answering a request: its owner's to handle. True when one
+    /// did.
+    fn route_error(
+        &mut self,
+        req_id: Option<&str>,
+        settled: Option<&(String, Pending)>,
+        message: &str,
+    ) -> bool {
+        let Some(id) = req_id else {
+            return false;
+        };
+        match settled.map(|(_, pending)| pending.owner) {
+            // Not waited on any more: a late answer the chat may still keep.
+            None | Some(Owner::Chat) => self.chat_error(id, message),
+            Some(Owner::Sidebar) => self.list_error(id, message),
+            Some(Owner::Composer) => self.composer_error(id, message),
+            Some(Owner::Ops) => self.ops_error(id, message),
+            Some(Owner::App) => false,
+        }
+    }
+
+    /// Gives up on what the daemon has not answered in time; returns
+    /// whether that changed what shows.
+    pub fn expire(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        for (id, pending) in self.requests.expire(now) {
+            changed |= match pending.owner {
+                Owner::Chat => self.chat_timeout(&id, &pending),
+                Owner::Sidebar => self.list_timeout(&id, &pending),
+                Owner::Composer => self.composer_timeout(&id, &pending),
+                Owner::Ops => self.ops_timeout(&id, &pending),
+                // The connection answers nothing: it shows as connecting.
+                Owner::App => false,
+            };
+        }
+        changed
+    }
+
+    /// When `expire` next has something to do.
+    pub fn answer_deadline(&self) -> Option<Instant> {
+        self.requests.deadline()
+    }
+
+    /// A request of an area that did not handle its timeout itself: say so
+    /// (the generic actionable error, PAR-027).
+    pub(super) fn generic_timeout(&mut self) -> bool {
+        self.ui.error_toast("Exocortex did not answer. Try again.");
+        true
     }
 }
 
@@ -534,9 +497,19 @@ mod tests {
         )
     }
 
+    /// Connected and ready (the daemon answered the ping).
     fn connected() -> Model {
         let mut model = Model::new();
-        model.on_connected();
+        let commands = model.on_connected();
+        let ping = commands.last().unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        model.apply(
+            parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
+            Instant::now(),
+        );
+        assert!(model.ready);
         model
     }
 
@@ -601,7 +574,7 @@ mod tests {
     }
 
     fn open(model: &mut Model, id: &str) -> String {
-        let commands = model.handle(Action::OpenConversation(id.into()));
+        let commands = model.handle(Action::Nav(Nav::OpenConversation(id.into())));
         let load = commands
             .iter()
             .find(|c| c["type"] == "load_conversation")
@@ -629,8 +602,8 @@ mod tests {
         );
         assert_eq!(model.chat.start, 4);
         assert_eq!(model.chat.entries.len(), 2);
-        model.composer = "Hello".into();
-        let sent = model.handle(Action::Send);
+        model.composer.text = "Hello".into();
+        let sent = model.handle(Action::Composer(composer::Act::Send));
         assert_eq!(sent[0]["type"], "send_message");
         assert_eq!(model.chat.echoes.len(), 1);
         let started = sent[0]["startedAt"].as_u64().unwrap();
@@ -660,7 +633,10 @@ mod tests {
                 text: "Hi there".into()
             }
         );
-        assert_eq!(model.handle(Action::Abort)[0]["expectedStartedAt"], 7);
+        assert_eq!(
+            model.handle(Action::Composer(composer::Act::Abort))[0]["expectedStartedAt"],
+            7
+        );
         model.apply(
             parse_event(r#"{"type":"streaming_sync","convId":"c","blocks":[{"type":"text","text":"Hi there!"}]}"#),
             now,
@@ -736,17 +712,17 @@ mod tests {
             parse_event(r#"{"type":"tools_available","providers":[{"id":"anthropic","label":"Anthropic","defaultModel":"o","models":[{"id":"claude-haiku-5-5","label":"Haiku","defaultEffort":"high","supportedEfforts":[{"effort":"low"}]}]}],"authByProvider":{"anthropic":true},"conversationDefaults":{"defaults":{"provider":"openai","model":"gpt","effort":"low"}}}"#),
             now,
         );
-        model.folders.push("f1".into());
-        model.handle(Action::NewConversation);
+        model.sidebar.path.push("f1".into());
+        model.handle(Action::Nav(Nav::NewConversation));
         assert_eq!(model.selection().model, "gpt");
-        model.handle(Action::PickModel(
+        model.handle(Action::Ops(ops::Act::PickModel(
             "anthropic".into(),
             "claude-haiku-5-5".into(),
-        ));
-        model.handle(Action::PickEffort("low".into()));
+        )));
+        model.handle(Action::Ops(ops::Act::PickEffort("low".into())));
         assert_eq!(model.model_label(&model.selection()), "Haiku");
-        model.composer = "Hi".into();
-        let commands = model.handle(Action::Send);
+        model.composer.text = "Hi".into();
+        let commands = model.handle(Action::Composer(composer::Act::Send));
         assert_eq!(commands[0]["type"], "new_conversation");
         assert_eq!(commands[0]["model"], "claude-haiku-5-5");
         assert_eq!(commands[0]["effort"], "low");
@@ -756,7 +732,7 @@ mod tests {
         assert!(matches!(&model.chat.entries[..], [Entry::User { text, .. }] if text == "Hi"));
         assert_eq!(model.shown_conversation(), model.chat.id.as_deref());
         // Leaving the chat unsubscribes.
-        let back = model.handle(Action::Back);
+        let back = model.handle(Action::Nav(Nav::Back));
         assert_eq!(back[0]["type"], "unsubscribe");
         assert_eq!(model.shown_conversation(), None);
     }
@@ -793,7 +769,7 @@ mod tests {
     fn an_open_pages_its_window_and_the_backfill_joins_on() {
         let now = Instant::now();
         let mut model = connected();
-        let commands = model.handle(Action::OpenConversation("c".into()));
+        let commands = model.handle(Action::Nav(Nav::OpenConversation("c".into())));
         let load = &commands[0];
         assert_eq!(load["type"], "load_conversation");
         // `turns` is what makes the daemon page at all (and page its
@@ -873,7 +849,7 @@ mod tests {
             now,
         );
         let stamps = model.chat.stamps.clone();
-        model.handle(Action::Back);
+        model.handle(Action::Nav(Nav::Back));
         assert!(model.chat.id.is_none());
         // Reopened: the kept history shows while the fresh window comes.
         let request = open(&mut model, "c");
@@ -889,7 +865,7 @@ mod tests {
         assert_eq!(model.chat.stamps[..5], stamps[..5]);
         assert!(model.chat.older_request.is_none());
         // One that does not agree where it begins replaces everything.
-        model.handle(Action::Back);
+        model.handle(Action::Nav(Nav::Back));
         let request = open(&mut model, "c");
         let rewritten = window("conversation_loaded", &request, 12, 4, "rewritten", "");
         model.apply(parse_event(&rewritten), now);
@@ -1016,12 +992,12 @@ mod tests {
             )),
             now,
         );
-        let commands = model.handle(Action::ToggleExpanded("tool:t1".into()));
+        let commands = model.handle(Action::Chat(chat::Act::ToggleExpanded("tool:t1".into())));
         assert_eq!(commands[0]["type"], "load_tool_outputs");
-        model.handle(Action::ToggleExpanded("tool:t1".into()));
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("tool:t1".into())));
         assert!(
             model
-                .handle(Action::ToggleExpanded("tool:t1".into()))
+                .handle(Action::Chat(chat::Act::ToggleExpanded("tool:t1".into())))
                 .is_empty()
         );
         model.apply(
@@ -1029,5 +1005,128 @@ mod tests {
             now,
         );
         assert_eq!(model.chat.outputs["t1"], "x");
+    }
+
+    /// What the model asked to open (toasts' texts, sheets' titles).
+    fn opened(model: &mut Model) -> Vec<String> {
+        model
+            .ui
+            .opening
+            .drain(..)
+            .map(|overlay| overlay.label())
+            .collect()
+    }
+
+    #[test]
+    fn sending_waits_for_the_pong_and_stop_does_not() {
+        let now = Instant::now();
+        let mut model = Model::new();
+        let bootstrap = model.on_connected();
+        let ping = bootstrap.last().unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!model.ready);
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_updated","summary":{}}}"#,
+                summary("c", false, 0.0, None)
+                    .replace(r#""streaming":false"#, r#""streaming":true"#)
+            )),
+            now,
+        );
+        open(&mut model, "c");
+        model.composer.text = "Hi".into();
+        assert!(
+            model
+                .handle(Action::Composer(composer::Act::Send))
+                .is_empty(),
+            "not ready: nothing is sent"
+        );
+        assert_eq!(model.composer.text, "Hi", "and nothing is lost");
+        let stop = model.handle(Action::Composer(composer::Act::Abort));
+        assert_eq!(stop[0]["type"], "abort", "Stop works before the pong");
+        model.apply(
+            parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
+            now,
+        );
+        assert!(model.ready);
+        assert_eq!(
+            model.handle(Action::Composer(composer::Act::Send))[0]["type"],
+            "queue_message",
+            "a running turn: queued"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_request_says_so_and_its_late_answer_is_stale() {
+        let now = Instant::now();
+        let mut model = connected();
+        open(&mut model, "c");
+        model.apply(
+            parse_event(&window("conversation_loaded", "-", 0, 2, "a", "")),
+            now,
+        );
+        // Stop: an ack within 12 s, else an actionable error.
+        let stop = model.handle(Action::Composer(composer::Act::Abort));
+        let id = stop[0]["reqId"].as_str().unwrap().to_owned();
+        let deadline = model.answer_deadline().unwrap();
+        assert!(deadline <= now + requests::ABORT_WITHIN + std::time::Duration::from_secs(1));
+        opened(&mut model);
+        assert!(model.expire(now + requests::ABORT_WITHIN + std::time::Duration::from_secs(1)));
+        assert_eq!(
+            opened(&mut model),
+            vec!["Stop did not reach Exocortex. Try again."]
+        );
+        // Its ack, late, is answered by no one.
+        assert!(!model.requests.is_pending(&id));
+        model.apply(
+            parse_event(&format!(r#"{{"type":"ack","reqId":"{id}","convId":"c"}}"#)),
+            now,
+        );
+        assert!(opened(&mut model).is_empty());
+        // A rejected command says why; an error for nobody stays quiet.
+        let set = model.handle(Action::Ops(ops::Act::PickEffort("low".into())));
+        let id = set[0]["reqId"].as_str().unwrap().to_owned();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"error","reqId":"{id}","message":"Unknown effort"}}"#
+            )),
+            now,
+        );
+        assert_eq!(opened(&mut model), vec!["Unknown effort"]);
+        model.apply(
+            parse_event(r#"{"type":"error","reqId":"app-999","message":"Not ours"}"#),
+            now,
+        );
+        assert!(opened(&mut model).is_empty());
+        // A dropped connection forgets everything in flight.
+        model.handle(Action::Ops(ops::Act::PickEffort("high".into())));
+        model.on_disconnected();
+        assert!(model.requests.is_empty() && model.answer_deadline().is_none());
+    }
+
+    #[test]
+    fn pages_go_settings_list_chat_and_back() {
+        let mut model = connected();
+        assert_eq!(model.page, Page::List);
+        model.handle(Action::Nav(Nav::Back));
+        assert_eq!(model.page, Page::Settings, "left of the list");
+        model.handle(Action::Nav(Nav::CloseSettings));
+        model.handle(Action::List(sidebar::Act::OpenFolder("f1".into())));
+        model.handle(Action::Nav(Nav::Back));
+        assert_eq!(model.page, Page::List, "up a folder first");
+        assert!(model.sidebar.path.is_empty());
+        open(&mut model, "c");
+        assert!(model.ui.close_all, "leaving the list closes its menus");
+        model.ui.close_all = false;
+        model.handle(Action::Nav(Nav::Back));
+        assert_eq!(model.page, Page::List);
+        assert!(model.ui.close_all);
+        // The list's menu opens Settings.
+        model.handle(Action::List(sidebar::Act::Menu(crate::gfx::RectF::new(
+            707.0, 0.0, 122.0, 122.0,
+        ))));
+        assert_eq!(opened(&mut model), vec!["menu: Settings"]);
     }
 }

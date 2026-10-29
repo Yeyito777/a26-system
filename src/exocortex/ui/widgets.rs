@@ -119,6 +119,13 @@ pub fn eyebrow(canvas: &mut Canvas, label: &str, x: f32, baseline: f32, color: R
     text(canvas, label, x, baseline, T_EYEBROW, color, 1.0)
 }
 
+/// Whether anything drawn in rows `y0..y1` can show: a band drawn again
+/// alone (clipped) skips what lies outside it.
+pub fn shows(canvas: &Canvas, y0: f32, y1: f32) -> bool {
+    let (_, top, _, bottom) = canvas.clip();
+    y1 > top as f32 && y0 < bottom as f32
+}
+
 /// Runs `draw` with drawing limited to `rect` within the current clip,
 /// then puts the clip back.
 pub fn clipped(canvas: &mut Canvas, rect: RectF, draw: impl FnOnce(&mut Canvas)) {
@@ -208,10 +215,11 @@ pub fn page_rail(canvas: &mut Canvas, page: usize) {
 /// Rows a top bar covers, its hairline and rail included.
 pub const TOP_BAR_ROWS: (i32, i32) = (0, TOP_BAR as i32 + HAIRLINE as i32);
 
-/// ⋯: three 9 px dots 18 px apart.
+/// ⋯: three 6.5 px dots 15 px apart (as `real-04-new-chat` draws them;
+/// the roadmap's 9 and 18 are larger).
 pub fn ellipsis(canvas: &mut Canvas, cx: f32, cy: f32, color: Rgb, alpha: f32) {
     for index in -1..=1 {
-        canvas.fill_circle(cx + index as f32 * 18.0, cy, 4.5, color, alpha);
+        canvas.fill_circle(cx + index as f32 * 15.0, cy, 3.25, color, alpha);
     }
 }
 

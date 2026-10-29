@@ -1,13 +1,21 @@
-//! The Exocortex app drawn in the System and Messages apps' iOS dark
-//! style: the conversation list (folders, pinned first), a conversation with
-//! the user's messages in blue bubbles and replies as full-width markdown,
-//! tool calls folded to one row each (tap to open), a composer above Moon's
-//! keyboard, and a model sheet. Layout is cached per history entry, so a
-//! streaming reply re-lays out only itself.
+//! The Exocortex app's view (roadmap §3, §4): the three pages in Whale —
+//! Settings, the conversation list, a conversation — and the overlays over
+//! them, drawn on a CPU canvas a frame at a time, only what changed
+//! (`frame.rs`).
+//!
+//! Who owns what: the frame pipeline, page composition, hit testing and
+//! pieces' drawing (`ops.rs`) are A's; the list is B's (`list.rs`);
+//! markdown is C1's (`markdown_layout.rs`); the transcript is C2's
+//! (`transcript.rs`, `blocks.rs`, `tools.rs`); the composer is D's
+//! (`composer.rs`); the chat header is E's (`chat_header.rs`), as is the
+//! Settings page (`screens/settings.rs`). Layout is cached per piece, keyed
+//! by what it shows and `theme::generation()`, so a streaming reply lays
+//! out only the paragraph that grew.
 
 pub mod blocks;
 pub mod chat_header;
 pub mod composer;
+pub mod frame;
 pub mod list;
 pub mod markdown_layout;
 pub mod ops;
@@ -21,51 +29,57 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crate::comms::Scroll;
-use crate::gfx::{Canvas, RectF, Rgb};
-use crate::text::{self, Weight};
-use crate::ui::{BG, MARGIN, RED, SECONDARY, SECONDARY_ALPHA, WHITE};
+use crate::gfx::{Canvas, RectF};
 
-use super::model::{Action, Model, Page, Row};
-use super::sheets::inspector::{
-    SHEET_HEADER, SHEET_ROW, SHEET_TOP, SheetItem, draw_sheet, effort_chips, sheet_content,
-};
-use chat_header::draw_nav;
-use composer::{SEND_R, composer, draw_composer};
-use list::{ROW_H, draw_list, list_bottom, list_top};
+use super::anim::Animator;
+use super::model::{Action, Model, Page, ops as ops_model};
+use super::screens::settings;
+use super::theme::{self, HAIRLINE, T_CAPTION, T_EYEBROW, TARGET, TOP_BAR};
+use super::ui::overlay::{Cx, OverlayStack};
+use super::ui::widgets;
 use ops::{Laid, op_rows};
 use transcript::{CachedPiece, CachedPlan, ChatLayout, draw_transcript};
 
-pub use super::sheets::inspector::sheet_max;
-pub use list::{ListFrame, draw_list_update, list_frame, list_max};
+pub use frame::{Frame, FrameDamage};
+pub use list::{ListFrame, list_max};
 
-pub const W: f32 = 1080.0;
-/// Moon owns the bottom of the window for its swipe-up gesture.
-const GESTURE_RESERVE: f32 = 170.0;
-const NAV_H: f32 = 150.0;
-const ROW_PRESSED: Rgb = 0x2c2c2e;
+pub use theme::W;
+
+/// Where the chat's transcript starts: under its top bar and hairline.
+pub const CHAT_TOP: f32 = TOP_BAR + HAIRLINE;
 
 /// Something on screen a touch is on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Hit {
     Action(Action),
-    /// The composer's text field.
+    /// The composer's editor.
     Composer,
     /// The transcript, away from anything tappable.
     Transcript,
-    /// Outside the model sheet (closes it).
-    SheetBackdrop,
 }
 
-/// The view's own state: scroll positions, focus and layout caches.
+/// The view's own state: scroll positions, focus, the overlays, layout
+/// caches.
 #[derive(Default)]
 pub struct ViewState {
     pub list_scroll: Scroll,
     pub chat_scroll: Scroll,
-    pub sheet_scroll: Scroll,
+    /// The Settings page's (E).
+    pub settings_scroll: Scroll,
     /// The composer has focus and Moon's keyboard is up.
     pub keyboard: bool,
     /// The chat follows its newest message.
     pub follow: bool,
+    /// The overlays on screen.
+    pub overlays: OverlayStack,
+    /// What a press held 150 ms lifted (a list row; B draws it).
+    pub lifted: Option<Action>,
+    /// Horizontal scroll offsets of code blocks, tables and display maths,
+    /// by their key (C1), and a counter bumped when one changes.
+    pub xscroll: HashMap<u64, f32>,
+    pub xscroll_version: u64,
+    /// What wants the next frame, gathered while a frame is made.
+    pub animator: Animator,
     layout: ChatLayout,
     /// Pieces by what they show (`piece_key`): an entry that comes back
     /// unchanged (a window resent, a reply committed, a chat reopened) is
@@ -74,11 +88,19 @@ pub struct ViewState {
     /// Entries' plans by stamp.
     plans: HashMap<u64, CachedPlan>,
     pass: u64,
+    /// The theme generation the caches were laid out in.
+    generation: u64,
     /// Phase of the "working" dots.
     pub dots: u8,
 }
 
-fn hash_of(value: impl Hash) -> u64 {
+/// A hash of an action (for frame keys; actions carry rects, which do not
+/// hash).
+pub fn action_key(action: Option<&Action>) -> u64 {
+    action.map_or(0, |action| hash_of(format!("{action:?}")))
+}
+
+pub(crate) fn hash_of(value: impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
@@ -91,13 +113,66 @@ impl ViewState {
             ..Self::default()
         }
     }
+
+    /// Forgets every cached layout when the theme or the text size changed
+    /// (pieces bake their colours and sizes in).
+    pub(crate) fn check_generation(&mut self) {
+        let generation = theme::generation();
+        if generation != self.generation {
+            self.generation = generation;
+            self.pieces.clear();
+            self.plans.clear();
+            self.layout = ChatLayout::default();
+        }
+    }
+
+    /// What overlays see this frame.
+    pub fn cx<'a>(&self, model: &'a Model, width: f32, height: f32, now: Instant) -> Cx<'a> {
+        Cx {
+            model,
+            width,
+            height,
+            keyboard: self.keyboard,
+            now,
+        }
+    }
+
+    /// Takes what the model asked of the interface: overlays to open or
+    /// close (it also closes them when the model changed page or
+    /// conversation). Returns whether anything changed.
+    pub fn take_ui(&mut self, model: &mut Model, now: Instant) -> bool {
+        let ui = &mut model.ui;
+        let mut changed = false;
+        if std::mem::take(&mut ui.close_all) {
+            self.overlays.close_all(now);
+            changed = true;
+        }
+        if std::mem::take(&mut ui.close_scoped) {
+            self.overlays.close_scoped(now);
+            changed = true;
+        }
+        if std::mem::take(&mut ui.close_top) {
+            changed |= self.overlays.close_top(now);
+        }
+        for overlay in ui.opening.drain(..) {
+            self.overlays.push(overlay);
+            changed = true;
+        }
+        changed
+    }
 }
 
-fn transcript_bounds(model: &Model, height: f32, keyboard: bool) -> (f32, f32) {
-    (NAV_H, composer(model, height, keyboard).field.y - 20.0)
+/// Where the transcript is: under the chat's top bar, above the composer.
+pub fn transcript_bounds(model: &Model, height: f32, keyboard: bool) -> (f32, f32) {
+    (
+        CHAT_TOP,
+        composer::geometry(model, height, keyboard).band_top(),
+    )
 }
 
-pub fn draw(
+/// Draws the page (honouring the canvas's clip: a band of it can be drawn
+/// again alone).
+pub fn draw_page(
     canvas: &mut Canvas,
     model: &mut Model,
     view: &mut ViewState,
@@ -106,12 +181,22 @@ pub fn draw(
 ) {
     let height = canvas.height as f32;
     match model.page {
-        Page::List => draw_list(canvas, model, view, pressed, height, now),
+        Page::List => list::draw_list(canvas, model, view, pressed, height, now),
         Page::Chat => draw_chat(canvas, model, view, pressed, height, now),
+        Page::Settings => settings::draw(canvas, model, view, pressed_action(pressed), now),
     }
-    if model.picker {
-        draw_sheet(canvas, model, view, pressed, height, now);
-    }
+}
+
+/// Draws the whole frame: the page, then the overlays.
+#[allow(dead_code)]
+pub fn draw(
+    canvas: &mut Canvas,
+    model: &mut Model,
+    view: &mut ViewState,
+    pressed: Option<&Hit>,
+    now: Instant,
+) {
+    frame::draw_full(canvas, model, view, pressed, now);
 }
 
 pub(crate) fn pressed_action(pressed: Option<&Hit>) -> Option<&Action> {
@@ -120,6 +205,21 @@ pub(crate) fn pressed_action(pressed: Option<&Hit>) -> Option<&Action> {
         _ => None,
     }
 }
+
+/// Asks for the frames what is on the page needs (pulses, spinners, the
+/// caret): every area's own `animate`.
+pub fn animate(model: &Model, view: &mut ViewState, now: Instant) {
+    match model.page {
+        Page::Chat => {
+            chat_header::animate(model, now, &mut view.animator);
+            composer::animate(model, view.keyboard, now, &mut view.animator);
+        }
+        Page::List => list::animate(model, now, &mut view.animator),
+        Page::Settings => {}
+    }
+}
+
+// ----- The chat page ------------------------------------------------------------
 
 /// What a chat frame showed: enough to draw the next one by changing only
 /// what differs (`draw_chat_update`).
@@ -132,22 +232,34 @@ pub struct ChatFrame {
     /// The working dots' phase and their center in content coordinates.
     dots: Option<(u8, f32)>,
     pressed: Option<Action>,
-    nav: u64,
+    header: u64,
     composer: u64,
+    xscroll: u64,
 }
 
-/// Rows a frame changed: rows moved inside the presented copy (`y0, y1,
-/// dy`, for `Presenter::scroll`), then rows drawn anew (for
-/// `Presenter::present_rows`).
-#[derive(Debug, Default, PartialEq)]
-pub struct FrameDamage {
-    pub moved: Option<(i32, i32, i32)>,
-    pub rows: Vec<(i32, i32)>,
+impl ChatFrame {
+    /// Whether the two frames draw the same pixels.
+    pub fn same_as(&self, other: &ChatFrame) -> bool {
+        self.bounds == other.bounds
+            && self.height == other.height
+            && self.offset == other.offset
+            && self.dots == other.dots
+            && self.pressed == other.pressed
+            && self.header == other.header
+            && self.composer == other.composer
+            && self.xscroll == other.xscroll
+            && self.items.len() == other.items.len()
+            && self
+                .items
+                .iter()
+                .zip(&other.items)
+                .all(|((a_y, a), (b_y, b))| a_y == b_y && Rc::ptr_eq(a, b))
+    }
 }
 
 /// The current chat frame's record, or None when it shows something the
-/// incremental path does not draw (another page, the model sheet, a notice
-/// or connection pill, a loading or empty chat).
+/// incremental path does not draw (another page, the connection pill, a
+/// loading or empty chat).
 pub fn chat_frame(
     model: &Model,
     view: &mut ViewState,
@@ -155,26 +267,12 @@ pub fn chat_frame(
     height: f32,
     now: Instant,
 ) -> Option<ChatFrame> {
-    if model.page != Page::Chat
-        || model.picker
-        || model.offline
-        || model.notice.is_some()
-        || !model.chat.loaded
-        || model.chat.id.is_none()
-    {
+    if model.page != Page::Chat || model.offline || !model.chat.loaded || model.chat.id.is_none() {
         return None;
     }
     view.layout(model);
     let (top, bottom) = transcript_bounds(model, height, view.keyboard);
-    let mut nav = DefaultHasher::new();
-    let selection = model.selection();
-    (selection.provider, selection.model, selection.effort).hash(&mut nav);
-    model
-        .open_summary()
-        .map(|s| s.display_title().to_owned())
-        .hash(&mut nav);
-    let mut composer = DefaultHasher::new();
-    (&model.composer, view.keyboard, model.streaming()).hash(&mut composer);
+    let pressed = pressed_action(pressed).cloned();
     Some(ChatFrame {
         bounds: (top as i32, bottom as i32),
         height: height as i32,
@@ -188,9 +286,10 @@ pub fn chat_frame(
         dots: model
             .streaming()
             .then_some((view.dots % 3, view.layout.height - 34.0)),
-        pressed: pressed_action(pressed).cloned(),
-        nav: nav.finish(),
-        composer: composer.finish(),
+        header: chat_header::frame_key(model, pressed.as_ref(), now),
+        composer: composer::frame_key(model, view.keyboard, pressed.as_ref(), now),
+        xscroll: view.xscroll_version,
+        pressed,
     })
 }
 
@@ -223,6 +322,7 @@ pub fn draw_chat_update(
     view: &ViewState,
     old: &ChatFrame,
     new: &ChatFrame,
+    now: Instant,
 ) -> Option<FrameDamage> {
     if old.bounds != new.bounds || old.height != new.height {
         return None;
@@ -280,26 +380,36 @@ pub fn draw_chat_update(
         damage.moved = Some((top, bottom, -shift));
     }
     if change.is_finite() {
-        let from = (NAV_H + change - new.offset).floor() as i32;
+        let from = (CHAT_TOP + change - new.offset).floor() as i32;
         if from < bottom {
             redraw.push((from.max(top), bottom));
         }
     }
+    // Horizontal scrollers moved: their pieces' rows.
+    if old.xscroll != new.xscroll {
+        for (y, laid) in &new.items {
+            if laid.xkeys.is_empty() {
+                continue;
+            }
+            let y0 = (CHAT_TOP + y + laid.ink.0 - new.offset).floor() as i32;
+            let y1 = (CHAT_TOP + y + laid.ink.1 - new.offset).ceil() as i32;
+            if y1 > top && y0 < bottom {
+                redraw.push((y0.max(top), y1.min(bottom)));
+            }
+        }
+    }
     // A row pressed or let go: its highlight's rows.
-    let mut nav_pressed = false;
+    let mut header_pressed = false;
     let mut composer_pressed = false;
     if old.pressed != new.pressed {
         for action in old.pressed.iter().chain(&new.pressed) {
-            match action {
-                Action::Back | Action::ShowPicker => nav_pressed = true,
-                Action::Send | Action::Abort => composer_pressed = true,
-                _ => {}
-            }
+            header_pressed |= chat_header::owns(action);
+            composer_pressed |= composer::owns(action);
             for (y, laid) in &new.items {
                 for (rect, hit) in &laid.hits {
                     if hit == action {
-                        let y0 = (NAV_H + y + rect.y - new.offset).floor() as i32 - 1;
-                        let y1 = (NAV_H + y + rect.y + rect.h - new.offset).ceil() as i32 + 1;
+                        let y0 = (CHAT_TOP + y + rect.y - new.offset).floor() as i32 - 1;
+                        let y1 = (CHAT_TOP + y + rect.y + rect.h - new.offset).ceil() as i32 + 1;
                         if y1 > top && y0 < bottom {
                             redraw.push((y0.max(top), y1.min(bottom)));
                         }
@@ -308,16 +418,10 @@ pub fn draw_chat_update(
             }
         }
     }
-    redraw.sort_unstable();
-    let mut merged: Vec<(i32, i32)> = Vec::new();
-    for (y0, y1) in redraw {
-        match merged.last_mut() {
-            Some(last) if y0 <= last.1 => last.1 = last.1.max(y1),
-            _ => merged.push((y0, y1)),
-        }
-    }
+    let merged = frame::merge(redraw);
+    let background = theme::p().app_background;
     for &(y0, y1) in &merged {
-        canvas.fill_rect(0, y0, W as i32, y1 - y0, BG, 1.0);
+        canvas.fill_rect(0, y0, W as i32, y1 - y0, background, 1.0);
         draw_transcript(
             canvas,
             model,
@@ -328,12 +432,19 @@ pub fn draw_chat_update(
         );
     }
     damage.rows = merged;
-    if old.nav != new.nav || nav_pressed {
-        draw_nav(canvas, model, new.pressed.as_ref());
-        damage.rows.push((0, NAV_H as i32));
+    if old.header != new.header || header_pressed {
+        chat_header::draw(canvas, model, new.pressed.as_ref(), now);
+        damage.rows.push(widgets::TOP_BAR_ROWS);
     }
     if old.composer != new.composer || composer_pressed {
-        draw_composer(canvas, model, view, new.pressed.as_ref(), new.height as f32);
+        composer::draw(
+            canvas,
+            model,
+            view.keyboard,
+            new.pressed.as_ref(),
+            new.height as f32,
+            now,
+        );
         damage.rows.push((bottom, new.height));
     }
     Some(damage)
@@ -347,9 +458,11 @@ fn draw_chat(
     height: f32,
     now: Instant,
 ) {
+    let p = theme::p();
+    widgets::fill(canvas, RectF::new(0.0, 0.0, W, height), p.app_background);
     view.layout(model);
     let (top, bottom) = transcript_bounds(model, height, view.keyboard);
-    // Whole pixels, so a scrolled frame equals a shifted one (scroll_chat).
+    // Whole pixels, so a scrolled frame equals a shifted one.
     let offset = view.chat_scroll.value(now).round();
     let pressed_action = pressed_action(pressed).cloned();
     draw_transcript(
@@ -360,108 +473,122 @@ fn draw_chat(
         (top, bottom),
         offset,
     );
-    canvas.set_clip(0, top as i32, W as i32, bottom as i32);
-    if !model.chat.loaded && model.chat.id.is_some() {
-        text::draw_centered(
-            canvas,
-            "Loading…",
-            W / 2.0,
-            (top + bottom) / 2.0,
-            Weight::Regular,
-            40.0,
-            SECONDARY,
-            SECONDARY_ALPHA,
-        );
-    } else if model.chat.id.is_none() && model.chat.echoes.is_empty() {
-        let selection = model.selection();
-        let label = model.model_label(&selection);
-        let cy = (top + bottom) / 2.0 - 60.0;
-        text::draw_centered(
-            canvas,
-            "New Conversation",
-            W / 2.0,
-            cy,
-            Weight::SemiBold,
-            58.0,
-            WHITE,
-            0.9,
-        );
-        let detail = if label.is_empty() {
-            String::new()
-        } else {
-            format!("with {label}")
-        };
-        text::draw_centered(
-            canvas,
-            &detail,
-            W / 2.0,
-            cy + 70.0,
-            Weight::Regular,
-            40.0,
-            SECONDARY,
-            SECONDARY_ALPHA,
-        );
-    }
-    canvas.reset_clip();
-    draw_nav(canvas, model, pressed_action.as_ref());
+    widgets::clipped(canvas, RectF::new(0.0, top, W, bottom - top), |canvas| {
+        if !model.chat.loaded && model.chat.id.is_some() {
+            widgets::empty_state(
+                canvas,
+                RectF::new(0.0, top, W, bottom - top),
+                "",
+                "Loading…",
+                None,
+                p.app_background,
+            );
+        } else if model.chat.id.is_none() && model.chat.echoes.is_empty() {
+            new_chat_state(canvas, model, (top, bottom), pressed_action.as_ref());
+        }
+    });
+    chat_header::draw(canvas, model, pressed_action.as_ref(), now);
     if model.offline {
         let message = if model.was_connected {
             "Reconnecting…"
         } else {
             "Connecting…"
         };
-        let w = text::measure(message, Weight::Medium, 34.0) + 60.0;
-        let pill = RectF::new((W - w) / 2.0, NAV_H + 20.0, w, 64.0);
-        canvas.fill_rrect(pill, 32.0, 0x2c2c2e, 0.95);
-        text::draw_centered(
+        widgets::pill(
             canvas,
+            W / 2.0,
+            top + 22.0,
             message,
-            W / 2.0,
-            NAV_H + 64.0,
-            Weight::Medium,
-            34.0,
-            WHITE,
-            0.9,
+            true,
+            p.app_background,
+            now,
         );
     }
-    if let Some((notice, _)) = &model.notice {
-        let notice = text::fit(notice, Weight::Medium, 34.0, W - 2.0 * MARGIN - 60.0);
-        let w = text::measure(&notice, Weight::Medium, 34.0) + 60.0;
-        let pill = RectF::new((W - w) / 2.0, NAV_H + 20.0, w, 64.0);
-        canvas.fill_rrect(pill, 32.0, 0x3a1d1d, 0.95);
-        text::draw_centered(
-            canvas,
-            &notice,
-            W / 2.0,
-            NAV_H + 64.0,
-            Weight::Medium,
-            34.0,
-            RED,
-            1.0,
-        );
-    }
-    draw_composer(canvas, model, view, pressed_action.as_ref(), height);
+    composer::draw(
+        canvas,
+        model,
+        view.keyboard,
+        pressed_action.as_ref(),
+        height,
+        now,
+    );
 }
 
-// ----- Hit testing -------------------------------------------------------------
+/// The new-chat state (`real-04-new-chat`): "NEW CHAT" over a box naming
+/// the model, which opens the model sheet.
+fn new_chat_state(
+    canvas: &mut Canvas,
+    model: &Model,
+    (top, bottom): (f32, f32),
+    pressed: Option<&Action>,
+) {
+    let p = theme::p();
+    let c = theme::c();
+    let rect = new_chat_box(model, (top, bottom));
+    let label_ty = T_EYEBROW.tracked(3.3);
+    widgets::text_centered(
+        canvas,
+        "New chat",
+        W / 2.0,
+        label_ty.baseline(rect.y - 34.0 - label_ty.line()),
+        label_ty,
+        p.accent,
+        1.0,
+    );
+    let down = pressed == Some(&Action::Ops(ops_model::Act::OpenInspector));
+    if down {
+        widgets::fill(canvas, rect, c.row_pressed);
+    }
+    widgets::border(canvas, rect, HAIRLINE, c.rule_box);
+    widgets::text_centered(
+        canvas,
+        &new_chat_label(model),
+        W / 2.0,
+        T_CAPTION.baseline(rect.y + (rect.h - T_CAPTION.line()) / 2.0),
+        T_CAPTION,
+        p.muted,
+        1.0,
+    );
+}
 
+fn new_chat_label(model: &Model) -> String {
+    let selection = model.selection();
+    let label = model.model_label(&selection);
+    if selection.effort.is_empty() {
+        label
+    } else {
+        format!("{label} · {}", selection.effort)
+    }
+}
+
+/// The new-chat state's model box.
+fn new_chat_box(model: &Model, (top, bottom): (f32, f32)) -> RectF {
+    let w = (widgets::measure(&new_chat_label(model), T_CAPTION) + 2.0 * theme::S4).round();
+    let cy = ((top + bottom) / 2.0).round();
+    RectF::new(((W - w) / 2.0).round(), cy - TARGET / 2.0 + 40.0, w, TARGET)
+}
+
+// ----- Touches --------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollArea {
     List,
     Chat,
-    Sheet,
+    Settings,
 }
 
 /// The list a touch at `y` may scroll.
 pub fn scroll_area(model: &Model, view: &ViewState, height: f32, y: f32) -> Option<ScrollArea> {
-    if model.picker {
-        return (y >= SHEET_TOP + SHEET_HEADER).then_some(ScrollArea::Sheet);
-    }
     match model.page {
-        Page::List => (y >= list_top(model) && y < list_bottom(height)).then_some(ScrollArea::List),
+        Page::List => {
+            let (top, bottom) = list::bounds(model, height);
+            (y >= top && y < bottom).then_some(ScrollArea::List)
+        }
         Page::Chat => {
             let (top, bottom) = transcript_bounds(model, height, view.keyboard);
             (y >= top && y < bottom).then_some(ScrollArea::Chat)
         }
+        Page::Settings => (y >= CHAT_TOP).then_some(ScrollArea::Settings),
     }
 }
 
@@ -474,91 +601,25 @@ pub fn hit(
     now: Instant,
 ) -> Option<Hit> {
     let (x, y) = (f32::from(x), f32::from(y));
-    if model.picker {
-        if y < SHEET_TOP {
-            return Some(Hit::SheetBackdrop);
-        }
-        if y < SHEET_TOP + SHEET_HEADER {
-            return (x > W - 300.0).then_some(Hit::Action(Action::HidePicker));
-        }
-        let top = SHEET_TOP + SHEET_HEADER;
-        let offset = view.sheet_scroll.value(now);
-        for (item_y, item) in sheet_content(model) {
-            let iy = top + item_y - offset;
-            match item {
-                SheetItem::Efforts(efforts) => {
-                    for (rect, effort) in effort_chips(&efforts, iy) {
-                        if rect.inset(-10.0).contains(x, y) {
-                            return Some(Hit::Action(Action::PickEffort(effort)));
-                        }
-                    }
-                }
-                SheetItem::Model { provider, id, .. } if y >= iy && y < iy + SHEET_ROW => {
-                    return Some(Hit::Action(Action::PickModel(provider, id)));
-                }
-                _ => {}
-            }
-        }
-        return None;
-    }
     match model.page {
-        Page::List => {
-            if y < list_top(model) {
-                if x > W - 200.0
-                    && y < if model.folders.is_empty() {
-                        170.0
-                    } else {
-                        NAV_H
-                    }
-                {
-                    return Some(Hit::Action(Action::NewConversation));
-                }
-                if !model.folders.is_empty() && y < NAV_H && x < 420.0 {
-                    return Some(Hit::Action(Action::Back));
-                }
-                return None;
-            }
-            if y >= list_bottom(height) {
-                return None;
-            }
-            let offset = view.list_scroll.value(now);
-            let index = ((y - list_top(model) + offset) / ROW_H).floor();
-            if index < 0.0 {
-                return None;
-            }
-            let folder = model.current_folder().map(str::to_owned);
-            let rows = model.sidebar.rows(folder.as_deref());
-            match rows.get(index as usize)? {
-                Row::Folder { id, .. } => Some(Hit::Action(Action::OpenFolder(id.clone()))),
-                Row::Conversation(id) => Some(Hit::Action(Action::OpenConversation(id.clone()))),
-            }
-        }
+        Page::List => list::hit(model, view, height, x, y, now),
+        Page::Settings => settings::hit(model, view, x, y, now).map(Hit::Action),
         Page::Chat => {
-            if y < NAV_H {
-                if x < 300.0 {
-                    return Some(Hit::Action(Action::Back));
-                }
-                if y > 80.0 && (W / 2.0 - 300.0..W / 2.0 + 380.0).contains(&x) {
-                    return Some(Hit::Action(Action::ShowPicker));
-                }
-                return (x > 300.0 && x < W - 160.0).then_some(Hit::Action(Action::ShowPicker));
+            if y < CHAT_TOP {
+                return chat_header::hit(model, x, y).map(Hit::Action);
             }
-            let geometry = composer(model, height, view.keyboard);
-            let (sx, sy) = geometry.send;
-            if (x - sx).hypot(y - sy) < SEND_R + 30.0 {
-                let typed = !model.composer.trim().is_empty();
-                return Some(Hit::Action(if model.streaming() && !typed {
-                    Action::Abort
-                } else {
-                    Action::Send
-                }));
-            }
-            if geometry.field.inset(-16.0).contains(x, y) {
-                return Some(Hit::Composer);
+            if let Some(hit) = composer::hit(model, height, view.keyboard, x, y) {
+                return Some(hit);
             }
             let (top, bottom) = transcript_bounds(model, height, view.keyboard);
             if y < top || y >= bottom {
                 return None;
+            }
+            if model.chat.id.is_none()
+                && model.chat.echoes.is_empty()
+                && new_chat_box(model, (top, bottom)).contains(x, y)
+            {
+                return Some(Hit::Action(Action::Ops(ops_model::Act::OpenInspector)));
             }
             view.layout(model);
             let offset = view.chat_scroll.value(now);
@@ -578,16 +639,85 @@ pub fn hit(
     }
 }
 
+/// What a press held 150 ms lifts (a list row), if anything.
+pub fn liftable(
+    model: &mut Model,
+    view: &ViewState,
+    height: f32,
+    x: f32,
+    y: f32,
+    now: Instant,
+) -> Option<Action> {
+    match model.page {
+        Page::List => list::liftable(model, view, height, x, y, now),
+        _ => None,
+    }
+}
+
+/// What a long press at (`x`, `y`) does (a list row's menu), if anything.
+pub fn long_press(
+    model: &mut Model,
+    view: &ViewState,
+    height: f32,
+    x: f32,
+    y: f32,
+    now: Instant,
+) -> Option<Action> {
+    match model.page {
+        Page::List => list::long_press(model, view, height, x, y, now),
+        _ => None,
+    }
+}
+
+/// A horizontal drag starting at (`x`, `y`): the scroller it moves (a code
+/// block's or a table's key), if any (C1 fills pieces' `xkeys`).
+pub fn horizontal_target(
+    model: &Model,
+    view: &mut ViewState,
+    height: f32,
+    x: f32,
+    y: f32,
+    now: Instant,
+) -> Option<u64> {
+    if model.page != Page::Chat {
+        return None;
+    }
+    let _ = x;
+    view.layout(model);
+    let (top, _) = transcript_bounds(model, height, view.keyboard);
+    let offset = view.chat_scroll.value(now);
+    view.layout.items.iter().find_map(|item| {
+        let iy = top + item.y - offset;
+        (y >= iy && y < iy + item.laid.h)
+            .then(|| item.laid.xkeys.first().copied())
+            .flatten()
+    })
+}
+
+/// Moves horizontal scroller `key` by `dx` (C1 clamps it to its content).
+pub fn horizontal_drag(view: &mut ViewState, key: u64, dx: f32) {
+    let offset = view.xscroll.entry(key).or_insert(0.0);
+    let next = (*offset - dx).max(0.0).round();
+    if next != *offset {
+        *offset = next;
+        view.xscroll_version = view.xscroll_version.wrapping_add(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::exocortex::markdown::{Span, Style};
+    use crate::exocortex::model::{Nav, chat, composer as composer_act};
     use crate::exocortex::proto::parse_event;
-    use crate::exocortex::sheets::inspector::SHEET_SECTION;
-    use crate::ui::BLUE;
+    use crate::text::Weight;
+    use list::{ROW_H, draw_list_update, list_frame, list_top};
     use markdown_layout::{BODY, lay_markdown, line_width, plain, wrap};
     use ops::Op;
+    use theme::TRANSCRIPT_PAD as MARGIN;
     use tools::TOOL_ROW;
+
+    const BG: crate::gfx::Rgb = 0x000000;
 
     #[test]
     fn wrapping_fits_width_breaks_lines_and_long_words() {
@@ -661,7 +791,7 @@ mod tests {
         assert!(ops.iter().any(|op| matches!(
             op,
             Op::Text {
-                weight: Weight::SemiBold,
+                weight: Weight::MonoBold,
                 ..
             }
         )));
@@ -674,7 +804,7 @@ mod tests {
             parse_event(r#"{"type":"conversation_updated","summary":{"id":"c","provider":"anthropic","model":"m","effort":"low","title":"Hi","pinned":false,"sortOrder":0,"streaming":false,"unread":false}}"#),
             Instant::now(),
         );
-        let commands = model.handle(Action::OpenConversation("c".into()));
+        let commands = model.handle(Action::Nav(Nav::OpenConversation("c".into())));
         let request = commands[0]["reqId"].as_str().unwrap().to_owned();
         let calls: Vec<String> = (0..4)
             .map(|i| format!(r#"{{"type":"tool_call","toolCallId":"t{i}","toolName":"Bash","input":{{"command":"ls {i}"}},"summary":"ls {i}"}},{{"type":"tool_result","toolCallId":"t{i}","toolName":"Bash","output":"ok","isError":false}}"#))
@@ -699,19 +829,24 @@ mod tests {
         // A bubble, then one folded row for four calls, then the text.
         let group = view.layout.items[1].laid.hits.clone();
         assert_eq!(group.len(), 1);
-        assert_eq!(group[0].1, Action::ToggleExpanded("group:t0".into()));
+        assert_eq!(
+            group[0].1,
+            Action::Chat(chat::Act::ToggleExpanded("group:t0".into()))
+        );
         let (top, _) = transcript_bounds(&model, height, false);
         let y = top + view.layout.items[1].y + group[0].0.y + 10.0;
         let hit_action = hit(&mut model, &mut view, height, 300, y as i16, now);
         assert_eq!(
             hit_action,
-            Some(Hit::Action(Action::ToggleExpanded("group:t0".into())))
+            Some(Hit::Action(Action::Chat(chat::Act::ToggleExpanded(
+                "group:t0".into()
+            ))))
         );
         // The reply's pieces: the folded row, then the text.
         assert_eq!(view.layout.items.len(), 3);
         let before = view.layout.height;
         let text = view.layout.items[2].laid.clone();
-        model.handle(Action::ToggleExpanded("group:t0".into()));
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("group:t0".into())));
         view.layout(&model);
         // Opened: the row, a row per call, and the same text piece below.
         let hits: Vec<&Action> = view.layout.items[1..]
@@ -719,23 +854,26 @@ mod tests {
             .flat_map(|item| item.laid.hits.iter().map(|(_, action)| action))
             .collect();
         assert_eq!(hits.len(), 5);
-        assert_eq!(hits[1], &Action::ToggleExpanded("tool:t0".into()));
+        assert_eq!(
+            hits[1],
+            &Action::Chat(chat::Act::ToggleExpanded("tool:t0".into()))
+        );
         assert!(view.layout.height > before + 3.0 * TOOL_ROW);
         assert!(Rc::ptr_eq(&view.layout.items[6].laid, &text));
         // The composer and send button are hit; the transcript elsewhere.
-        let geometry = composer(&model, height, false);
+        let geometry = composer::geometry(&model, height, false);
         assert_eq!(
             hit(
                 &mut model,
                 &mut view,
                 height,
                 300,
-                (geometry.field.y + 20.0) as i16,
+                (geometry.island.y + 20.0) as i16,
                 now
             ),
             Some(Hit::Composer)
         );
-        model.composer = "x".into();
+        model.composer.text = "x".into();
         assert_eq!(
             hit(
                 &mut model,
@@ -745,11 +883,11 @@ mod tests {
                 geometry.send.1 as i16,
                 now
             ),
-            Some(Hit::Action(Action::Send))
+            Some(Hit::Action(Action::Composer(composer_act::Act::Send)))
         );
         let mut canvas = Canvas::new(1080, height as i32);
         draw(&mut canvas, &mut model, &mut view, None, now);
-        assert!(canvas.pixels.contains(&BLUE));
+        assert!(canvas.pixels.contains(&theme::p().accent));
     }
 
     #[test]
@@ -793,7 +931,7 @@ mod tests {
         let height = 900.0;
         let mut model = Model::new();
         model.on_connected();
-        let commands = model.handle(Action::OpenConversation("c".into()));
+        let commands = model.handle(Action::Nav(Nav::OpenConversation("c".into())));
         let request = commands[0]["reqId"].as_str().unwrap().to_owned();
         let page = |kind: &str, request: &str, from: u64, to: u64| {
             let entries: Vec<String> = (from..to)
@@ -857,7 +995,7 @@ mod tests {
         view.follow = false;
         view.chat_scroll.offset = view.layout.items[2].y;
         let before = view.before(&model, now);
-        model.handle(Action::ToggleExpanded("group:t0".into()));
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("group:t0".into())));
         view.settle(&model, before, 900.0, now);
         let item = view
             .layout
@@ -934,13 +1072,30 @@ mod tests {
         let mut shadow = canvas.pixels.clone();
         change(model, view);
         let new = chat_frame(model, view, after, height, now).expect("a chat frame");
-        let damage = draw_chat_update(&mut canvas, model, view, &old, &new).expect("incremental");
+        let damage =
+            draw_chat_update(&mut canvas, model, view, &old, &new, now).expect("incremental");
         let mut full = Canvas::new(1080, height as i32);
         full.clear(BG);
         draw(&mut full, model, view, after, now);
+        let differing: Vec<usize> = (0..height as usize)
+            .filter(|y| {
+                full.pixels[y * 1080..(y + 1) * 1080] != canvas.pixels[y * 1080..(y + 1) * 1080]
+            })
+            .collect();
+        let first_x = differing.first().and_then(|y| {
+            (0..1080).find(|x| full.pixels[y * 1080 + x] != canvas.pixels[y * 1080 + x])
+        });
         assert!(
-            full.pixels == canvas.pixels,
-            "incremental frame differs: {damage:?}"
+            differing.is_empty(),
+            "incremental frame differs in rows {:?}..{:?} ({} rows) from x {:?}: {damage:?}",
+            differing.first(),
+            differing.last(),
+            differing.len(),
+            first_x.map(|x| (
+                x,
+                full.pixels[differing[0] * 1080 + x],
+                canvas.pixels[differing[0] * 1080 + x]
+            )),
         );
         let width = 1080;
         if let Some((y0, y1, dy)) = damage.moved {
@@ -966,9 +1121,9 @@ mod tests {
 
     fn long_chat(height: f32) -> (Model, ViewState) {
         let mut model = chat_model();
-        model.handle(Action::ToggleExpanded("group:t0".into()));
-        model.handle(Action::ToggleExpanded("tool:t1".into()));
-        model.handle(Action::ToggleExpanded("tool:t2".into()));
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("group:t0".into())));
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("tool:t1".into())));
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("tool:t2".into())));
         let mut view = ViewState::new();
         let max = view.chat_max(&model, height);
         assert!(max > 300.0, "the transcript must scroll: {max}");
@@ -1028,9 +1183,11 @@ mod tests {
         // Pressing a tool row, the back button and the stop button.
         let mut previous: Option<Hit> = None;
         for pressed in [
-            Some(Hit::Action(Action::ToggleExpanded("tool:t1".into()))),
-            Some(Hit::Action(Action::Back)),
-            Some(Hit::Action(Action::Abort)),
+            Some(Hit::Action(Action::Chat(chat::Act::ToggleExpanded(
+                "tool:t1".into(),
+            )))),
+            Some(Hit::Action(Action::Nav(Nav::Back))),
+            Some(Hit::Action(Action::Composer(composer_act::Act::Abort))),
             None,
         ] {
             let damage = update_matches_with(
@@ -1041,13 +1198,13 @@ mod tests {
                 pressed.as_ref(),
                 |_, _| {},
             );
-            if pressed == Some(Hit::Action(Action::Back)) {
-                assert!(damage.rows.contains(&(0, NAV_H as i32)));
+            if pressed == Some(Hit::Action(Action::Nav(Nav::Back))) {
+                assert!(damage.rows.contains(&widgets::TOP_BAR_ROWS));
             }
             previous = pressed;
         }
         let damage = update_matches(&mut model, &mut view, height, |model, _| {
-            model.composer.push('h');
+            model.composer.text.push('h');
         });
         assert!(damage.moved.is_none() && damage.rows.len() == 1);
         update_matches(&mut model, &mut view, height, |model, _| {
@@ -1083,8 +1240,8 @@ mod tests {
             let old = list_frame(&model, &view, None, height, now).unwrap();
             view.list_scroll.offset = to;
             let new = list_frame(&model, &view, None, height, now).unwrap();
-            let damage =
-                draw_list_update(&mut canvas, &mut model, &old, &new).expect("incremental");
+            let damage = draw_list_update(&mut canvas, &mut model, &mut view, &old, &new, now)
+                .expect("incremental");
             assert_eq!(damage.rows.len(), 1);
             let mut full = Canvas::new(1080, height as i32);
             full.clear(BG);
@@ -1092,12 +1249,12 @@ mod tests {
             assert!(full.pixels == canvas.pixels, "list frame at {to} differs");
         }
         // Pressing a row and letting go redraws that row alone.
-        let press = Hit::Action(Action::OpenConversation("c5".into()));
+        let press = Hit::Action(Action::Nav(Nav::OpenConversation("c5".into())));
         for (before, after) in [(None, Some(&press)), (Some(&press), None)] {
             let old = list_frame(&model, &view, before, height, now).unwrap();
             let new = list_frame(&model, &view, after, height, now).unwrap();
-            let damage =
-                draw_list_update(&mut canvas, &mut model, &old, &new).expect("incremental");
+            let damage = draw_list_update(&mut canvas, &mut model, &mut view, &old, &new, now)
+                .expect("incremental");
             assert_eq!(damage.rows.len(), 1);
             assert!(damage.rows[0].1 - damage.rows[0].0 <= ROW_H as i32 + 1);
             let mut full = Canvas::new(1080, height as i32);
@@ -1111,54 +1268,18 @@ mod tests {
     fn list_rows_and_compose_are_hit() {
         let now = Instant::now();
         let mut model = chat_model();
-        model.handle(Action::Back);
+        model.handle(Action::Nav(Nav::Back));
         let mut view = ViewState::default();
         let y = (list_top(&model) + ROW_H / 2.0) as i16;
         assert_eq!(
             hit(&mut model, &mut view, 2216.0, 400, y, now),
-            Some(Hit::Action(Action::OpenConversation("c".into())))
+            Some(Hit::Action(Action::Nav(Nav::OpenConversation("c".into()))))
         );
         assert_eq!(
             hit(&mut model, &mut view, 2216.0, 1020, 90, now),
-            Some(Hit::Action(Action::NewConversation))
+            Some(Hit::Action(Action::Nav(Nav::NewConversation)))
         );
         let mut canvas = Canvas::new(1080, 2216);
         draw(&mut canvas, &mut model, &mut view, None, now);
-    }
-
-    #[test]
-    fn the_model_sheet_lists_signed_in_providers() {
-        let now = Instant::now();
-        let mut model = chat_model();
-        model.apply(
-            parse_event(r#"{"type":"tools_available","providers":[{"id":"anthropic","label":"Anthropic","defaultModel":"m","models":[{"id":"m","label":"Haiku","defaultEffort":"high","supportedEfforts":[{"effort":"low"},{"effort":"high"}]}]},{"id":"openai","label":"OpenAI","defaultModel":"g","models":[{"id":"g","label":"GPT","defaultEffort":"low","supportedEfforts":[]}]}],"authByProvider":{"anthropic":true,"openai":false},"tools":[]}"#),
-            now,
-        );
-        model.handle(Action::ShowPicker);
-        let items = sheet_content(&model);
-        assert!(
-            items
-                .iter()
-                .any(|(_, item)| matches!(item, SheetItem::Model { id, .. } if id == "m"))
-        );
-        assert!(
-            !items
-                .iter()
-                .any(|(_, item)| matches!(item, SheetItem::Model { id, .. } if id == "g"))
-        );
-        let mut view = ViewState::default();
-        let chips = effort_chips(
-            &["low".into(), "high".into()],
-            SHEET_TOP + SHEET_HEADER + SHEET_SECTION,
-        );
-        let (cx, cy) = chips[1].0.center();
-        assert_eq!(
-            hit(&mut model, &mut view, 2216.0, cx as i16, cy as i16, now),
-            Some(Hit::Action(Action::PickEffort("high".into())))
-        );
-        assert_eq!(
-            hit(&mut model, &mut view, 2216.0, 500, 100, now),
-            Some(Hit::SheetBackdrop)
-        );
     }
 }

@@ -8,16 +8,16 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crate::gfx::Canvas;
-use crate::ui::{MARGIN, RED, SECONDARY};
 
 use super::super::markdown::{self, MdBlock};
 use super::super::model::{Action, Chat, Model, Page};
 use super::super::proto::{Block, Entry, ToolStyle};
+use super::super::theme::{self, TRANSCRIPT_PAD};
 use super::blocks::{lay_md_piece, lay_notice, lay_thinking, lay_user, lay_whole};
 use super::markdown_layout::{PARAGRAPH_GAP, md_gap};
 use super::ops::{Laid, draw_ops, quantized};
 use super::tools::{GROUP_MIN, lay_group, lay_tool, tool_run};
-use super::{NAV_H, ROW_PRESSED, ViewState, W, hash_of, transcript_bounds};
+use super::{CHAT_TOP, ViewState, W, hash_of, transcript_bounds};
 
 pub(crate) struct Placed {
     pub(crate) y: f32,
@@ -124,14 +124,14 @@ pub(crate) fn plan_entry(entry: &Entry) -> Plan {
         segments: vec![Segment::Whole { hash }],
     };
     match entry {
-        Entry::User { text, metadata } => {
+        Entry::User { text, metadata, .. } => {
             let automated = metadata
                 .as_ref()
                 .is_some_and(|m| m.automation.is_some() || m.system);
             whole(hash_of(("user", text, automated)))
         }
         Entry::Ai { blocks, .. } => plan_blocks(blocks),
-        Entry::System { text, color } => whole(hash_of(("system", text, color))),
+        Entry::System { text, color, .. } => whole(hash_of(("system", text, color))),
         _ => Plan::default(),
     }
 }
@@ -174,7 +174,7 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
                 }
                 index += 1;
             }
-            Block::Thinking { text } => {
+            Block::Thinking { text, .. } => {
                 if !text.trim().is_empty() {
                     let key = thinking_key(blocks, index);
                     segments.push(Segment::Thinking {
@@ -314,7 +314,7 @@ impl ViewState {
                     h += gap;
                     let open = expanded.contains(key);
                     let text = match &blocks[*index] {
-                        Block::Thinking { text } => text.as_str(),
+                        Block::Thinking { text, .. } => text.as_str(),
                         _ => "",
                     };
                     let laid = self.piece(hash_of((hash, open)), || lay_thinking(text, key, open));
@@ -367,6 +367,7 @@ impl ViewState {
     /// Lays the open chat out if it changed since the last frame: every
     /// entry's pieces, from the cache unless what they show is new.
     pub(crate) fn layout(&mut self, model: &Model) {
+        self.check_generation();
         let chat = &model.chat;
         let queued = model.queued_here();
         let key = hash_of((
@@ -374,7 +375,8 @@ impl ViewState {
             chat.id.as_deref(),
             queued.len(),
             chat.loaded,
-            model.styles_version,
+            model.ops.styles_version,
+            self.generation,
         ));
         if self.layout.key == key && !self.layout.items.is_empty() {
             return;
@@ -382,8 +384,8 @@ impl ViewState {
         self.pass += 1;
         let context = Context {
             chat,
-            styles: &model.tool_styles,
-            styles_version: model.styles_version,
+            styles: &model.ops.tool_styles,
+            styles_version: model.ops.styles_version,
         };
         let mut items = Vec::new();
         let mut y = 24.0;
@@ -407,7 +409,7 @@ impl ViewState {
         };
         if chat.older_request.is_some() {
             y = single(self, &mut items, y, 1, &|| {
-                lay_notice("Loading…", SECONDARY, 1)
+                lay_notice("Loading…", theme::p().muted, 1)
             });
         }
         debug_assert_eq!(chat.entries.len(), chat.stamps.len());
@@ -432,12 +434,14 @@ impl ViewState {
         for queued in queued {
             let key = hash_of(("queued", &queued.text));
             y = single(self, &mut items, y, key, &|| {
-                lay_user(&queued.text, 0.45, Some("Queued"))
+                lay_user(&queued.text, 0.58, Some("queued: message end"))
             });
         }
         if let Some(error) = &chat.error {
             let key = hash_of(("error", error));
-            y = single(self, &mut items, y, key, &|| lay_notice(error, RED, 3));
+            y = single(self, &mut items, y, key, &|| {
+                lay_notice(error, theme::p().error, 3)
+            });
         }
         self.prune();
         self.layout = ChatLayout {
@@ -589,9 +593,16 @@ pub(crate) fn draw_transcript(
     clip: (f32, f32),
     offset: f32,
 ) {
-    let (top, bottom) = clip;
-    let area_top = NAV_H;
-    canvas.set_clip(0, top as i32, W as i32, bottom as i32);
+    // Within the canvas's own clip too (a band drawn again alone).
+    let outer = canvas.clip();
+    let (top, bottom) = (clip.0.max(outer.1 as f32), clip.1.min(outer.3 as f32));
+    if top >= bottom {
+        return;
+    }
+    let clip = (top, bottom);
+    let area_top = CHAT_TOP;
+    let c = theme::c();
+    canvas.set_clip(outer.0, top as i32, outer.2, bottom as i32);
     // Pieces are in order: skip to the first that may reach the clip (no
     // glyph reaches a screen beyond its piece).
     let items = &view.layout.items;
@@ -612,12 +623,12 @@ pub(crate) fn draw_transcript(
                     (y + rect.y) as i32,
                     W as i32,
                     rect.h as i32,
-                    ROW_PRESSED,
+                    c.row_pressed,
                     1.0,
                 );
             }
         }
-        draw_ops(canvas, &item.laid.ops, y, clip);
+        draw_ops(canvas, &item.laid.ops, y, clip, &view.xscroll);
     }
     if model.streaming() {
         // Three dots after the reply while the model works.
@@ -625,13 +636,13 @@ pub(crate) fn draw_transcript(
         for index in 0..3 {
             let lit = usize::from(view.dots % 3) == index;
             canvas.fill_circle(
-                MARGIN + 16.0 + index as f32 * 34.0,
+                TRANSCRIPT_PAD + 16.0 + index as f32 * 34.0,
                 cy,
                 10.0,
-                SECONDARY,
-                if lit { 0.9 } else { 0.35 },
+                theme::p().muted,
+                if lit { 1.0 } else { 0.4 },
             );
         }
     }
-    canvas.reset_clip();
+    canvas.set_clip(outer.0, outer.1, outer.2, outer.3);
 }

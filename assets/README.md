@@ -14,6 +14,7 @@ reproducible.
 The images do not contain the one-pixel launcher selection border; the
 launcher draws that UI element separately.
 
-`fonts/` holds the embedded Inter (OFL.txt) and, for the Exocortex app's
-markdown, Inter Italic and JetBrains Mono NL (OFL-JetBrainsMono.txt), both
-subset to the characters Inter's subset has (plus box drawing for Mono).
+`fonts/` holds the embedded Inter (OFL.txt) and, for the Exocortex app,
+JetBrains Mono NL in five cuts (Regular, Medium, SemiBold, Bold, Italic;
+OFL-JetBrainsMono.txt), subset by `scripts/subset-fonts.sh` to the
+characters Inter's subset has plus box drawing, unhinted.

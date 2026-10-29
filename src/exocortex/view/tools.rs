@@ -1,16 +1,17 @@
-//! Tool call rows: one per call (opened: its input and output), or one
-//! folded row for a run of calls, labelled as the TUI labels tools.
+//! Tool call rows (WP-C2): one per call (opened: its input and output), or
+//! one folded row for a run of calls, labelled as the TUI labels tools, in
+//! Whale's colours (their redesign, §3.6.10, is C2's).
 
 use std::collections::HashMap;
 
 use crate::gfx::{RectF, Rgb};
 use crate::text::{self, Weight};
-use crate::ui::{BLUE, MARGIN, RED, SECONDARY, SECONDARY_ALPHA, WHITE};
 
-use super::super::model::Action;
+use super::super::model::{Action, chat};
 use super::super::proto::{Block, ToolStyle};
+use super::super::theme::{self, TRANSCRIPT_PAD as MARGIN};
 use super::W;
-use super::markdown_layout::{CODE_BG, SMALL, lay_code};
+use super::markdown_layout::{SMALL, lay_code};
 use super::ops::{Laid, Op};
 use super::transcript::{Context, ToolRef};
 
@@ -23,24 +24,20 @@ pub(crate) const GROUP_MIN: usize = 3;
 /// MCP server's name, or the tool's own name.
 pub(crate) fn tool_label(name: &str, styles: &HashMap<String, ToolStyle>) -> (String, Rgb) {
     let lower = name.to_ascii_lowercase();
+    let p = theme::p();
     if let Some(style) = styles.get(&lower) {
         return (
             style.label.clone(),
-            parse_color(&style.color).unwrap_or(BLUE),
+            theme::parse_hex(&style.color).unwrap_or(p.tool),
         );
     }
     if let Some(rest) = name.strip_prefix("mcp__")
         && let Some((server, _)) = rest.split_once("__")
     {
         let server = server.trim_start_matches("claude_ai_").replace('_', " ");
-        return (server, 0xbf5af2);
+        return (server, p.tool);
     }
-    (name.to_owned(), 0x64d2ff)
-}
-
-pub(crate) fn parse_color(color: &str) -> Option<Rgb> {
-    let hex = color.strip_prefix('#')?;
-    (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok())?
+    (name.to_owned(), p.secondary_accent)
 }
 
 /// What a tool call shows on its row: its summary, else the input's most
@@ -105,7 +102,7 @@ pub(crate) fn tool_run(blocks: &[Block], from: usize) -> (usize, Vec<usize>) {
         match block {
             Block::ToolCall { .. } => calls.push(end),
             Block::ToolResult { .. } => {}
-            Block::Text { text } | Block::Thinking { text } if text.trim().is_empty() => {}
+            Block::Text { text } | Block::Thinking { text, .. } if text.trim().is_empty() => {}
             _ => break,
         }
         end += 1;
@@ -127,6 +124,7 @@ pub(crate) fn lay_tool(
         tool_name,
         input,
         summary,
+        ..
     } = &blocks[tool.call]
     else {
         return laid;
@@ -139,14 +137,17 @@ pub(crate) fn lay_tool(
         } => Some((output.as_str(), *is_error)),
         _ => None,
     });
+    let p = theme::p();
+    let c = theme::c();
     let base = TOOL_ROW / 2.0 + 12.0;
-    let label_w = text::measure(&label, Weight::SemiBold, SMALL);
+    let label_w = text::measure(&label, Weight::MonoBold, SMALL);
     laid.ops.push(Op::Text {
         x,
         baseline: base,
         text: label,
-        weight: Weight::SemiBold,
+        weight: Weight::MonoBold,
         size: SMALL,
+        tracking: 0.0,
         color,
         alpha: 1.0,
     });
@@ -154,7 +155,7 @@ pub(crate) fn lay_tool(
     let summary = tool_summary(summary, input);
     let fitted = text::fit(
         &summary,
-        Weight::Regular,
+        Weight::Mono,
         SMALL,
         W - MARGIN - status_w - (x + label_w + 18.0),
     );
@@ -162,29 +163,32 @@ pub(crate) fn lay_tool(
         x: x + label_w + 18.0,
         baseline: base,
         text: fitted,
-        weight: Weight::Regular,
+        weight: Weight::Mono,
         size: SMALL,
-        color: SECONDARY,
-        alpha: SECONDARY_ALPHA,
+        tracking: 0.0,
+        color,
+        alpha: 1.0,
     });
     match result {
         Some((_, true)) => laid.ops.push(Op::Text {
-            x: W - MARGIN - 64.0,
+            x: W - MARGIN - 100.0,
             baseline: base,
-            text: "✕".into(),
-            weight: Weight::SemiBold,
+            text: "ERR".into(),
+            weight: Weight::MonoBold,
             size: SMALL,
-            color: RED,
+            tracking: 0.0,
+            color: p.error,
             alpha: 1.0,
         }),
         None => laid.ops.push(Op::Text {
             x: W - MARGIN - 70.0,
             baseline: base,
             text: "…".into(),
-            weight: Weight::Regular,
+            weight: Weight::Mono,
             size: SMALL,
-            color: SECONDARY,
-            alpha: SECONDARY_ALPHA,
+            tracking: 0.0,
+            color: p.muted,
+            alpha: 1.0,
         }),
         Some(_) => {}
     }
@@ -195,43 +199,41 @@ pub(crate) fn lay_tool(
     });
     laid.hits.push((
         RectF::new(0.0, 0.0, W, TOOL_ROW),
-        Action::ToggleExpanded(tool.key.clone()),
+        Action::Chat(chat::Act::ToggleExpanded(tool.key.clone())),
     ));
     laid.h = TOOL_ROW;
     if open {
         let width = W - MARGIN - x;
         let mut lines = tool_input_text(tool_name, input);
         lines.truncate(40);
-        laid.h += lay_code(&mut laid.ops, &lines, x, width, laid.h, CODE_BG, 24) + 14.0;
+        laid.h += lay_code(&mut laid.ops, &lines, x, width, laid.h, c.code_bg, 24) + 14.0;
         let output = match result {
             Some((output, _)) if !output.is_empty() => Some(output.to_owned()),
             _ => context.chat.outputs.get(tool_call_id).cloned(),
         };
         let (lines, color) = match output {
-            Some(output) if output.trim().is_empty() => (vec!["(no output)".to_owned()], SECONDARY),
+            Some(output) if output.trim().is_empty() => (vec!["No output.".to_owned()], p.muted),
             Some(output) => (
                 output.lines().map(str::to_owned).collect(),
                 if result.is_some_and(|(_, error)| error) {
-                    RED
+                    p.error
                 } else {
-                    WHITE
+                    c.text_output
                 },
             ),
-            None if result.is_none() => (vec!["Running…".to_owned()], SECONDARY),
-            None => (vec!["Loading output…".to_owned()], SECONDARY),
+            None if result.is_none() => (vec!["Running…".to_owned()], p.muted),
+            None => (vec!["Loading output…".to_owned()], p.muted),
         };
         let box_top = laid.h;
-        let h = lay_code(&mut laid.ops, &lines, x, width, box_top, 0x101012, 60);
-        if color != WHITE {
-            for op in &mut laid.ops {
-                if let Op::Text {
-                    baseline, color: c, ..
-                } = op
-                    && *baseline > box_top
-                    && *baseline < box_top + h
-                {
-                    *c = color;
-                }
+        let h = lay_code(&mut laid.ops, &lines, x, width, box_top, c.code_bg, 60);
+        for op in &mut laid.ops {
+            if let Op::Text {
+                baseline, color: c, ..
+            } = op
+                && *baseline > box_top
+                && *baseline < box_top + h
+            {
+                *c = color;
             }
         }
         laid.h += h + 18.0;
@@ -264,16 +266,18 @@ pub(crate) fn lay_group(
                 .is_some_and(|at| matches!(&blocks[at], Block::ToolResult { is_error: true, .. }))
         })
         .count();
+    let p = theme::p();
     let title = format!("{} tool calls", calls.len());
-    let title_w = text::measure(&title, Weight::SemiBold, SMALL);
+    let title_w = text::measure(&title, Weight::MonoBold, SMALL);
     laid.ops.push(Op::Text {
         x: MARGIN,
         baseline: TOOL_ROW / 2.0 + 12.0,
         text: title,
-        weight: Weight::SemiBold,
+        weight: Weight::MonoBold,
         size: SMALL,
-        color: WHITE,
-        alpha: 0.85,
+        tracking: 0.0,
+        color: p.text,
+        alpha: 1.0,
     });
     let mut detail = names.join(", ");
     if failed > 0 {
@@ -281,7 +285,7 @@ pub(crate) fn lay_group(
     }
     let detail = text::fit(
         &detail,
-        Weight::Regular,
+        Weight::Mono,
         SMALL,
         W - 2.0 * MARGIN - title_w - 90.0,
     );
@@ -289,10 +293,11 @@ pub(crate) fn lay_group(
         x: MARGIN + title_w + 18.0,
         baseline: TOOL_ROW / 2.0 + 12.0,
         text: detail,
-        weight: Weight::Regular,
+        weight: Weight::Mono,
         size: SMALL,
-        color: if failed > 0 { RED } else { SECONDARY },
-        alpha: if failed > 0 { 0.9 } else { SECONDARY_ALPHA },
+        tracking: 0.0,
+        color: if failed > 0 { p.error } else { p.muted },
+        alpha: 1.0,
     });
     laid.ops.push(Op::Chevron {
         x: W - MARGIN - 14.0,
@@ -301,7 +306,7 @@ pub(crate) fn lay_group(
     });
     laid.hits.push((
         RectF::new(0.0, 0.0, W, TOOL_ROW),
-        Action::ToggleExpanded(key.to_owned()),
+        Action::Chat(chat::Act::ToggleExpanded(key.to_owned())),
     ));
     laid.h = TOOL_ROW;
     laid

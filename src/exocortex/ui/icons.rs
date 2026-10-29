@@ -683,13 +683,86 @@ thread_local! {
     static CACHE: RefCell<HashMap<(Icon, u16, u16), Rc<Raster>>> = RefCell::new(HashMap::new());
 }
 
+/// A polygon's signed area (positive turning as `Path::circle` does).
+fn signed_area(points: &[(f32, f32)]) -> f32 {
+    let mut area = 0.0;
+    for (index, &(x0, y0)) in points.iter().enumerate() {
+        let (x1, y1) = points[(index + 1) % points.len()];
+        area += x0 * y1 - x1 * y0;
+    }
+    area / 2.0
+}
+
+/// Adds `points` to `path` turning as `Path::circle` does: shapes of one
+/// element add up rather than cancel where they overlap (the rasterizer
+/// unions same-direction windings only).
+fn add_polygon(path: &mut Path, points: &[(f32, f32)]) {
+    if signed_area(points) < 0.0 {
+        let reversed: Vec<(f32, f32)> = points.iter().rev().copied().collect();
+        path.polygon(&reversed);
+    } else {
+        path.polygon(points);
+    }
+}
+
+/// A stroked polyline with round caps and joins.
+fn add_stroke(path: &mut Path, points: &[(f32, f32)], width: f32) {
+    let half = width / 2.0;
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let length = (dx * dx + dy * dy).sqrt();
+        if length > 1e-4 {
+            let (nx, ny) = (-dy / length * half, dx / length * half);
+            add_polygon(
+                path,
+                &[
+                    (a.0 + nx, a.1 + ny),
+                    (b.0 + nx, b.1 + ny),
+                    (b.0 - nx, b.1 - ny),
+                    (a.0 - nx, a.1 - ny),
+                ],
+            );
+        }
+    }
+    for &(x, y) in points {
+        path.circle(x, y, half);
+    }
+}
+
+/// Coverage masks laid over one another (the larger coverage wins), so the
+/// parts of an icon union whatever their windings.
+fn union(masks: Vec<Mask>) -> Option<Mask> {
+    let x0 = masks.iter().map(|m| m.x).min()?;
+    let y0 = masks.iter().map(|m| m.y).min()?;
+    let x1 = masks.iter().map(|m| m.x + m.w).max()?;
+    let y1 = masks.iter().map(|m| m.y + m.h).max()?;
+    let (w, h) = (x1 - x0, y1 - y0);
+    let mut coverage = vec![0_u8; (w * h) as usize];
+    for mask in &masks {
+        for row in 0..mask.h {
+            for column in 0..mask.w {
+                let value = mask.coverage[(row * mask.w + column) as usize];
+                let index = ((mask.y - y0 + row) * w + mask.x - x0 + column) as usize;
+                coverage[index] = coverage[index].max(value);
+            }
+        }
+    }
+    Some(Mask {
+        x: x0,
+        y: y0,
+        w,
+        h,
+        coverage,
+    })
+}
+
 fn rasterize(icon: Icon, size: f32, stroke: f32) -> Raster {
     let (elements, _) = spec(icon);
     let scale = size / 24.0;
     let width = stroke;
-    let mut main = Path::new();
-    let mut knock = Path::new();
-    let mut any = (false, false);
+    let mut main = Vec::new();
+    let mut knock = Vec::new();
     let point = |(x, y): (f32, f32)| (x * scale, y * scale);
     for element in elements {
         let (shapes, paint): (Vec<Polyline>, Paint) = match *element {
@@ -697,45 +770,37 @@ fn rasterize(icon: Icon, size: f32, stroke: f32) -> Raster {
             El::Circle(cx, cy, r, paint) => (vec![(circle_points(cx, cy, r), true)], paint),
             El::Rect(x, y, w, h, r, paint) => (vec![(rect_points(x, y, w, h, r), true)], paint),
         };
-        let path = if paint == Paint::KnockStroke {
-            any.1 = true;
-            &mut knock
-        } else {
-            any.0 = true;
-            &mut main
-        };
+        let mut path = Path::new();
         for (points, closed) in shapes {
             let mut points: Vec<(f32, f32)> = points.into_iter().map(point).collect();
             match paint {
-                Paint::Fill => path.polygon(&points),
+                Paint::Fill => add_polygon(&mut path, &points),
                 Paint::Stroke | Paint::KnockStroke => {
                     if closed && let Some(&first) = points.first() {
                         points.push(first);
                     }
-                    if points.len() == 2 && points[0] == points[1] {
-                        // A dot (a zero-length segment's round caps).
-                        path.circle(points[0].0, points[0].1, width / 2.0);
-                    } else {
-                        path.stroke_polyline(&points, width);
-                    }
+                    add_stroke(&mut path, &points, width);
                 }
             }
         }
-    }
-    let mask = |path: &Path, used: bool| {
-        used.then(|| path.rasterize())
-            .flatten()
-            .map(|(x, y, w, h, coverage)| Mask {
+        if let Some((x, y, w, h, coverage)) = path.rasterize() {
+            let mask = Mask {
                 x,
                 y,
                 w,
                 h,
                 coverage,
-            })
-    };
+            };
+            if paint == Paint::KnockStroke {
+                knock.push(mask);
+            } else {
+                main.push(mask);
+            }
+        }
+    }
     Raster {
-        main: mask(&main, any.0),
-        knock: mask(&knock, any.1),
+        main: union(main),
+        knock: union(knock),
     }
 }
 

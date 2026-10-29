@@ -1,8 +1,8 @@
 //! Vendored from Moon (OSS-Phone-V1 `src/a26-shell/src`); keep in sync.
 #![allow(dead_code)]
 //! Anti-aliased text using the embedded Inter typeface (SIL OFL 1.1, see
-//! `assets/fonts/OFL.txt`; this copy, unlike Moon's, adds Inter Italic and
-//! JetBrains Mono NL in five cuts, `OFL-JetBrainsMono.txt`, subset by
+//! `assets/fonts/OFL.txt`; this copy, unlike Moon's, adds JetBrains Mono NL
+//! in five cuts, `OFL-JetBrainsMono.txt`, subset by
 //! `scripts/subset-fonts.sh`, for the Exocortex app's Whale look, which is
 //! monospaced throughout), with fallbacks for everything Inter lacks so a
 //! message never shows a '?': Noto Sans (Latin extended, Greek, Cyrillic,
@@ -36,8 +36,6 @@ pub enum Weight {
     DisplayLight,
     DisplayMedium,
     DisplaySemiBold,
-    /// Inter Italic (emphasis in the Exocortex app's markdown).
-    Italic,
     /// JetBrains Mono NL: the Exocortex app's text, in its five cuts.
     Mono,
     MonoMedium,
@@ -46,7 +44,7 @@ pub enum Weight {
     MonoItalic,
 }
 
-const WEIGHTS: [Weight; 13] = [
+const WEIGHTS: [Weight; 12] = [
     Weight::Regular,
     Weight::Medium,
     Weight::SemiBold,
@@ -54,7 +52,6 @@ const WEIGHTS: [Weight; 13] = [
     Weight::DisplayLight,
     Weight::DisplayMedium,
     Weight::DisplaySemiBold,
-    Weight::Italic,
     Weight::Mono,
     Weight::MonoMedium,
     Weight::MonoSemiBold,
@@ -71,7 +68,6 @@ fn font_bytes(weight: Weight) -> &'static [u8] {
         Weight::DisplayLight => include_bytes!("../assets/fonts/InterDisplay-Light.ttf"),
         Weight::DisplayMedium => include_bytes!("../assets/fonts/InterDisplay-Medium.ttf"),
         Weight::DisplaySemiBold => include_bytes!("../assets/fonts/InterDisplay-SemiBold.ttf"),
-        Weight::Italic => include_bytes!("../assets/fonts/Inter-Italic.ttf"),
         Weight::Mono => include_bytes!("../assets/fonts/JetBrainsMonoNL-Regular.ttf"),
         Weight::MonoMedium => include_bytes!("../assets/fonts/JetBrainsMonoNL-Medium.ttf"),
         Weight::MonoSemiBold => include_bytes!("../assets/fonts/JetBrainsMonoNL-SemiBold.ttf"),
@@ -462,7 +458,7 @@ fn resample(width: u32, height: u32, pixels: &[u32], to_w: u32, to_h: u32) -> Ve
 /// The embedded faces, each parsed the first time it is needed (fontdue
 /// parses every glyph up front: Inter's nine took 63 ms on the A26's fast core,
 /// a cold start's longest step), or ahead of time by `preload`.
-static FACES: [OnceLock<Font>; 13] = [const { OnceLock::new() }; 13];
+static FACES: [OnceLock<Font>; 12] = [const { OnceLock::new() }; 12];
 
 fn face(weight: Weight) -> &'static Font {
     let index = WEIGHTS.iter().position(|w| *w == weight).unwrap_or(0);

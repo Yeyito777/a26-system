@@ -1,6 +1,9 @@
-//! The open conversation: its history window (entries with stamps), the
-//! reply streaming into it, older pages, and the conversations kept to
-//! reopen at once.
+//! The open conversation (WP-C2): its history window (entries with
+//! stamps), the reply streaming into it, older pages, and the
+//! conversations kept to reopen at once.
+//!
+//! Change `Chat::entries` only through `Chat`'s methods: they keep every
+//! entry's stamp, which the view caches its layout by.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -8,7 +11,18 @@ use std::time::Instant;
 use serde_json::Value;
 
 use super::super::proto::{self, Block, Entry, Event};
-use super::{ANSWER_WITHIN, Model, Page};
+use super::super::requests::{self, Owner, Pending};
+use super::{Model, Page};
+
+/// What the user does in the open conversation.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Retry is C2's (the load error's button).
+pub enum Act {
+    /// Opens or folds a tool call, a run of them, or a thinking block.
+    ToggleExpanded(String),
+    /// Asks for the conversation again after its load failed.
+    Retry,
+}
 
 /// A user message sent from here that the daemon has not echoed yet.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,8 +62,14 @@ pub struct Chat {
     pub start: u64,
     pub start_block: u64,
     pub has_older: bool,
+    /// The newest window asked for (its answer replaces what shows; a late
+    /// one still lands).
+    pub load_request: Option<String>,
+    /// The older page asked for.
     pub older_request: Option<String>,
-    pub(crate) older_sent: Option<Instant>,
+    /// The newest page asked for after a turn stopped, to settle on the
+    /// daemon's copy.
+    pub refresh_request: Option<String>,
     pub loaded: bool,
     pub live: Option<Live>,
     pub echoes: Vec<Echo>,
@@ -247,8 +267,9 @@ impl Chat {
     /// only a live subscription keeps current.
     pub(crate) fn shelved(mut self) -> Self {
         self.live = None;
+        self.load_request = None;
         self.older_request = None;
-        self.older_sent = None;
+        self.refresh_request = None;
         self.outputs_requested.clear();
         self.echoes.clear();
         self.error = None;
@@ -256,22 +277,63 @@ impl Chat {
     }
 }
 
+/// Conversations opened before, most recent last: reopening one shows it
+/// at once while the daemon's fresh window is on its way.
+#[derive(Debug, Default)]
+pub struct Shelf {
+    chats: Vec<Chat>,
+}
+
+impl Shelf {
+    const KEEP: usize = 8;
+
+    /// Keeps a conversation that is no longer open.
+    pub fn keep(&mut self, chat: Chat) {
+        if chat.id.is_none() || !chat.loaded || chat.error.is_some() {
+            return;
+        }
+        self.chats.retain(|kept| kept.id != chat.id);
+        self.chats.push(chat.shelved());
+        if self.chats.len() > Self::KEEP {
+            self.chats.remove(0);
+        }
+    }
+
+    pub fn take(&mut self, id: &str) -> Option<Chat> {
+        let index = self
+            .chats
+            .iter()
+            .position(|chat| chat.id.as_deref() == Some(id))?;
+        let mut chat = self.chats.remove(index);
+        chat.touch();
+        Some(chat)
+    }
+
+    pub fn forget(&mut self, id: &str) {
+        self.chats.retain(|chat| chat.id.as_deref() != Some(id));
+    }
+}
+
 impl Model {
-    pub(crate) fn open(&mut self, id: String) -> Vec<Value> {
+    /// Shows conversation `id`, and asks for its newest window.
+    pub(super) fn open(&mut self, id: String) -> Vec<Value> {
         self.save_draft();
         let changed = self.chat.id.as_deref() != Some(id.as_str());
         let previous = self.chat.id.clone();
         if changed {
-            let chat = self.unshelve(&id).unwrap_or_else(|| Chat {
+            let chat = self.shelf.take(&id).unwrap_or_else(|| Chat {
                 id: Some(id.clone()),
                 ..Chat::default()
             });
             let old = std::mem::replace(&mut self.chat, chat);
-            self.shelve(old);
-            self.composer = self.drafts.get(&id).cloned().unwrap_or_default();
+            self.shelf.keep(old);
+            self.restore_draft();
+            self.ui.close_scoped = true;
+        }
+        if self.page != Page::Chat {
+            self.ui.close_all = true;
         }
         self.page = Page::Chat;
-        self.picker = false;
         let mut commands = Vec::new();
         if let Some(previous) = previous.filter(|_| changed) {
             commands.push(proto::unsubscribe(&previous));
@@ -283,28 +345,38 @@ impl Model {
         commands
     }
 
-    /// Keeps a conversation that is no longer open, to show it at once
-    /// when it opens again.
-    pub(crate) fn shelve(&mut self, chat: Chat) {
-        const KEEP: usize = 8;
-        if chat.id.is_none() || !chat.loaded || chat.error.is_some() {
-            return;
-        }
-        self.shelf.retain(|kept| kept.id != chat.id);
-        self.shelf.push(chat.shelved());
-        if self.shelf.len() > KEEP {
-            self.shelf.remove(0);
-        }
+    /// A new conversation, composed in the chat page (in the folder the
+    /// list shows).
+    pub(super) fn new_conversation(&mut self) -> Vec<Value> {
+        self.save_draft();
+        let previous = self.chat.id.clone();
+        let draft = Chat {
+            loaded: true,
+            ..Chat::default()
+        };
+        let old = std::mem::replace(&mut self.chat, draft);
+        self.shelf.keep(old);
+        self.ops.draft_selection = None;
+        self.ui.close_all = true;
+        self.page = Page::Chat;
+        previous
+            .map(|id| proto::unsubscribe(&id))
+            .into_iter()
+            .collect()
     }
 
-    pub(crate) fn unshelve(&mut self, id: &str) -> Option<Chat> {
-        let index = self
-            .shelf
-            .iter()
-            .position(|chat| chat.id.as_deref() == Some(id))?;
-        let mut chat = self.shelf.remove(index);
-        chat.touch();
-        Some(chat)
+    /// Back from the chat to the list.
+    pub(super) fn leave_chat(&mut self) -> Vec<Value> {
+        self.save_draft();
+        self.page = Page::List;
+        let id = self.chat.id.clone();
+        let old = std::mem::take(&mut self.chat);
+        self.shelf.keep(old);
+        // Not viewing it any more: the daemon may mark it unread.
+        id.filter(|_| self.connected)
+            .map(|id| proto::unsubscribe(&id))
+            .into_iter()
+            .collect()
     }
 
     /// A tapped notification (or a conversation the app was asked to show).
@@ -312,18 +384,51 @@ impl Model {
         if !self.connected {
             self.pending_open = Some(id.to_owned());
             self.save_draft();
+            self.ui.close_all = true;
             self.page = Page::Chat;
             if self.chat.id.as_deref() != Some(id) {
-                let chat = self.unshelve(id).unwrap_or_else(|| Chat {
+                let chat = self.shelf.take(id).unwrap_or_else(|| Chat {
                     id: Some(id.to_owned()),
                     ..Chat::default()
                 });
                 let old = std::mem::replace(&mut self.chat, chat);
-                self.shelve(old);
+                self.shelf.keep(old);
             }
             return Vec::new();
         }
         self.open(id.to_owned())
+    }
+
+    pub(super) fn handle_chat(&mut self, act: Act) -> Vec<Value> {
+        match act {
+            Act::ToggleExpanded(key) => {
+                let mut commands = Vec::new();
+                if !self.chat.expanded.remove(&key) {
+                    self.chat.expanded.insert(key.clone());
+                    if let Some(tool) = key.strip_prefix("tool:")
+                        && self.wants_output(tool)
+                        && let (Some(id), true) = (self.chat.id.clone(), self.connected)
+                    {
+                        self.chat.outputs_requested.insert(tool.to_owned());
+                        let request = self.requests.issue(
+                            Owner::Chat,
+                            "outputs",
+                            Some(&id),
+                            requests::DEFAULT_WITHIN,
+                            Instant::now(),
+                        );
+                        commands.push(proto::load_tool_outputs(&request, &id, &[tool.to_owned()]));
+                    }
+                }
+                self.chat.touch();
+                commands
+            }
+            Act::Retry => {
+                self.chat.error = None;
+                self.chat.touch();
+                self.reload()
+            }
+        }
     }
 
     /// A tool's output is not in the history the daemon sent.
@@ -349,7 +454,133 @@ impl Model {
                 .is_some_and(|live| known(&live.blocks))
     }
 
-    pub(crate) fn apply_stream(&mut self, event: Event) -> Vec<Value> {
+    /// The connection dropped: what was asked will not be answered. The
+    /// live tail is unknown until the conversation is reloaded (a quiet
+    /// reconnection keeps showing it until then).
+    pub(super) fn chat_disconnected(&mut self, quiet: bool) {
+        self.chat.load_request = None;
+        self.chat.older_request = None;
+        self.chat.refresh_request = None;
+        self.chat.outputs_requested.clear();
+        if !quiet {
+            self.chat.live = None;
+        }
+    }
+
+    /// The open conversation's events (and deletions of any).
+    pub(super) fn apply_chat(&mut self, event: Event, _now: Instant) -> Vec<Value> {
+        match event {
+            Event::ConversationDeleted { conv_id, .. } => {
+                self.shelf.forget(&conv_id);
+                if self.chat.id.as_deref() == Some(&conv_id) {
+                    self.ui.close_all = true;
+                    self.page = Page::List;
+                    self.chat = Chat::default();
+                }
+                Vec::new()
+            }
+            Event::ConversationLoaded {
+                req_id,
+                conv_id,
+                window,
+                ..
+            } => {
+                if self.chat.id.as_deref() != Some(&conv_id) {
+                    return Vec::new();
+                }
+                let backfill = window.initial_backfill_req_id.clone();
+                let streaming = matches!(window.pending_ai, Some(Some(_)));
+                let fresh = req_id.is_some() && req_id == self.chat.load_request;
+                if fresh {
+                    self.chat.load_request = None;
+                    self.chat.live = None;
+                    self.chat.echoes.clear();
+                    self.chat.error = None;
+                }
+                let before = (self.chat.start, self.chat.start_block);
+                self.chat.splice(window, fresh);
+                if fresh {
+                    // The older page follows, unless the history from before
+                    // was kept: it would not join on, so it is not waited for.
+                    let kept = (self.chat.start, self.chat.start_block) == before;
+                    let asked = self.chat.older_request.take();
+                    self.chat.older_request = if kept { None } else { backfill };
+                    if let Some(asked) = asked
+                        && self.chat.older_request.as_ref() != Some(&asked)
+                    {
+                        self.requests.forget(&asked);
+                    }
+                }
+                if !streaming && !self.open_summary().is_some_and(|s| s.streaming) {
+                    self.chat.live = None;
+                }
+                Vec::new()
+            }
+            Event::ConversationHistoryLoaded {
+                req_id,
+                conv_id,
+                window,
+                ..
+            } => {
+                if self.chat.id.as_deref() != Some(&conv_id) {
+                    return Vec::new();
+                }
+                if req_id.is_some() && req_id == self.chat.older_request {
+                    self.chat.older_request = None;
+                    if !self.chat.prepend(window) {
+                        // The history moved under the page: start over.
+                        return self.reload();
+                    }
+                } else if req_id.is_some() && req_id == self.chat.refresh_request {
+                    self.chat.refresh_request = None;
+                    let live = self.chat.live.take();
+                    self.chat.splice(window, false);
+                    if self.open_summary().is_some_and(|s| s.streaming) {
+                        self.chat.live = live;
+                    }
+                }
+                Vec::new()
+            }
+            Event::HistoryUpdated { conv_id, window } => {
+                if self.chat.id.as_deref() == Some(&conv_id) && self.chat.loaded {
+                    let had_live = self.chat.live.is_some();
+                    let pending = window.pending_ai.clone();
+                    self.chat.splice(window, false);
+                    match pending {
+                        // The daemon says the turn is over.
+                        Some(None) => self.chat.live = None,
+                        None if had_live && !self.open_summary().is_some_and(|s| s.streaming) => {
+                            self.chat.live = None;
+                        }
+                        _ => {}
+                    }
+                }
+                Vec::new()
+            }
+            Event::ConversationUnwound { conv_id, .. } => {
+                self.shelf.forget(&conv_id);
+                if self.chat.id.as_deref() == Some(&conv_id) {
+                    self.reload()
+                } else {
+                    Vec::new()
+                }
+            }
+            Event::ToolOutputsLoaded {
+                conv_id, outputs, ..
+            } => {
+                if self.chat.id.as_deref() == Some(&conv_id) {
+                    for output in outputs {
+                        self.chat.outputs.insert(output.tool_call_id, output.output);
+                    }
+                    self.chat.touch();
+                }
+                Vec::new()
+            }
+            event => self.apply_stream(event),
+        }
+    }
+
+    fn apply_stream(&mut self, event: Event) -> Vec<Value> {
         let conv = match &event {
             Event::StreamingStarted { conv_id, .. }
             | Event::StreamingStopped { conv_id, .. }
@@ -388,13 +619,9 @@ impl Model {
             }
             Event::BlockStart { block_type, .. } => {
                 let block = if block_type == "thinking" {
-                    Block::Thinking {
-                        text: String::new(),
-                    }
+                    Block::thinking("")
                 } else {
-                    Block::Text {
-                        text: String::new(),
-                    }
+                    Block::text("")
                 };
                 chat.live_mut().blocks.push(block);
             }
@@ -408,8 +635,8 @@ impl Model {
             Event::ThinkingChunk { text, .. } => {
                 let blocks = &mut chat.live_mut().blocks;
                 match blocks.last_mut() {
-                    Some(Block::Thinking { text: tail }) => tail.push_str(&text),
-                    _ => blocks.push(Block::Thinking { text }),
+                    Some(Block::Thinking { text: tail, .. }) => tail.push_str(&text),
+                    _ => blocks.push(Block::thinking(text)),
                 }
             }
             Event::StreamingSync { blocks, .. } => {
@@ -427,24 +654,29 @@ impl Model {
                 tool_name,
                 input,
                 summary,
+                presentation,
                 ..
             } => chat.live_mut().blocks.push(Block::ToolCall {
                 tool_call_id,
                 tool_name,
                 input,
                 summary,
+                presentation,
+                elided: None,
             }),
             Event::ToolResult {
                 tool_call_id,
                 tool_name,
                 output,
                 is_error,
+                images,
                 ..
             } => chat.live_mut().blocks.push(Block::ToolResult {
                 tool_call_id,
                 tool_name,
                 output,
                 is_error,
+                images,
             }),
             Event::MessageComplete { blocks, .. } => {
                 let live = chat.live_mut();
@@ -465,13 +697,22 @@ impl Model {
                 chat.commit_live();
                 // Settle on the daemon's own copy of the newest turns.
                 if self.connected {
-                    let request = self.request_id();
-                    self.refresh_request = Some(request.clone());
+                    let request = self.requests.issue(
+                        Owner::Chat,
+                        "refresh",
+                        Some(&conv),
+                        requests::DEFAULT_WITHIN,
+                        Instant::now(),
+                    );
+                    self.chat.refresh_request = Some(request.clone());
                     return vec![proto::load_history(&request, &conv, 1 << 40, 0, 3)];
                 }
             }
             Event::UserMessage {
-                text, started_at, ..
+                text,
+                started_at,
+                images,
+                ..
             } => {
                 let started = started_at.unwrap_or(0.0) as u64;
                 if let Some(index) = chat
@@ -485,6 +726,7 @@ impl Model {
                 chat.commit_live();
                 chat.push(Entry::User {
                     text,
+                    images,
                     metadata: None,
                 });
                 if self.open_summary().is_some_and(|s| s.streaming) {
@@ -493,7 +735,11 @@ impl Model {
                 }
             }
             Event::SystemMessage { text, color, .. } => {
-                chat.push(Entry::System { text, color });
+                chat.push(Entry::System {
+                    text,
+                    color,
+                    metadata: None,
+                });
             }
             Event::StreamRetry {
                 attempt,
@@ -504,6 +750,7 @@ impl Model {
                 chat.push(Entry::System {
                     text: format!("Retrying ({attempt}/{max_attempts}): {error_message}"),
                     color: Some("warning".into()),
+                    metadata: None,
                 });
             }
             _ => {}
@@ -513,16 +760,22 @@ impl Model {
 
     /// Asks for the open conversation's newest window (which subscribes to
     /// it and marks it read), and the older page after it.
-    pub(crate) fn reload(&mut self) -> Vec<Value> {
+    pub(super) fn reload(&mut self) -> Vec<Value> {
         match self.chat.id.clone() {
             Some(id) if self.connected => {
-                let request = self.request_id();
-                let backfill = self.request_id();
                 let now = Instant::now();
-                self.load_request = Some(request.clone());
-                self.load_sent = Some(now);
+                let request =
+                    self.requests
+                        .issue(Owner::Chat, "load", Some(&id), requests::LOAD_WITHIN, now);
+                let backfill = self.requests.issue(
+                    Owner::Chat,
+                    "older",
+                    Some(&id),
+                    requests::LOAD_WITHIN,
+                    now,
+                );
+                self.chat.load_request = Some(request.clone());
                 self.chat.older_request = Some(backfill.clone());
-                self.chat.older_sent = Some(now);
                 vec![proto::load_conversation(&request, &id, &backfill)]
             }
             _ => Vec::new(),
@@ -534,7 +787,7 @@ impl Model {
         if !self.connected
             || !self.chat.has_older
             || self.chat.older_request.is_some()
-            || self.load_request.is_some()
+            || self.chat.load_request.is_some()
             || !self.chat.loaded
         {
             return Vec::new();
@@ -542,9 +795,14 @@ impl Model {
         let Some(id) = self.chat.id.clone() else {
             return Vec::new();
         };
-        let request = self.request_id();
+        let request = self.requests.issue(
+            Owner::Chat,
+            "older",
+            Some(&id),
+            requests::LOAD_WITHIN,
+            Instant::now(),
+        );
         self.chat.older_request = Some(request.clone());
-        self.chat.older_sent = Some(Instant::now());
         self.chat.touch();
         vec![proto::load_history(
             &request,
@@ -555,43 +813,51 @@ impl Model {
         )]
     }
 
-    /// Gives up on what the daemon has not answered in `ANSWER_WITHIN`;
-    /// returns whether that changed what shows.
-    pub fn expire(&mut self, now: Instant) -> bool {
-        let mut changed = false;
-        if self
-            .load_sent
-            .is_some_and(|at| now.duration_since(at) >= ANSWER_WITHIN)
-        {
-            // load_request stays: a late answer still lands.
-            self.load_sent = None;
-            if self.load_request.is_some() {
+    /// An error answering request `id`: the chat's when it is its window or
+    /// older page (late ones included). True when handled.
+    pub(super) fn chat_error(&mut self, id: &str, message: &str) -> bool {
+        if self.chat.load_request.as_deref() == Some(id) {
+            self.chat.load_request = None;
+            self.chat.error = Some(message.to_owned());
+            self.chat.loaded = true;
+            self.chat.touch();
+            true
+        } else if self.chat.older_request.as_deref() == Some(id) {
+            self.chat.older_request = None;
+            self.chat.has_older = false;
+            self.chat.touch();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// One of the chat's requests was not answered in time. The window's
+    /// late answer still lands (its id stays); an older page is asked for
+    /// again on the next scroll up.
+    pub(super) fn chat_timeout(&mut self, id: &str, pending: &Pending) -> bool {
+        if pending.conv != self.chat.id {
+            return false;
+        }
+        match pending.kind {
+            "load" if self.chat.load_request.as_deref() == Some(id) => {
                 self.chat.loaded = true;
                 self.chat.error =
                     Some("Exocortex did not answer. Open the conversation again to retry.".into());
                 self.chat.touch();
-                changed = true;
+                true
             }
+            "older" if self.chat.older_request.as_deref() == Some(id) => {
+                self.chat.older_request = None;
+                self.chat.touch();
+                true
+            }
+            "outputs" => {
+                self.chat.outputs_requested.clear();
+                self.chat.touch();
+                true
+            }
+            _ => false,
         }
-        if self
-            .chat
-            .older_sent
-            .is_some_and(|at| now.duration_since(at) >= ANSWER_WITHIN)
-        {
-            self.chat.older_sent = None;
-            self.chat.older_request = None;
-            self.chat.touch();
-            changed = true;
-        }
-        changed
-    }
-
-    /// When `expire` next has something to do.
-    pub fn answer_deadline(&self) -> Option<Instant> {
-        [self.load_sent, self.chat.older_sent]
-            .into_iter()
-            .flatten()
-            .min()
-            .map(|at| at + ANSWER_WITHIN)
     }
 }

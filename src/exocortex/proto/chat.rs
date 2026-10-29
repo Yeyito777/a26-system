@@ -1,5 +1,5 @@
-//! A conversation's history and stream: blocks, entries, windows, and the
-//! commands that load them.
+//! A conversation's history and stream (WP-C1 and WP-C2): blocks, entries,
+//! windows, images and file links, and the commands that load them.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -21,6 +21,9 @@ pub enum Block {
     Thinking {
         #[serde(default)]
         text: String,
+        /// Left out of a folded history page (`load_display_blocks`).
+        #[serde(default)]
+        elided: Option<Elided>,
     },
     ToolCall {
         #[serde(default)]
@@ -31,6 +34,10 @@ pub enum Block {
         input: Value,
         #[serde(default)]
         summary: String,
+        #[serde(default)]
+        presentation: Option<Presentation>,
+        #[serde(default)]
+        elided: Option<Elided>,
     },
     ToolResult {
         #[serde(default)]
@@ -41,9 +48,80 @@ pub enum Block {
         output: String,
         #[serde(default)]
         is_error: bool,
+        /// Images the call attached to the message (the attach tool).
+        #[serde(default)]
+        images: Vec<ImageRef>,
     },
     #[serde(other)]
     Other,
+}
+
+impl Block {
+    pub fn text(text: impl Into<String>) -> Self {
+        Block::Text { text: text.into() }
+    }
+
+    pub fn thinking(text: impl Into<String>) -> Self {
+        Block::Thinking {
+            text: text.into(),
+            elided: None,
+        }
+    }
+}
+
+/// Where an elided block's content lives (absolute entry, block index).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Elided {
+    pub entry: u64,
+    pub block: u64,
+}
+
+/// A tool call's invocation-time display details (`ToolCallPresentation`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Presentation {
+    /// Bash command styles found beside the executables it ran.
+    pub bash_styles: Vec<super::ops::ExternalToolStyle>,
+    /// A conversation-scoped tool's own style.
+    pub tool_style: Option<super::ops::ToolStyle>,
+    /// Shown instead of the input's summary.
+    pub detail: Option<String>,
+}
+
+/// A daemon-stored image (`ImageRef`): fetched with `get_image`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImageRef {
+    pub id: String,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub size_bytes: u64,
+    pub name: Option<String>,
+}
+
+/// An image attached to a user message (`ImageAttachment`); history sends
+/// its `image_id` with the bytes compacted away.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImageAttachment {
+    pub media_type: String,
+    pub base64: String,
+    pub size_bytes: u64,
+    pub image_id: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Output-throughput samples of a message (`GenerationThroughput`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Throughput {
+    pub provider: String,
+    pub model: String,
+    /// Tokens per second of its last ten API rounds.
+    pub rates: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -51,11 +129,18 @@ pub enum Block {
 pub struct Metadata {
     pub started_at: f64,
     pub ended_at: Option<f64>,
+    /// Start of the run's work timer (turns handed off within it share it).
+    pub work_timer_started_at: Option<f64>,
     pub model: String,
+    /// Output tokens.
+    pub tokens: u64,
+    pub generation_throughput: Option<Throughput>,
     /// Daemon-authored notices shown as system rows, not the user's words.
     pub system: bool,
     pub kind: Option<String>,
+    /// `{"kind": "chrono", "sourceId": …}`: an automated prompt.
     pub automation: Option<Value>,
+    pub queue_entry_id: Option<String>,
 }
 
 /// A history entry (`DisplayEntry`).
@@ -65,6 +150,8 @@ pub enum Entry {
     User {
         #[serde(default)]
         text: String,
+        #[serde(default)]
+        images: Vec<ImageAttachment>,
         #[serde(default)]
         metadata: Option<Metadata>,
     },
@@ -79,6 +166,8 @@ pub enum Entry {
         text: String,
         #[serde(default)]
         color: Option<String>,
+        #[serde(default)]
+        metadata: Option<Metadata>,
     },
     SystemInstructions {
         #[serde(default)]
@@ -101,6 +190,7 @@ pub struct ToolOutput {
 pub struct PendingAi {
     pub blocks: Vec<Block>,
     pub block_offset: u64,
+    pub metadata: Option<Metadata>,
 }
 
 /// A window of history: `conversation_loaded`, `conversation_history_loaded`
@@ -123,6 +213,63 @@ pub struct Window {
     /// conversation_loaded: the older page asked for with `initialBackfill`
     /// follows, answering this reqId.
     pub initial_backfill_req_id: Option<String>,
+    /// The conversation's last known input tokens (loaded, updated).
+    pub context_tokens: Option<u64>,
+    /// Whether tool results carry their outputs.
+    pub tool_outputs_included: bool,
+}
+
+/// `display_blocks_loaded`: blocks a folded page left out, by entry.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DisplayBlocks {
+    pub req_id: Option<String>,
+    pub conv_id: String,
+    pub ranges: Vec<BlockRange>,
+    /// Later ranges are missing: ask again.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BlockRange {
+    pub entry: u64,
+    pub start: u64,
+    pub blocks: Vec<Block>,
+}
+
+/// `image_data`: an image's bounded preview.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImageData {
+    pub req_id: Option<String>,
+    pub image_id: String,
+    /// `png` or `rgba`.
+    pub format: String,
+    pub width: u32,
+    pub height: u32,
+    pub base64: String,
+}
+
+/// `file_link_resolved`: a local path in a reply, on the daemon's host.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileLink {
+    pub req_id: Option<String>,
+    pub conv_id: String,
+    pub path: String,
+    /// `file` or `directory`.
+    pub kind: String,
+    pub size: u64,
+}
+
+/// `system_instructions_updated`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SystemInstructions {
+    pub conv_id: String,
+    /// Empty: cleared.
+    pub text: String,
 }
 
 /// Opens a conversation: a window of about two screens (byte-budgeted;
@@ -181,4 +328,49 @@ pub fn reply_text(blocks: &[Block]) -> String {
         })
         .collect();
     text.join("\n\n")
+}
+
+/// A stored image as a PNG that fits `width` × `height` (never upscaled);
+/// `thumbnail` lets the daemon quantize it (history previews).
+pub fn get_image(
+    req_id: &str,
+    conv_id: Option<&str>,
+    image_id: &str,
+    (width, height): (u32, u32),
+    thumbnail: bool,
+) -> Value {
+    let mut command = json!({
+        "type": "get_image",
+        "reqId": req_id,
+        "imageId": image_id,
+        "format": "png",
+        "width": width,
+        "height": height,
+    });
+    if let Some(conv_id) = conv_id {
+        command["convId"] = json!(conv_id);
+    }
+    if thumbnail {
+        command["purpose"] = json!("thumbnail");
+    }
+    command
+}
+
+/// Blocks a folded history page left out (`load_display_blocks`).
+pub fn load_display_blocks(req_id: &str, conv_id: &str, ranges: &[(u64, u64, u64)]) -> Value {
+    let ranges: Vec<Value> = ranges
+        .iter()
+        .map(|(entry, start, end)| json!({ "entry": entry, "start": start, "end": end }))
+        .collect();
+    json!({
+        "type": "load_display_blocks",
+        "reqId": req_id,
+        "convId": conv_id,
+        "ranges": ranges,
+    })
+}
+
+/// Where a local path in a reply is (`resolve_file_link`).
+pub fn resolve_file_link(req_id: &str, conv_id: &str, target: &str) -> Value {
+    json!({ "type": "resolve_file_link", "reqId": req_id, "convId": conv_id, "target": target })
 }
