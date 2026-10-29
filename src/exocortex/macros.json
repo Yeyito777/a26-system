@@ -1,0 +1,269 @@
+{
+  "generated": "scripts/sync-exocortex-macros.ts from Exocortex tui/src/macros.ts (2e4e7180); do not edit",
+  "items": [
+    {
+      "name": "/consider",
+      "desc": "Am I right or wrong?"
+    },
+    {
+      "name": "/commit",
+      "desc": "Commit and push"
+    },
+    {
+      "name": "/noop",
+      "desc": "Thoughts only, no edits"
+    },
+    {
+      "name": "/todo",
+      "desc": "Track and finish a TODO list"
+    },
+    {
+      "name": "/plan",
+      "desc": "Plan only, no edits"
+    },
+    {
+      "name": "/fix",
+      "desc": "Go ahead and fix it"
+    },
+    {
+      "name": "/go",
+      "desc": "Go ahead and implement"
+    },
+    {
+      "name": "/questions",
+      "desc": "Any questions?"
+    },
+    {
+      "name": "/thoughts",
+      "desc": "Tell me your thoughts"
+    },
+    {
+      "name": "/long",
+      "desc": "Work until complete"
+    },
+    {
+      "name": "/subagents",
+      "desc": "Delegate when useful"
+    },
+    {
+      "name": "/html",
+      "desc": "Respond with saved HTML"
+    },
+    {
+      "name": "/autoresearch",
+      "desc": "Start autoresearch"
+    },
+    {
+      "name": "/publish",
+      "desc": "Publish this"
+    },
+    {
+      "name": "/diagnose",
+      "desc": "Pinpoint the cause"
+    },
+    {
+      "name": "/improve",
+      "desc": "Improve Exocortex from friction"
+    },
+    {
+      "name": "/quality",
+      "desc": "Code quality assessment"
+    },
+    {
+      "name": "/exocortex",
+      "desc": "Exocortex repo tasks"
+    },
+    {
+      "name": "/worktree",
+      "desc": "Work in a git worktree"
+    },
+    {
+      "name": "/tool",
+      "desc": "Manage external tools"
+    },
+    {
+      "name": "/update",
+      "desc": "Update Exocortex"
+    }
+  ],
+  "args": {
+    "/autoresearch": [
+      {
+        "name": "stop",
+        "desc": "Stop autoresearching"
+      }
+    ],
+    "/commit": [
+      {
+        "name": "exocortex",
+        "desc": "Commit {{repoRoot}}"
+      }
+    ],
+    "/exocortex": [
+      {
+        "name": "tui-quality",
+        "desc": "Improve TUI code quality in a worktree"
+      },
+      {
+        "name": "daemon-quality",
+        "desc": "Improve daemon code quality in a worktree"
+      }
+    ],
+    "/improve": [
+      {
+        "name": "plan",
+        "desc": "Analyze only"
+      }
+    ],
+    "/plan": [
+      {
+        "name": "other",
+        "desc": "Draft plan for another instance"
+      }
+    ],
+    "/publish": [
+      {
+        "name": "closed",
+        "desc": "Publish privately"
+      }
+    ],
+    "/todo": [
+      {
+        "name": "wait",
+        "desc": "Pause for TODO review"
+      }
+    ],
+    "/tool": [
+      {
+        "name": "install",
+        "desc": "Install an external tool"
+      },
+      {
+        "name": "uninstall",
+        "desc": "Uninstall an external tool",
+        "exact": true
+      }
+    ],
+    "/tool install": [
+      {
+        "name": "discord",
+        "desc": "Discord messages and calls"
+      },
+      {
+        "name": "exo",
+        "desc": "Debug other Exocortex instances"
+      },
+      {
+        "name": "gmail",
+        "desc": "Read, search, and send email"
+      },
+      {
+        "name": "google",
+        "desc": "Search the web"
+      },
+      {
+        "name": "image",
+        "desc": "Generate AI images"
+      },
+      {
+        "name": "linkedin",
+        "desc": "LinkedIn profiles and connections"
+      },
+      {
+        "name": "transcribe",
+        "desc": "Transcribe audio files"
+      },
+      {
+        "name": "twitter",
+        "desc": "Read and post on X"
+      },
+      {
+        "name": "whatsapp",
+        "desc": "Read and send WhatsApp messages"
+      }
+    ],
+    "/tool uninstall": [
+      {
+        "name": "{{toolDir}}",
+        "desc": "{{toolDir}}"
+      }
+    ],
+    "/worktree": [
+      {
+        "name": "setup",
+        "desc": "Set up worktree flow for a project"
+      },
+      {
+        "name": "merge",
+        "desc": "Merge worktree back into main"
+      },
+      {
+        "name": "clean",
+        "desc": "Reject/discard worktree",
+        "exact": true
+      }
+    ]
+  },
+  "expansions": {
+    "/autoresearch": "You're going to autoresearch. After clarifying the topic, propose a concrete objective the user can start with /goal. Goals can be stopped and explicitly resumed; use Chrono for recurring monitoring rather than an unfinishable goal. Make a gitignored directory in the project called \"autoresearch/<topic>\" for the raw benchmark, experiment outputs, and success/failure ledger. Never force-add or commit this directory. To know which experiments to keep or trash, you must create the benchmark first and make every experiment deterministic against it. On success, commit only the accepted production source, tests, and durable documentation outside the autoresearch directory. On failure, revert, stash, or delete the failed production change after recording the result in the local ledger. This lets repeated experiments improve the benchmark without accumulating generated research artifacts in the repository. Make sure to not use subagents. With all that said, this is the user request to autoresearch; choose how to interpret it as a benchmark and how to begin the research direction. Ask the user 5 questions before starting, and propose the goal AFTER the user has answered the five questions:",
+    "/autoresearch stop": "You're going to stop autoresearching. Make sure to wrap up your last experiment and tidy everything up. Keep only accepted production source, tests, and durable documentation tracked. Finally create an HTML report of the autoresearch. Format your would-be response in HTML, use dark mode for styling, and use tables, graphs, interactive buttons, or whatever method best conveys the results. Save it to a file in `{{storageDir}}/playground` (create the directory if needed), remove the local autoresearch directory after the report is safely written unless the user asks to retain it, and give me the report's absolute path.",
+    "/commit": "If you haven't already, commit your work and push it.",
+    "/commit exocortex": "If you haven't already, commit and push the work inside the Exocortex directory ({{repoRoot}}).",
+    "/consider": "Consider what I'm saying. Am I right or wrong?",
+    "/diagnose": "Can you pinpoint the exact cause and tell me your diagnosis?",
+    "/exocortex": "What would you like to do in the Exocortex repo?",
+    "/exocortex daemon-quality": "Check the code quality of exocortex's daemon. Fix the code quality issues you think are worth fixing, let's prioritize the modularity and longevity of this codebase. Work in a git worktree for this task. Find the repo root first (the directory containing .git/; don't assume CWD is it). From there, create the worktree with `./scripts/dev/create-worktree <name>`. Work inside that worktree. When I say I'm satisfied, merge back to main and clean up with `./scripts/dev/clean-worktree <name-or-path>`. Once done, test the daemon in the worktree end to end with exo-cli to make sure nothing broke. Check exo-cli -h first to see how to test in worktree.",
+    "/exocortex tui-quality": "Check the code quality of exocortex's tui. Fix the code quality issues you think are worth fixing, let's prioritize the modularity and longevity of this codebase. Work in a git worktree for this task. Find the repo root first (the directory containing .git/; don't assume CWD is it). From there, create the worktree with `./scripts/dev/create-worktree <name>`. Work inside that worktree. When I say I'm satisfied, merge back to main and clean up with `./scripts/dev/clean-worktree <name-or-path>`. Once done, test end to end with xenv to make sure nothing broke.",
+    "/fix": "Go ahead and fix it",
+    "/go": "Go ahead and implement that",
+    "/html": "Format your would-be response in HTML use dark-mode for styling, user tables, graphs, interactive buttons, or whatever method you consider to be best for displaying the information you want to convey to the user. Save it to a file in `{{storageDir}}/playground` (create the directory if needed) and give me the absolute file path.",
+    "/improve": "Run an Exocortex self-improvement pass: analyze this conversation for mistakes/friction, especially around internal tools, external tools, and the tooling system; inspect the relevant Exocortex/tool code; check recent conversations for recurring patterns; then pick one high-confidence fix and implement it in an Exocortex git worktree using ./scripts/dev/create-worktree <name>. Test it appropriately and report the worktree, changes, tests, and follow-up ideas.",
+    "/improve plan": "Run an Exocortex self-improvement pass: analyze this conversation for mistakes/friction, especially around internal tools, external tools, and the tooling system; inspect the relevant Exocortex/tool code; and check recent conversations for recurring patterns. Then report the best improvement candidates, but don't edit files yet.",
+    "/long": "This is a long running task, work tirelessly until you can verify that everything is complete and correct",
+    "/noop": "Don't do any destructive or modificating actions just yet just tell me your thoughts on this",
+    "/plan": "Come up with a plan for this and tell me it. Don't write or edit any files.",
+    "/plan other": "Draft a plan for this as a prompt for another instance. Write it as a kebab-case markdown file inside `{{storageDir}}/playground` (create the directory if needed). The file should be self-contained so I can send it to another instance and he gets all the context he needs to work on it.",
+    "/publish": "Start git tracking this, first checking for secrets/private artifacts/history that should not be published. Make a gitignore, MIT license it if appropriate, make upstream repo with gh tool, make it public, give brief description, and commit and push",
+    "/publish closed": "Start git tracking this, first checking for secrets/private artifacts/history that should not be committed. Make a gitignore, make upstream repo with gh tool, make it private, give brief description, and commit and push",
+    "/quality": "Give the changes a code quality assesment. Is there anything that should be split off into other files, de-duplicated, or made more clear? If so, do it.",
+    "/questions": "Before we proceed, any questions?",
+    "/subagents": "Use subagents when parallel work would materially improve speed or quality.",
+    "/thoughts": "Can you tell me your thoughts on this?",
+    "/todo": "Make a <name>-todo.md for this with items - [ ] and finish it sequentially.",
+    "/todo wait": "Make a <name>-todo.md for this with items - [ ] and tell me the abs path of it so I can review before you go and finish it sequentially.",
+    "/tool": "Explain to me how the external tools system works in Exocortex.",
+    "/tool install": "Explain to me how the installation process for a tool looks in Exocortex.",
+    "/tool install discord": "Install the discord-cli tool for yourself. Clone https://github.com/Yeyito777/discord-cli.git into {{externalToolsDir}}/discord-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install exo": "Install the exo-cli tool for yourself. Clone https://github.com/Yeyito777/exo-cli.git into {{externalToolsDir}}/exo-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install gmail": "Install the gmail-cli tool for yourself. Clone https://github.com/Yeyito777/gmail-cli.git into {{externalToolsDir}}/gmail-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install google": "Install the google-cli tool for yourself. Clone https://github.com/Yeyito777/Google.git into {{externalToolsDir}}/google-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install image": "Install the image-cli tool for yourself. Clone https://github.com/Yeyito777/image-cli.git into {{externalToolsDir}}/image-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install linkedin": "Install the linkedin-cli tool for yourself. Clone https://github.com/Yeyito777/linkedin-cli.git into {{externalToolsDir}}/linkedin-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install transcribe": "Install the transcribe-cli tool for yourself. Clone https://github.com/Yeyito777/transcribe-cli.git into {{externalToolsDir}}/transcribe-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install twitter": "Install the twitter-cli tool for yourself. Clone https://github.com/Yeyito777/twitter-cli.git into {{externalToolsDir}}/twitter-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install whatsapp": "Install the whatsapp-cli tool for yourself. Clone https://github.com/Yeyito777/whatsapp-cli.git into {{externalToolsDir}}/whatsapp-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool uninstall": "Explain to me how the uninstallation process for a tool looks in Exocortex.",
+    "/tool uninstall {{toolDir}}": "Uninstall the {{toolDir}} tool for yourself. Move {{externalToolsDir}}/{{toolDir}} into {{externalToolsTrashDir}} (create the trash directory if needed, and add a timestamp suffix instead of overwriting if a folder with that name is already there). Do not delete it outright. After moving it, check whether the tool's README mentions any extra cleanup steps and walk me through them if needed.",
+    "/update": "Update Exocortex. Pull the latest changes from github (fast-forward only) and install anything that needs to be installed. Then restart the daemon yourself with the exo tool's restart action and end your turn; you'll get a notice once it's back. Don't run exocortexd restart from a turn or ask me to restart the daemon. If the restart is refused (e.g. cooldown), schedule a Chrono wake to retry once it's allowed. If TUI code changed, tell me to restart my TUI.",
+    "/worktree": "Work in a git worktree for this task. Find the repo root first (the directory containing .git/; don't assume CWD is it). From there, create the worktree with `./scripts/dev/create-worktree <name>`. Work inside that worktree. When I say I'm satisfied, merge back to main and clean up with `./scripts/dev/clean-worktree <name-or-path>`.",
+    "/worktree clean": "The work in this worktree is rejected. Do not merge it, do not preserve the changes, and do not try to salvage the branch. Find the repo root first, identify the target worktree from the current directory or from the name/path I provide, verify it is a linked worktree and not main, then remove it and delete its branch. Prefer the project cleanup script, e.g. `./scripts/dev/clean-worktree <name-or-path>`. If cleanup refuses because the worktree is dirty or the branch is unmerged, explicitly discard the worktree changes and force-remove the worktree/branch. Clean up any worktree runtime/config leftovers if the project has them. Report what was removed.",
+    "/worktree merge": "First merge local main into the worktree branch (use local main, not origin — it's always up to date) and resolve any merge conflicts. The work in the worktree is good. Merge it back into main. After confirming the merge succeeded, run `./scripts/dev/clean-worktree <name-or-path>` from the repo root to remove the worktree, delete its branch, and clean up any worktree config leftovers.",
+    "/worktree setup": "Set up git worktree management flow for the project. If the project is not already a git repo, initialize git first. Use the existing Exocortex flow as the reference implementation: `{{repoRoot}}/scripts/dev/create-worktree`, `{{repoRoot}}/scripts/dev/clean-worktree`, `{{repoRoot}}/scripts/dev/worktree-common.sh`, `{{repoRoot}}/.gitignore`, `{{repoRoot}}/.githooks/post-checkout`, `{{repoRoot}}/scripts/dev/exotest`. Verify these files exist before reading them; if this installation lacks the source scripts, locate an Exocortex source checkout or ask for its location rather than guessing a path. If a local Record checkout is available, also check its scripts/dev/create-worktree, clean-worktree, worktree-common.sh, and recordtest for a smaller app-specific version; skip this optional reference if unavailable. Adapt the flow to this project's deps/config/runtime/test needs and host OS (do not blindly copy platform-specific shell or process checks), make scripts executable, update .gitignore, then smoke-test create + clean with a temporary worktree and leave no temp branch/worktree behind. Project:"
+  },
+  "win32": {
+    "/autoresearch stop": "You're going to stop autoresearching. Make sure to wrap up your last experiment and tidy everything up. Keep only accepted production source, tests, and durable documentation tracked. Finally create an HTML report of the autoresearch. Format your would-be response in HTML, use dark mode for styling, and use tables, graphs, interactive buttons, or whatever method best conveys the results. Save it to a file in `{{storageDir}}\\playground` (create the directory if needed), remove the local autoresearch directory after the report is safely written unless the user asks to retain it, and give me the report's absolute path.",
+    "/html": "Format your would-be response in HTML use dark-mode for styling, user tables, graphs, interactive buttons, or whatever method you consider to be best for displaying the information you want to convey to the user. Save it to a file in `{{storageDir}}\\playground` (create the directory if needed) and give me the absolute file path.",
+    "/plan other": "Draft a plan for this as a prompt for another instance. Write it as a kebab-case markdown file inside `{{storageDir}}\\playground` (create the directory if needed). The file should be self-contained so I can send it to another instance and he gets all the context he needs to work on it.",
+    "/tool install discord": "Install the discord-cli tool for yourself. Clone https://github.com/Yeyito777/discord-cli.git into {{externalToolsDir}}\\discord-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install exo": "Install the exo-cli tool for yourself. Clone https://github.com/Yeyito777/exo-cli.git into {{externalToolsDir}}\\exo-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install gmail": "Install the gmail-cli tool for yourself. Clone https://github.com/Yeyito777/gmail-cli.git into {{externalToolsDir}}\\gmail-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install google": "Install the google-cli tool for yourself. Clone https://github.com/Yeyito777/Google.git into {{externalToolsDir}}\\google-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install image": "Install the image-cli tool for yourself. Clone https://github.com/Yeyito777/image-cli.git into {{externalToolsDir}}\\image-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install linkedin": "Install the linkedin-cli tool for yourself. Clone https://github.com/Yeyito777/linkedin-cli.git into {{externalToolsDir}}\\linkedin-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install transcribe": "Install the transcribe-cli tool for yourself. Clone https://github.com/Yeyito777/transcribe-cli.git into {{externalToolsDir}}\\transcribe-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install twitter": "Install the twitter-cli tool for yourself. Clone https://github.com/Yeyito777/twitter-cli.git into {{externalToolsDir}}\\twitter-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool install whatsapp": "Install the whatsapp-cli tool for yourself. Clone https://github.com/Yeyito777/whatsapp-cli.git into {{externalToolsDir}}\\whatsapp-cli, then follow the README/setup instructions to build and install it. If the tool requires authentication or API tokens, walk me through the setup step by step — ask me for any credentials or config values you need.",
+    "/tool uninstall {{toolDir}}": "Uninstall the {{toolDir}} tool for yourself. Move {{externalToolsDir}}\\{{toolDir}} into {{externalToolsTrashDir}} (create the trash directory if needed, and add a timestamp suffix instead of overwriting if a folder with that name is already there). Do not delete it outright. After moving it, check whether the tool's README mentions any extra cleanup steps and walk me through them if needed.",
+    "/worktree setup": "Set up git worktree management flow for the project. If the project is not already a git repo, initialize git first. Use the existing Exocortex flow as the reference implementation: `{{repoRoot}}\\scripts\\dev\\create-worktree`, `{{repoRoot}}\\scripts\\dev\\clean-worktree`, `{{repoRoot}}\\scripts\\dev\\worktree-common.sh`, `{{repoRoot}}\\.gitignore`, `{{repoRoot}}\\.githooks\\post-checkout`, `{{repoRoot}}\\scripts\\dev\\exotest`. Verify these files exist before reading them; if this installation lacks the source scripts, locate an Exocortex source checkout or ask for its location rather than guessing a path. If a local Record checkout is available, also check its scripts/dev/create-worktree, clean-worktree, worktree-common.sh, and recordtest for a smaller app-specific version; skip this optional reference if unavailable. Adapt the flow to this project's deps/config/runtime/test needs and host OS (do not blindly copy platform-specific shell or process checks), make scripts executable, update .gitignore, then smoke-test create + clean with a temporary worktree and leave no temp branch/worktree behind. Project:"
+  }
+}

@@ -103,6 +103,9 @@ pub enum Effect {
     HideKeyboard,
     /// Paste the clipboard into the composer (`Model::paste_text`).
     Paste,
+    /// The composer's microphone (`dictation.rs`; lines come back through
+    /// `Model::dictation_line`).
+    Dictate(super::dictation::Do),
     /// Moon's status bar takes the theme's background again (E: a theme
     /// change).
     StatusBar,
@@ -255,6 +258,7 @@ impl Model {
         self.offline = false;
         self.quiet_until = None;
         self.was_connected = true;
+        self.ops_connected();
         let mut commands = vec![proto::client_capabilities(
             &proto::APP_CAPABILITIES,
             Some(24),
@@ -343,7 +347,7 @@ impl Model {
             Nav::OpenSettings => {
                 self.ui.close_all = true;
                 self.page = Page::Settings;
-                Vec::new()
+                self.settings_opened()
             }
             Nav::CloseSettings => {
                 self.ui.close_all = true;
@@ -368,6 +372,7 @@ impl Model {
                     Page::List => {
                         if !self.sidebar.up() {
                             self.page = Page::Settings;
+                            return self.settings_opened();
                         }
                         Vec::new()
                     }
