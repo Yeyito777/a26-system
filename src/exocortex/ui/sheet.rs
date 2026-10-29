@@ -85,6 +85,16 @@ pub trait SheetContent {
     fn keyboard(&self) -> Option<KeyboardPurpose> {
         None
     }
+
+    /// When its content next changes by itself (a ticking time).
+    fn wake(&self, _cx: &Cx) -> Option<Instant> {
+        None
+    }
+
+    /// What to do once the sheet has gone (`Overlay::farewell`).
+    fn farewell(&mut self) -> Option<Action> {
+        None
+    }
 }
 
 /// A sheet showing `C`.
@@ -395,6 +405,15 @@ impl<C: SheetContent> Overlay for Sheet<C> {
             }
             (None, None) => animator.frame(cx.now),
         }
+        if self.closed.is_none()
+            && let Some(at) = self.content.wake(cx)
+        {
+            animator.request(at);
+        }
+    }
+
+    fn farewell(&mut self) -> Option<Action> {
+        self.content.farewell()
     }
 
     fn step(&mut self, cx: &Cx) -> bool {

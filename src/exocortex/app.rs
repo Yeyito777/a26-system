@@ -919,6 +919,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             if !view.overlays.has_modal() {
                 view.lifted = None;
             }
+            for action in view.overlays.take_farewells() {
+                for command in model.handle(action) {
+                    link.send(command);
+                }
+            }
         }
 
         // A page change slides (Moon snapshots the old page first).
