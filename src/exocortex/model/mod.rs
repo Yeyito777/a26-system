@@ -246,6 +246,18 @@ impl Model {
         self.chat.load_request.is_some()
     }
 
+    /// What the app says while it is not connected (the chat's subtitle,
+    /// the list's pill and its loading state): a restart or stop the daemon
+    /// announced (PAR-029), else reconnecting, or connecting the first time.
+    pub fn link_status(&self) -> &'static str {
+        match self.ops.usage.link.shutdown.as_deref() {
+            Some("restart") => "Daemon restarting…",
+            Some(_) => "Daemon stopped",
+            None if self.was_connected => "Reconnecting…",
+            None => "Connecting…",
+        }
+    }
+
     /// The conversation shown in the chat, if any, for the bridge.
     pub fn shown_conversation(&self) -> Option<&str> {
         match self.page {

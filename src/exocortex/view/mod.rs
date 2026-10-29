@@ -565,22 +565,6 @@ fn draw_chat(
         }
     });
     chat_header::draw(canvas, model, pressed_action.as_ref(), now);
-    if model.offline {
-        let message = if model.was_connected {
-            "Reconnecting…"
-        } else {
-            "Connecting…"
-        };
-        widgets::pill(
-            canvas,
-            W / 2.0,
-            top + 22.0,
-            message,
-            true,
-            p.app_background,
-            now,
-        );
-    }
     composer::draw(
         canvas,
         model,

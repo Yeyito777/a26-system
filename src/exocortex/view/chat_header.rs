@@ -67,17 +67,7 @@ pub fn subtitle(model: &Model) -> Subtitle {
     let connected = model.ready || (!model.connected && !model.offline);
     let link = &model.ops.usage.link;
     let (mut text, dot) = if !model.connected && model.offline {
-        // A restart the daemon announced (PAR-029).
-        let text = if link.shutdown.as_deref() == Some("restart") {
-            "Daemon restarting…"
-        } else if link.shutdown.is_some() {
-            "Daemon stopped"
-        } else if model.was_connected {
-            "Reconnecting…"
-        } else {
-            "Connecting…"
-        };
-        (text.to_owned(), Some(Dot::Waiting))
+        (model.link_status().to_owned(), Some(Dot::Waiting))
     } else if !connected {
         ("Syncing…".to_owned(), Some(Dot::Waiting))
     } else if model.chat.error.is_some() {

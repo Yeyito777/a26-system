@@ -1209,10 +1209,8 @@ fn state(model: &Model, layout: &Layout) -> State {
     if !model.sidebar.loaded {
         return State::Loading(if model.connected {
             "Loading chats…"
-        } else if model.was_connected {
-            "Reconnecting…"
         } else {
-            "Connecting…"
+            model.link_status()
         });
     }
     State::Empty
@@ -1363,7 +1361,7 @@ pub struct ListFrame {
     /// Where the rows end.
     pub(crate) end: i32,
     /// The connection pill's spinner step, when it shows.
-    pub(crate) pill: Option<u32>,
+    pub(crate) pill: Option<(u32, &'static str)>,
     /// What shows pressed (bands drawn for the frame agree).
     pub(crate) pressed: Option<Action>,
     /// Select mode's bar, as drawn.
@@ -1445,7 +1443,8 @@ pub fn list_frame(
         header,
         rows,
         end: layout.height as i32,
-        pill: pill_shows(model).then(|| (anim::phase(now, 700) * 60.0) as u32),
+        pill: pill_shows(model)
+            .then(|| ((anim::phase(now, 700) * 60.0) as u32, model.link_status())),
         pressed: pressed.cloned(),
         bar: select_bar_key(model, pressed),
         lifted: lifted_row,
@@ -1789,11 +1788,7 @@ fn draw_list_with(
     }
     draw_header(canvas, model, pressed);
     if pill_shows(model) {
-        let message = if model.was_connected {
-            "Reconnecting…"
-        } else {
-            "Connecting…"
-        };
+        let message = model.link_status();
         widgets::pill(
             canvas,
             W / 2.0,
