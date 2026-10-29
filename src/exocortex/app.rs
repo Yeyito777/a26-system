@@ -53,6 +53,10 @@ const DOTS_EVERY: Duration = Duration::from_millis(420);
 /// window before "Loading…" is drawn (Moon holds its page slide for the
 /// first frame up to 150 ms), so it usually slides in with its messages.
 const HOLD_FOR_WINDOW: Duration = Duration::from_millis(110);
+/// The window came with an older page to follow (the daemon sends it from
+/// the same snapshot, right after): the first frame waits this long more
+/// for it, so the open is drawn once with both, not twice.
+const HOLD_FOR_BACKFILL: Duration = Duration::from_millis(60);
 /// At most this long is spent on queued X input before a frame is drawn.
 const INPUT_BUDGET: Duration = Duration::from_millis(6);
 /// Moon owns the bottom of the screen for its home gesture: touches there
@@ -770,8 +774,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     // Back in front: when, whether drawn, whether a reconnection is still
     // to come (profiling).
     let mut back: Option<(Instant, bool, bool)> = None;
-    // Until when the first frame of a conversation opened empty waits.
+    // Until when the first frame of a conversation opened empty waits, and
+    // whether it waits for the window's older page now.
     let mut hold_until: Option<Instant> = None;
+    let mut held_for_backfill = false;
     // The finger's last screen row (profiling).
     let mut finger: Option<i16> = None;
     // An X event already read from the connection, not yet handled.
@@ -1057,9 +1063,18 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         {
             opening = Some((id.clone(), now));
             hold_until = (!model.chat.loaded).then_some(now + HOLD_FOR_WINDOW);
+            held_for_backfill = false;
+        }
+        let backfill = model.chat.loaded && model.chat.older_request.is_some();
+        if hold_until.is_some() && backfill && !held_for_backfill {
+            held_for_backfill = true;
+            hold_until = Some(now + HOLD_FOR_BACKFILL);
         }
         let holding = hold_until.is_some_and(|until| {
-            now < until && model.page == Page::Chat && model.connected && !model.chat.loaded
+            now < until
+                && model.page == Page::Chat
+                && model.connected
+                && (!model.chat.loaded || backfill)
         });
         if !holding {
             hold_until = None;
