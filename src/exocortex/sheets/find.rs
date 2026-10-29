@@ -1,10 +1,11 @@
 //! Find in chat (WP-E; PAR-331; the iPhone's `ui/chat/search.tsx`): the
-//! loaded history searched for a phrase (case-insensitive substring,
-//! C1's find engine to come), matches listed with their context; one opens
-//! its message in the reader.
+//! loaded history searched for a phrase (case-insensitive, C1's find
+//! engine), matches listed with their context; one opens its message in the
+//! reader.
 
 use serde_json::Value;
 
+use super::super::find;
 use super::super::model::{Action, Model, UiAct, ops};
 use super::super::proto::{Block, Entry};
 use super::super::theme;
@@ -60,46 +61,42 @@ pub struct Hit {
     pub snippet: String,
 }
 
-/// Every place `query` occurs in the loaded entries (at most `MAX`).
+/// Every place `query` occurs in the loaded entries (C1's
+/// `find::matches`), the first `MAX` with their context; and how many.
 pub fn search(entries: &[Entry], query: &str) -> (Vec<Hit>, usize) {
-    let needle = query.trim().to_lowercase();
+    let query = query.trim();
     let mut hits = Vec::new();
     let mut total = 0;
-    if needle.is_empty() {
+    if query.is_empty() {
         return (hits, 0);
     }
     for (index, entry) in entries.iter().enumerate() {
         let Some((who, text)) = entry_text(entry) else {
             continue;
         };
-        let lower = text.to_lowercase();
-        // Lower-casing can change lengths: search the lower-cased text and
-        // cut the snippet from it.
-        let mut from = 0;
-        while let Some(at) = lower[from..].find(&needle) {
-            let at = from + at;
+        for (start, end) in find::matches(&text, query, find::MAX_MATCHES) {
             total += 1;
-            if hits.len() < MAX {
-                let chars: Vec<char> = lower.chars().collect();
-                let start_char = lower[..at].chars().count();
-                let len = needle.chars().count();
-                let a = start_char.saturating_sub(CONTEXT);
-                let b = (start_char + len + CONTEXT).min(chars.len());
-                let mut snippet: String = chars[a..b].iter().collect();
-                snippet = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
-                if a > 0 {
-                    snippet.insert(0, '…');
-                }
-                if b < chars.len() {
-                    snippet.push('…');
-                }
-                hits.push(Hit {
-                    entry: index,
-                    who,
-                    snippet,
-                });
+            if hits.len() >= MAX {
+                continue;
             }
-            from = at + needle.len().max(1);
+            let before: String = {
+                let head: Vec<char> = text[..start].chars().collect();
+                head[head.len().saturating_sub(CONTEXT)..].iter().collect()
+            };
+            let after: String = text[end..].chars().take(CONTEXT).collect();
+            let mut snippet = format!("{before}{}{after}", &text[start..end]);
+            snippet = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
+            if before.len() < start {
+                snippet.insert(0, '…');
+            }
+            if end + after.len() < text.len() {
+                snippet.push('…');
+            }
+            hits.push(Hit {
+                entry: index,
+                who,
+                snippet,
+            });
         }
     }
     (hits, total)
@@ -213,9 +210,34 @@ mod tests {
         let (hits, total) = search(&entries, "deploy");
         assert_eq!(total, 4);
         assert_eq!(hits[0].who, "You");
-        assert!(hits[0].snippet.contains("deploy script"));
+        assert!(hits[0].snippet.contains("Deploy script"), "{:?}", hits[0]);
         assert_eq!(hits[1].entry, 1);
         assert_eq!(search(&entries, "  ").1, 0);
         assert_eq!(search(&entries, "nothing").1, 0);
+    }
+
+    #[test]
+    fn finding_asks_then_lists_then_reads() {
+        use crate::exocortex::model::Nav;
+        let mut model = Model::new();
+        model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        model.chat.push(Entry::User {
+            text: "the deploy script".into(),
+            images: Vec::new(),
+            metadata: None,
+        });
+        model.handle(Action::Ops(ops::Act::OpenFind));
+        assert_eq!(model.ui.opening.pop().unwrap().label(), "Find in chat");
+        model.handle(Action::Ops(ops::Act::Find(Act::Search("deploy".into()))));
+        assert_eq!(model.ui.opening.pop().unwrap().label(), "");
+        let built = build(&model, "c");
+        assert!(
+            matches!(&built.rows[0], Row::Section { title, .. } if title == "1 match for “deploy”")
+        );
+        model.handle(Action::Ops(ops::Act::Find(Act::Open(0))));
+        assert_eq!(
+            model.ui.opening.pop().unwrap().label(),
+            "reader: Your message"
+        );
     }
 }
