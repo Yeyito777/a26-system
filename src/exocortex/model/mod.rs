@@ -101,6 +101,8 @@ pub enum Effect {
     OpenUrl(String),
     ShowKeyboard(KeyboardPurpose),
     HideKeyboard,
+    /// Paste the clipboard into the composer (`Model::paste_text`).
+    Paste,
     /// Moon's status bar takes the theme's background again (E: a theme
     /// change).
     StatusBar,
@@ -288,6 +290,7 @@ impl Model {
         self.offline = self.quiet_until.is_none();
         // Nothing in flight will be answered.
         self.requests.clear();
+        self.composer_disconnected();
         self.ops_disconnected();
         self.chat_disconnected(self.quiet_until.is_some());
     }
@@ -309,8 +312,10 @@ impl Model {
         let offline = !self.connected && self.quiet_until.is_none_or(|until| now >= until);
         let changed = offline != self.offline;
         self.offline = offline;
-        // The list's search follows the typing (B).
-        self.list_tick(now) || changed
+        // The list's search follows the typing (B); drafts are kept (D).
+        let list = self.list_tick(now);
+        let composer = self.composer_tick(now);
+        list || composer || changed
     }
 
     pub fn handle(&mut self, action: Action) -> Vec<Value> {
@@ -500,11 +505,16 @@ impl Model {
 
     /// When `expire` next has something to do.
     pub fn answer_deadline(&self) -> Option<Instant> {
-        // An image preview asked again after a backoff (C1) too.
-        match (self.requests.deadline(), self.rich.images.deadline()) {
+        // An image preview asked again after a backoff (C1) too, and the
+        // drafts written once typing pauses (D).
+        let soonest = |a: Option<Instant>, b: Option<Instant>| match (a, b) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
-        }
+        };
+        soonest(
+            soonest(self.requests.deadline(), self.rich.images.deadline()),
+            self.composer_deadline(),
+        )
     }
 
     /// A request of an area that did not handle its timeout itself: say so
@@ -1098,8 +1108,17 @@ mod tests {
             now,
         );
         assert!(model.ready);
+        // A running turn: Send asks when the message joins it.
+        assert!(
+            model
+                .handle(Action::Composer(composer::Act::Send))
+                .is_empty()
+        );
+        assert_eq!(opened(&mut model), vec!["Deliver message"]);
         assert_eq!(
-            model.handle(Action::Composer(composer::Act::Send))[0]["type"],
+            model.handle(Action::Composer(composer::Act::Deliver(
+                composer::Timing::MessageEnd
+            )))[0]["type"],
             "queue_message",
             "a running turn: queued"
         );

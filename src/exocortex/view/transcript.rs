@@ -10,7 +10,7 @@ use std::time::Instant;
 use crate::gfx::Canvas;
 
 use super::super::markdown::{self, MdBlock};
-use super::super::model::{Action, Chat, Model, Page, rich::Rich};
+use super::super::model::{Action, Chat, Model, Page, composer, rich::Rich};
 use super::super::proto::{Block, Entry, ToolStyle};
 use super::super::theme::{self, TRANSCRIPT_PAD};
 use super::blocks::{lay_md_piece, lay_notice, lay_thinking, lay_user, lay_whole};
@@ -461,9 +461,16 @@ impl ViewState {
             y = self.place(&mut items, y, &plan, None, 0, &live.blocks, &context);
         }
         for queued in queued {
-            let key = hash_of(("queued", &queued.text));
+            // D's: the caption ("queued: next turn", "Removing…") and the
+            // tap that opens the message's queue actions.
+            let caption = model.queued_caption(queued);
+            let key = hash_of(("queued", &queued.text, &caption, &queued.id));
             y = single(self, &mut items, y, key, &|| {
-                lay_user(&queued.text, 0.58, Some("queued: message end"))
+                let mut laid = lay_user(&queued.text, 0.58, Some(&caption));
+                let action = Action::Composer(composer::Act::Queued(queued.id.clone()));
+                laid.hits
+                    .push((crate::gfx::RectF::new(0.0, 0.0, W, laid.h), action));
+                laid
             });
         }
         if let Some(error) = &chat.error {
