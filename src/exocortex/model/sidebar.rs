@@ -29,6 +29,31 @@ use super::super::list::sheets::{FolderSheet, InstructionsEditor};
 use super::super::requests::Owner;
 use super::super::ui::sheet::Sheet;
 
+/// A row held after its long press, perhaps dragged (PAR-070, 071).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drag {
+    /// What is dragged.
+    pub key: Key,
+    /// Where the long press was, and where the finger is (window).
+    pub start: (f32, f32),
+    pub at: (f32, f32),
+    /// Moved far enough: the menu gave way to the preview.
+    pub active: bool,
+    pub target: Option<DropTarget>,
+    /// The edge auto-scroll's speed (px/s) and its last step.
+    pub speed: f32,
+    pub stepped: Option<Instant>,
+}
+
+/// Where a dragged item would land.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DropTarget {
+    /// Into this folder.
+    Folder(String),
+    /// Next to this conversation (before, or `after` it), in its level.
+    Reorder { key: Key, after: bool },
+}
+
 /// A folder's own instructions (its AGENTS.md).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instructions {
@@ -274,6 +299,15 @@ pub struct Sidebar {
     /// Whether a conversation opened from the list was unread just before
     /// (PAR-088; the transcript's reading position).
     pub unread_at_open: HashMap<String, bool>,
+    /// The wall clock (ms) at an instant: frames read the time from their
+    /// `now` through it, so a frame and its redraw agree whatever the real
+    /// clock does meanwhile (and tests are deterministic).
+    pub clock: Option<(Instant, u64)>,
+    /// A held row being dragged (PAR-070).
+    pub drag: Option<Drag>,
+    /// The daemon's update status (`update_status`, a pong's
+    /// `updateStatus`): `update_available`, `restart_needed`, … (PAR-086).
+    pub update_status: Option<String>,
     /// The list could not be loaded (the state's Retry asks again).
     pub error: Option<String>,
     /// A row on screen has a pulsing dot (the view's frames).
@@ -475,6 +509,18 @@ impl Sidebar {
             }
             // Queued counts and global-idle waits show on rows.
             Event::QueueUpdated { .. } => self.changed(),
+            Event::UpdateStatus { status }
+            | Event::Pong {
+                update_status: Some(status),
+                ..
+            } => {
+                let status = status.as_str().map(str::to_owned);
+                if status.is_none() || status == self.update_status {
+                    return false;
+                }
+                self.update_status = status;
+                self.changed();
+            }
             _ => return false,
         }
         true
@@ -755,6 +801,16 @@ impl Sidebar {
         false
     }
 
+    /// The wall clock (ms since the epoch) at `now`.
+    pub fn wall_ms(&mut self, now: Instant) -> f64 {
+        let (at, ms) = *self.clock.get_or_insert_with(|| (now, super::now_ms()));
+        if now >= at {
+            ms as f64 + now.duration_since(at).as_millis() as f64
+        } else {
+            ms as f64 - at.duration_since(now).as_millis() as f64
+        }
+    }
+
     /// What is selected that is still there, in the list's order.
     pub fn selected_keys(&self) -> Vec<Key> {
         let Some(selection) = &self.selection else {
@@ -939,6 +995,9 @@ impl Model {
     /// a new conversation's row goes when its request failed; true when
     /// the list changed.
     pub fn list_tick(&mut self, now: Instant) -> bool {
+        // The wall clock relative times read, set again each pass of the
+        // event loop (a deep suspend stops `Instant`, not the wall clock).
+        self.sidebar.clock = Some((now, super::now_ms()));
         let mut changed = self.settle_created(now);
         changed |= self.sidebar.expire_edits(now);
         if self.sidebar.search.tick(now) {
@@ -2059,6 +2118,34 @@ mod tests {
         list(&mut model, Act::Open("p".into()));
         assert_eq!(model.sidebar.unread_at_open.get("p"), Some(&true));
         assert_eq!(model.sidebar.unread_at_open.get("k"), Some(&false));
+    }
+
+    #[test]
+    fn the_daemons_update_status_is_kept_for_the_footer() {
+        let mut model = model(&[conv("a", "")], &[]);
+        assert!(
+            model.on_connected()[0]["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&"update-status-push".into())
+        );
+        event(
+            &mut model,
+            r#"{"type":"update_status","status":"update_available"}"#,
+        );
+        assert_eq!(
+            model.sidebar.update_status.as_deref(),
+            Some("update_available")
+        );
+        // A barrier's pong carries it too.
+        event(
+            &mut model,
+            r#"{"type":"pong","reqId":"x","updateStatus":"restart_needed"}"#,
+        );
+        assert_eq!(
+            model.sidebar.update_status.as_deref(),
+            Some("restart_needed")
+        );
     }
 
     #[test]

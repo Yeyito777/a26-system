@@ -338,6 +338,22 @@ impl Context<'_> {
     /// Offers a gesture to the overlays, then the page. Returns whether
     /// anything shows differently.
     fn gesture(&mut self, gesture: Gesture, now: Instant) -> bool {
+        // A list row held after its long press, dragged (B): its moves and
+        // its end are the list's, its menu up or not.
+        if self.model.page == Page::List
+            && matches!(
+                gesture,
+                Gesture::LongPressMove { .. } | Gesture::LongPressEnd { .. } | Gesture::Cancel
+            )
+            && let Some((changed, commands)) =
+                view::list::drag(self.model, self.view, self.height, &gesture, now)
+        {
+            for command in commands {
+                self.link.send(command);
+            }
+            self.take_ui(now);
+            return changed;
+        }
         let response = {
             let mut overlays = std::mem::take(&mut self.view.overlays);
             let cx = self.view.cx(self.model, self.width, self.height, now);
