@@ -1110,17 +1110,14 @@ impl Overlay for EditMenu {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_support {
     use super::*;
     use crate::exocortex::model::Nav;
     use crate::exocortex::proto::parse_event;
-    use crate::exocortex::view::{Frame, FrameDamage, ViewState, frame};
     use crate::keys::KeyInput;
 
-    const SIZE: (i32, i32) = (1080, 2216);
-
     /// Ready, conversation `c` open with an exchange in it.
-    fn chat(streaming: bool) -> Model {
+    pub fn chat(streaming: bool) -> Model {
         let mut model = Model::new();
         let bootstrap = model.on_connected();
         let ping = bootstrap.last().unwrap()["reqId"]
@@ -1149,7 +1146,7 @@ mod tests {
         model
     }
 
-    fn type_text(model: &mut Model, text: &str) {
+    pub fn type_text(model: &mut Model, text: &str) {
         for character in text.chars() {
             model.composer_key(if character == '\n' {
                 KeyInput::Enter
@@ -1158,6 +1155,16 @@ mod tests {
             });
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::*;
+    use super::*;
+    use crate::exocortex::view::{Frame, FrameDamage, ViewState, frame};
+    use crate::keys::KeyInput;
+
+    const SIZE: (i32, i32) = (1080, 2216);
 
     fn full(model: &mut Model, view: &mut ViewState, now: Instant) -> Canvas {
         let mut canvas = Canvas::new(SIZE.0, SIZE.1);
@@ -1416,5 +1423,87 @@ mod tests {
         for _ in 0..30 {
             frames(&mut model, &mut view, &|_| {}, 8);
         }
+    }
+}
+
+/// Renders the composer's states to PNGs for looking at them next to the
+/// iPhone's (`cargo test -- --ignored composer_states_to_png`, written to
+/// `/tmp/wpd-render`).
+#[cfg(test)]
+mod render {
+    use super::tests_support::*;
+    use super::*;
+    use crate::exocortex::view::{ViewState, frame};
+
+    fn save(canvas: &Canvas, name: &str) {
+        let dir = std::path::Path::new("/tmp/wpd-render");
+        std::fs::create_dir_all(dir).unwrap();
+        let file = std::fs::File::create(dir.join(format!("{name}.png"))).unwrap();
+        let mut encoder = png::Encoder::new(file, canvas.width as u32, canvas.height as u32);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        let bytes: Vec<u8> = canvas
+            .pixels
+            .iter()
+            .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8])
+            .collect();
+        writer.write_image_data(&bytes).unwrap();
+    }
+
+    fn shot(model: &mut Model, keyboard: bool, name: &str, now: Instant) {
+        let mut view = ViewState::new();
+        view.keyboard = keyboard;
+        view.take_ui(model, now);
+        let height = if keyboard { 1300 } else { 2216 };
+        let _ = frame::record(model, &mut view, None, (1080, height), now);
+        let mut canvas = Canvas::new(1080, height);
+        frame::clear(&mut canvas);
+        frame::draw_full(&mut canvas, model, &mut view, None, now);
+        save(&canvas, name);
+    }
+
+    #[test]
+    #[ignore]
+    fn composer_states_to_png() {
+        let t0 = Instant::now();
+        let mut model = chat(false);
+        type_text(
+            &mut model,
+            "Can you also check the logs from yesterday and summarise them?",
+        );
+        shot(&mut model, true, "01-typing", t0);
+        let key = model.composer.key.clone().unwrap();
+        model.composer.errors.insert(
+            key,
+            super::super::super::model::composer::ComposerError {
+                text: "Not sent: Already streaming".into(),
+                since: t0,
+            },
+        );
+        shot(&mut model, false, "02-error", t0 + Duration::from_secs(1));
+        let mut model = chat(true);
+        shot(&mut model, false, "03-streaming-empty", t0);
+        type_text(&mut model, "also bump the version when you're done");
+        shot(&mut model, false, "04-streaming-text", t0);
+        model.handle(Action::Composer(Act::Abort));
+        shot(&mut model, false, "05-stopping", t0);
+        let mut model = chat(false);
+        type_text(&mut model, "select some words here\nand a second line");
+        model.handle(Action::Composer(Act::SelectWord(9)));
+        model.handle(Action::Composer(Act::MoveEnd {
+            end: End::Caret,
+            index: 30,
+        }));
+        model.handle(Action::Composer(Act::EndSelect));
+        shot(
+            &mut model,
+            true,
+            "06-selection-menu",
+            t0 + Duration::from_secs(1),
+        );
+        model.ready = false;
+        model.composer.cursor = editor::Cursor::at(5);
+        shot(&mut model, true, "07-not-ready", t0);
     }
 }
