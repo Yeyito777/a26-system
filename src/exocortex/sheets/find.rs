@@ -219,14 +219,15 @@ mod tests {
         let height = 2400.0;
         let max = view.chat_max(&model, height);
         assert!(max > 0.0);
-        assert!(view.reveal(&model, model.chat.stamps[20], height));
+        let stamps = model.chat.stamps.clone();
+        assert!(view.reveal(&mut model, stamps[20], height));
         let middle = view.chat_scroll.offset;
         assert!(middle > 0.0 && middle < max, "{middle} of {max}");
         assert!(!view.follow);
-        assert!(view.reveal(&model, model.chat.stamps[0], height));
+        assert!(view.reveal(&mut model, stamps[0], height));
         assert!(view.chat_scroll.offset < middle);
-        assert!(view.reveal(&model, model.chat.stamps[39], height));
+        assert!(view.reveal(&mut model, stamps[39], height));
         assert_eq!(view.chat_scroll.offset, max);
-        assert!(!view.reveal(&model, u64::MAX, height));
+        assert!(!view.reveal(&mut model, u64::MAX, height));
     }
 }

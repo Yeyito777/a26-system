@@ -90,24 +90,46 @@ the `pong` was not made: it is taken back, the user told, and the list asked
 for again. An unanswered change goes after 10 s.
 
 The transcript is the iPhone's (roadmap §3.6.6–3.6.14, `fake-02…08`): the
-user's bubbles right-aligned with an accent rail (sent ones not yet echoed
-at 86 %, queued ones at 58 % with "queued: next turn"); automated prompts
-folded into a row ("CHRONO  Chrono wake: …") that opens to the automated
-bubble with "⚙ Chrono · from …" under it (a parent's delegation is shown as
-that bubble); replies as markdown (`src/exocortex/markdown.rs`); thinking
-boxes ("THINKING", OPEN for the reader; Settings' Expand thinking opens
-them); a tool row per call in its tool's colour (label and summary, three
-lines folded, ERR and ✗ when it failed, a spinner while it runs; opened,
-Read full output, Copy and a 6000-byte preview); a run of three or more
-calls folds into one row ("4 TOOL CALLS  $, Read"); system notices as
-coloured boxes (three lines, open to all of it and Copy), the compaction
-divider, `[Context:` text dim, model-only notices not at all; one metadata
-footer per run of replies (`OPUS-5.5 | 76.2 TOK/S | 2:03PM`, `footer.rs`,
-model names from `model_display.rs`), a tap on it or a long press on a
-message opens Copy message / Edit in composer / Read in full. The live
-reply shows WORKING until it shows something, the retry, compaction and
-connection-wait lines, and a footer whose duration ticks. A jump-to-latest
+System Instructions box at the top (the folder's and the conversation's;
+opens to the text, Copy and Open; C1's folder draft draws its inherited
+instructions through the same `blocks::lay_instructions`); the user's
+bubbles right-aligned with an accent rail (sent ones not yet echoed at 86 %,
+queued ones at 58 % with "queued: next turn"), documents sent with them as
+file chips (D's `attachments::split`; a tap reads "<name> · extracted text"),
+the owner's own words a notification relays as their bubble ("via
+Discord/…"); notifications as a row ("CHRONO  Chrono wake: …") opening to
+the automated bubble with "⚙ Chrono · from …" under it (a parent's
+delegation is shown as that bubble); replies as markdown
+(`src/exocortex/markdown.rs`); thinking boxes ("THINKING", OPEN for the
+reader; Settings' Expand thinking opens them); a tool row per call in its
+tool's colour, its lines as the TUI shows them (`toolcall.rs`: a bash
+command per segment, each in its tool's label and colour; an exo call's
+prompt), folded to three rows for a shell call and to eight of one longer
+than twelve, ERR and ✗ when it failed, a spinner while it runs, "Open
+subagent conversation" for the subagent an exo call started; opened, Read
+full output, Copy and a 6000-byte preview; system notices as coloured
+boxes (three lines, open to all of it and Copy), the compaction divider,
+`[Context:` text dim, model-only notices not at all; one metadata footer
+per run of replies (`OPUS-5.5 | 76.2 TOK/S | 2:03PM`, `footer.rs`, model
+names from `model_display.rs`), a tap on it or a long press on a message
+opens Copy message / Edit in composer / Read in full. The live reply shows
+WORKING until it shows something, the retry, compaction and
+connection-wait lines, and a footer whose duration ticks; notices that come
+while it streams wait after it (an error splits it). A jump-to-latest
 button shows more than 120 pt from the end once the transcript is still.
+
+Turns fold (`fold.rs`, the TUI's `turncollapse` as the iPhone ports it, in
+its gutter look) unless Settings' Show all work is on: a finished turn reads
+as the prompt, the final reply and its footer; thinking, tool calls,
+interim text, informational notices and notifications leave no row, and a
+thin mark at the left edge of the reply that follows (or a short line in
+the gap, when nothing answered) opens that stretch, its first row where the
+tapped one was. The live turn shows WORKING with what folded ("2 TOOL
+CALLS, 1 MESSAGE", a tap opens it) and its newest step. Flipping Show all
+work closes the folds opened one by one; a Find match inside a fold opens
+it. Disclosures toggled (the newest 1000) and where each of the last 20
+conversations was read are kept in `ui.json` ("chat"): a conversation
+reopens where it was read, an unread one at its latest response.
 
 The replies' markdown (`src/exocortex/markdown.rs`, GFM as the iPhone renders it): headings in
 the accent colours, paragraphs (a newline is a line break), bullet,
@@ -272,7 +294,12 @@ are discarded.
   shimmer, the live footer's clock and rate, a status line's clock) is a
   mark (`blocks::Mark`): placed with its piece, keyed per frame
   (`transcript::TranscriptFrame`) and drawn again alone, so a second ticking
-  costs its own line of rows and no layout pass. The jump button is drawn
+  costs its own line of rows and no layout pass. Fold marks at the left
+  edge are the layout's `gutters`: one that scrolls into view costs nothing
+  more, a pressed or changed one its own column. The fold plan is made
+  again only when its inputs change (the entries' stamps, the live reply's
+  steps, the folds toggled, the marks setting), not on every streamed
+  chunk. The jump button is drawn
   over the transcript in its own columns; it steps aside while the
   transcript moves (a floating button over moving rows would cost its rows
   in every frame of a scroll) and fades back in once it is still.
@@ -331,7 +358,7 @@ the interfaces below. Every file's header says whose it is.
 | `proto/mod.rs`, `proto/fixtures.jsonl` | A | `Event`, `parse_event`, the bootstrap |
 | `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands (`list/actions.rs`), changes shown before the daemon answers (`list/pending.rs`), menus, prompts and pickers (`list/menus.rs`), the folder inspector (`list/sheets.rs`) |
 | `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `highlight.rs`, `math/`, `links.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks (highlighted), tables, math; links and the file sheet; images in the transcript, their cache and the viewer; the reader, selection and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
-| `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
+| `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `fold.rs`, `toolcall.rs`, `footer.rs`, `model_display.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history; turn folding (`fold.rs`), tool-call lines (`toolcall.rs`), footers |
 | `view/composer.rs`, `view/picker.rs`, `view/files.rs`, `model/composer.rs`, `model/attach.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `attachments.rs`, `files.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu, the attachment tray), sending, the queue, kept drafts, the mic, attachments and the file browser, the command picker, commands, macros and path completion |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
 

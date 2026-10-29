@@ -13,9 +13,10 @@ use crate::gfx::{Canvas, RectF, Rgb};
 use crate::text::Weight;
 
 use super::super::anim;
+use super::super::attachments::{self, Kind};
 use super::super::footer;
 use super::super::markdown::{self, MdBlock, Style};
-use super::super::model::{Action, Model, chat, rich::Rich};
+use super::super::model::{Action, Model, UiAct, chat, rich::Rich};
 use super::super::proto::Metadata;
 use super::super::theme::{
     self, BUBBLE_PAD_X, BUBBLE_PAD_Y, HAIRLINE, RAIL, T_BODY, T_CAPTION, T_EDGE, T_EYEBROW,
@@ -245,8 +246,16 @@ pub(crate) enum Tone {
     Queued,
 }
 
+/// A file chip's widest, its height, its icon's box, the gap between chips.
+const CHIP_MAX: f32 = 665.0;
+const CHIP_PAD: f32 = 20.0;
+const CHIP_ICON: f32 = 83.0;
+const CHIP_GAP: f32 = 23.0;
+
 /// A user message's bubble, right-aligned and hugging its longest line,
-/// with the line under it (why it is there, or how it waits).
+/// with the line under it (why it is there, or how it waits). Documents
+/// sent with it are file chips under its words (PAR-114), each opening the
+/// text the model got in the reader.
 pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool) -> Piece {
     let p = theme::p();
     let c = theme::c();
@@ -285,20 +294,66 @@ pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool
     let mut laid = Laid::default();
     let ty = T_BODY;
     let inner = BUBBLE_MAX - 2.0 * HAIRLINE - 2.0 * BUBBLE_PAD_X;
-    let trimmed = text.trim();
-    let (lines, ink) = if trimmed.is_empty() {
+    let (typed, files) = if text.contains("<exocortex_file ") {
+        attachments::split(text)
+    } else {
+        (String::new(), Vec::new())
+    };
+    let trimmed = if files.is_empty() {
+        text.trim()
+    } else {
+        typed.trim()
+    };
+    let (lines, ink) = if trimmed.is_empty() && files.is_empty() {
         (wrap_text("(empty message)", ty, inner), p.muted)
+    } else if trimmed.is_empty() {
+        (Vec::new(), ink)
     } else {
         (wrap_text(trimmed, ty, inner), ink)
     };
+    // The chips: a name and its size, each as wide as it needs.
+    let name_ty = T_SMALL.weight(Weight::MonoSemiBold);
+    let text_x = HAIRLINE + CHIP_PAD + CHIP_ICON + 25.0;
+    let chips: Vec<(f32, String, String, bool)> = files
+        .iter()
+        .map(|file| {
+            let truncated = matches!(
+                file.kind,
+                Kind::File {
+                    truncated: true,
+                    ..
+                }
+            );
+            let size = attachments::size_text(file.size);
+            let detail_w = widgets::measure(&size, T_META)
+                + if truncated {
+                    widgets::measure(" · truncated", T_META)
+                } else {
+                    0.0
+                };
+            let room = CHIP_MAX.min(inner) - text_x - CHIP_PAD - HAIRLINE;
+            let name = widgets::fit(&file.name, name_ty, room);
+            let w = widgets::measure(&name, name_ty).max(detail_w).min(room);
+            (text_x + w + CHIP_PAD + HAIRLINE, name, size, truncated)
+        })
+        .collect();
     let widest = lines
         .iter()
         .map(|line| line_width(line))
+        .chain(chips.iter().map(|chip| chip.0))
         .fold(0.0, f32::max);
     let width = (widest + 2.0 * BUBBLE_PAD_X + 2.0 * HAIRLINE)
         .ceil()
         .min(BUBBLE_MAX);
-    let h = lines.len().max(1) as f32 * ty.line() + 2.0 * BUBBLE_PAD_Y + 2.0 * HAIRLINE;
+    let text_h = lines.len() as f32 * ty.line();
+    let n = chips.len() as f32;
+    let chips_h = (n * (TARGET + CHIP_GAP) - CHIP_GAP).max(0.0);
+    let between = if lines.is_empty() || chips.is_empty() {
+        0.0
+    } else {
+        CHIP_GAP
+    };
+    let h = text_h + between + chips_h + 2.0 * BUBBLE_PAD_Y + 2.0 * HAIRLINE;
     let x = (W - MARGIN - width).round();
     let bubble = RectF::new(x, 0.0, width, h);
     boxed(&mut laid.ops, bubble, fill, border);
@@ -322,6 +377,58 @@ pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool
             Some(ink),
             1.0,
         );
+    }
+    let mut top = HAIRLINE + BUBBLE_PAD_Y + text_h + between;
+    for ((w, name, size, truncated), file) in chips.iter().zip(&files) {
+        let chip = RectF::new(right - w, top, *w, TARGET);
+        let chip_fill = mix(p.text, 3, fill);
+        boxed(&mut laid.ops, chip, chip_fill, mix(p.border, 50, fill));
+        let icon = RectF::new(
+            chip.x + HAIRLINE + CHIP_PAD,
+            top + (TARGET - CHIP_ICON) / 2.0,
+            CHIP_ICON,
+            CHIP_ICON,
+        );
+        boxed(
+            &mut laid.ops,
+            icon,
+            mix(p.secondary_accent, 6, chip_fill),
+            mix(p.secondary_accent, 42, chip_fill),
+        );
+        laid.ops.push(icon_op(
+            Icon::FileText,
+            icon.x + CHIP_ICON / 2.0,
+            icon.y + CHIP_ICON / 2.0,
+            47.0,
+            p.secondary_accent,
+        ));
+        let tx = chip.x + text_x;
+        let block = name_ty.line() + 6.0 + T_META.line();
+        let name_top = top + (TARGET - block) / 2.0;
+        laid.ops
+            .push(text_op(tx, name_ty.baseline(name_top), name, name_ty, ink));
+        let meta_top = name_top + name_ty.line() + 6.0;
+        laid.ops
+            .push(text_op(tx, T_META.baseline(meta_top), size, T_META, meta));
+        if *truncated {
+            laid.ops.push(text_op(
+                tx + widgets::measure(size, T_META),
+                T_META.baseline(meta_top),
+                " · truncated",
+                T_META,
+                p.warning,
+            ));
+        }
+        if let Kind::File { text, .. } = &file.kind {
+            laid.hits.push((
+                chip,
+                Action::Ui(UiAct::Read {
+                    title: format!("{} · extracted text", file.name),
+                    text: text.clone(),
+                }),
+            ));
+        }
+        top += TARGET + CHIP_GAP;
     }
     laid.h = h;
     if let Some(label) = label {
@@ -408,6 +515,207 @@ pub(crate) fn lay_notification(label: &str, preview: &str, key: &str, open: bool
         Action::Chat(chat::Act::ToggleExpanded(key.to_owned())),
     ));
     laid.h = HEAD;
+    laid.into()
+}
+
+/// A turn's folded-work row (PAR-403–405): a chevron and what folded
+/// ("5 tool calls, 1 message"); the live turn's leads with a spinner and
+/// WORKING, shimmering. A tap opens (or folds) the turn's work.
+pub(crate) fn lay_turn_fold(label: Option<&str>, key: &str, open: bool, working: bool) -> Piece {
+    let p = theme::p();
+    let mut piece = Piece::default();
+    let cy = HEAD / 2.0;
+    let mut x = MARGIN;
+    if working {
+        let size = STATUS_SPINNER;
+        piece.marks.push(Mark {
+            y: cy - size / 2.0 - 2.0,
+            h: size + 4.0,
+            kind: MarkKind::Spinner {
+                cx: x + size / 2.0,
+                cy,
+                size,
+                color: p.muted,
+                background: p.app_background,
+            },
+        });
+        x += size + 23.0;
+        let baseline = T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0);
+        piece
+            .laid
+            .ops
+            .push(text_op(x, baseline, "Working", T_EYEBROW, p.muted));
+        piece.marks.push(Mark {
+            y: cy - T_EYEBROW.line() / 2.0,
+            h: T_EYEBROW.line(),
+            kind: MarkKind::Shimmer {
+                x,
+                baseline,
+                text: "WORKING".into(),
+                ty: T_EYEBROW,
+            },
+        });
+        x += widgets::measure("Working", T_EYEBROW) + 23.0;
+    }
+    if let Some(label) = label {
+        piece.laid.ops.push(icon_op(
+            if open {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            },
+            x + 16.0,
+            cy,
+            33.0,
+            p.muted,
+        ));
+        x += 33.0 + 23.0;
+        let shown = widgets::fit(label, T_EYEBROW, W - MARGIN - x);
+        piece.laid.ops.push(text_op(
+            x,
+            T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0),
+            &shown,
+            T_EYEBROW,
+            p.muted,
+        ));
+    }
+    if label.is_some() || !working {
+        piece.laid.hits.push((
+            RectF::new(0.0, 0.0, W, HEAD),
+            Action::Chat(chat::Act::ToggleExpanded(key.to_owned())),
+        ));
+    }
+    piece.laid.h = HEAD;
+    piece
+}
+
+// ----- System instructions -----------------------------------------------------------
+
+/// The System Instructions box (§3.6.8, PAR-132), and C1's folder draft's
+/// inherited instructions (`draft.rs`): full width in `instructions_border`;
+/// its head a chevron, `title` in the accent and a line of the text (the
+/// first that is not a heading); a tap is `head`. `open`: under a rule the
+/// text, then Copy and Open (the reader).
+pub(crate) fn lay_instructions(title: &str, text: &str, head: Action, open: bool) -> Piece {
+    let p = theme::p();
+    let c = theme::c();
+    let mut laid = Laid::default();
+    let x0 = MARGIN;
+    let width = W - 2.0 * MARGIN;
+    let cy = TARGET / 2.0;
+    laid.ops.push(icon_op(
+        if open {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        },
+        x0 + 40.0,
+        cy,
+        40.0,
+        p.muted,
+    ));
+    let label_x = x0 + 80.0;
+    laid.ops.push(text_op(
+        label_x,
+        T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0),
+        title,
+        T_EYEBROW,
+        p.accent,
+    ));
+    let label_w = widgets::measure(title, T_EYEBROW);
+    if !open {
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .unwrap_or_default();
+        let preview_x = label_x + label_w + 22.0;
+        let room = x0 + width - 28.0 - preview_x;
+        if room > 60.0 {
+            let preview = widgets::fit(line, T_SMALL, room);
+            laid.ops.push(text_op(
+                preview_x,
+                T_SMALL.baseline(cy - T_SMALL.line() / 2.0),
+                &preview,
+                T_SMALL,
+                p.muted,
+            ));
+        }
+    }
+    laid.hits.push((RectF::new(x0, 0.0, width, TARGET), head));
+    let mut h = TARGET;
+    if open {
+        laid.ops.push(Op::Rect {
+            rect: RectF::new(
+                x0 + HAIRLINE,
+                h - HAIRLINE,
+                width - 2.0 * HAIRLINE,
+                HAIRLINE,
+            ),
+            radius: 0.0,
+            color: c.instructions_rule,
+            alpha: 1.0,
+        });
+        h += 17.0;
+        let inner = width - 2.0 * HAIRLINE - 68.0;
+        let lines = wrap_text(text.trim(), T_NOTE, inner);
+        h = push_runs(
+            &mut laid.ops,
+            &lines,
+            x0 + HAIRLINE + 34.0,
+            h,
+            T_NOTE,
+            Some(p.muted),
+            1.0,
+        );
+        h += 6.0;
+        // Copy, Open.
+        let mut x = x0 + HAIRLINE + 34.0;
+        for (label, icon, action) in [
+            ("Copy", Some(Icon::Copy), UiAct::Copy(text.to_owned())),
+            (
+                "Open",
+                None,
+                UiAct::Read {
+                    title: "System Instructions".into(),
+                    text: text.to_owned(),
+                },
+            ),
+        ] {
+            let mut w = widgets::measure(label, T_SMALL);
+            let mut tx = x;
+            if let Some(icon) = icon {
+                laid.ops.push(icon_op(
+                    icon,
+                    x + 19.5,
+                    h + TARGET / 2.0,
+                    39.0,
+                    p.secondary_accent,
+                ));
+                tx += 53.0;
+                w += 53.0;
+            }
+            laid.ops.push(text_op(
+                tx,
+                T_SMALL.baseline(h + (TARGET - T_SMALL.line()) / 2.0),
+                label,
+                T_SMALL,
+                p.secondary_accent,
+            ));
+            laid.hits.push((
+                RectF::new(x - 17.0, h, w + 34.0, TARGET),
+                Action::Ui(action),
+            ));
+            x += w + 56.0;
+        }
+        h += TARGET + 6.0;
+    }
+    laid.ops.push(Op::Border {
+        rect: RectF::new(x0, 0.0, width, h),
+        width: HAIRLINE,
+        color: c.instructions_border,
+    });
+    laid.h = h;
     laid.into()
 }
 

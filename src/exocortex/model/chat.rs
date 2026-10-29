@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::super::proto::{self, Block, Entry, Event, Metadata};
@@ -326,9 +327,17 @@ pub struct Chat {
     /// colour), until the next turn starts.
     pub suspended: Option<u64>,
     pub echoes: Vec<Echo>,
-    /// Disclosures (tool calls, thinking, notices) the user toggled away
-    /// from their default (`Chat::is_open`).
+    /// Disclosures (tool calls, thinking, notices, folds) the user toggled
+    /// away from their default (`Chat::is_open`); kept in `ui.json`.
     pub expanded: HashSet<String>,
+    /// The window's System Instructions (PAR-132): the folder's, then the
+    /// conversation's own.
+    pub instructions: Vec<String>,
+    /// It was unread when opened: it opens at its latest response (PAR-105).
+    pub opened_unread: bool,
+    /// Notices that came while a reply streams (PAR-161), with their
+    /// stamps: shown after it, into the history when it ends.
+    pub tail: Vec<(Entry, u64)>,
     /// Tool outputs fetched on demand (history leaves them out).
     pub outputs: HashMap<String, String>,
     pub outputs_requested: HashSet<String>,
@@ -341,11 +350,27 @@ pub struct Chat {
     pub error: Option<String>,
 }
 
-/// What opens by default (Settings: Expand thinking, Expand tool calls).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+/// What opens by default and what folds (Settings: Expand thinking,
+/// Expand tool calls, Show all work, Fold markers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Disclosure {
     pub thinking: bool,
     pub tools: bool,
+    /// Every turn's work and every notification shown (no folding).
+    pub show_all: bool,
+    /// Folded work leaves a mark at the left edge.
+    pub marks: bool,
+}
+
+impl Default for Disclosure {
+    fn default() -> Self {
+        Self {
+            thinking: false,
+            tools: false,
+            show_all: false,
+            marks: true,
+        }
+    }
 }
 
 impl Disclosure {
@@ -355,12 +380,51 @@ impl Disclosure {
         Self {
             thinking: persist.section(SETTINGS, "expandThinking"),
             tools: persist.section(SETTINGS, "expandToolCalls"),
+            show_all: persist.section(SETTINGS, "showAllWork"),
+            marks: persist
+                .section::<Option<bool>>(SETTINGS, "foldMarkers")
+                .unwrap_or(true),
         }
     }
 
     fn default_open(self, key: &str) -> bool {
         (self.thinking && key.starts_with("think:")) || (self.tools && key.starts_with("tool:"))
     }
+}
+
+/// What the chat keeps in `ui.json` (its "chat" section): the disclosures
+/// toggled (PAR-122), `conv\u{0}key` oldest first, and where each of the
+/// last conversations was read (PAR-104).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Kept {
+    pub disclosures: Vec<String>,
+    pub anchors: Vec<SavedAnchor>,
+}
+
+/// Where a conversation was read: its entry on screen (`fold::keys`) and
+/// that entry's top below the transcript's; no key: at the newest message.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SavedAnchor {
+    pub conv: String,
+    pub key: Option<String>,
+    pub offset: f32,
+}
+
+const KEPT: &str = "chat";
+/// Toggles kept, across conversations (the iPhone's).
+const KEPT_DISCLOSURES: usize = 1000;
+/// Conversations whose reading place is kept.
+const KEPT_ANCHORS: usize = 20;
+
+/// A fold's key (a turn, a gutter group, a notification row): what Show
+/// all work closes.
+fn is_fold_key(key: &str) -> bool {
+    key.starts_with("turn:")
+        || key.starts_with("group:")
+        || key.starts_with("run:")
+        || (key.starts_with("u:") && !key.contains('/'))
 }
 
 impl Chat {
@@ -389,8 +453,14 @@ impl Chat {
 
     /// The entry (or the live reply's blocks) with this stamp.
     pub fn by_stamp(&self, stamp: u64) -> Option<&Entry> {
-        let index = self.stamps.iter().rposition(|s| *s == stamp)?;
-        self.entries.get(index)
+        match self.stamps.iter().rposition(|s| *s == stamp) {
+            Some(index) => self.entries.get(index),
+            None => self
+                .tail
+                .iter()
+                .find(|(_, s)| *s == stamp)
+                .map(|(entry, _)| entry),
+        }
     }
 
     /// Replaces the entries (and where they start), keeping the stamp of
@@ -431,11 +501,24 @@ impl Chat {
                 .iter()
                 .any(|entry| matches!(entry, Entry::User { text, .. } if text.trim() == echo.text.trim()))
         });
-        let entries: Vec<Entry> = window
+        let (pinned, entries): (Vec<Entry>, Vec<Entry>) = window
             .entries
             .into_iter()
-            .filter(|entry| !matches!(entry, Entry::SystemInstructions { .. }))
-            .collect();
+            .partition(|entry| matches!(entry, Entry::SystemInstructions { .. }));
+        // Every newest window carries them (an empty text: none).
+        if fresh || !pinned.is_empty() {
+            let instructions: Vec<String> = pinned
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    Entry::SystemInstructions { text } if !text.trim().is_empty() => Some(text),
+                    _ => None,
+                })
+                .collect();
+            if instructions != self.instructions {
+                self.instructions = instructions;
+                self.touch();
+            }
+        }
         let start = window.history_start_index.unwrap_or(0);
         let start_block = window.history_start_block_index.unwrap_or(0);
         let mut covers_all = window.reset_history_window
@@ -542,6 +625,7 @@ impl Chat {
         if end != self.start || end_block != self.start_block {
             return false;
         }
+        // Its pinned instructions are the newest window's too.
         let mut entries: Vec<Entry> = window
             .entries
             .into_iter()
@@ -597,6 +681,32 @@ impl Chat {
         }
     }
 
+    /// A notice (the daemon's, or the app's own): after a reply that is
+    /// streaming, in the tail (PAR-161); else at the end.
+    pub(crate) fn push_notice(&mut self, entry: Entry) {
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|live| any_visible(&live.blocks))
+        {
+            self.tail.push((entry, next_stamp()));
+        } else {
+            self.commit_segment();
+            self.push(entry);
+        }
+        self.touch();
+    }
+
+    /// The reply ended: the notices that waited after it join the history.
+    pub(crate) fn settle_tail(&mut self) {
+        if self.live.is_none() && !self.tail.is_empty() {
+            for (entry, stamp) in std::mem::take(&mut self.tail) {
+                self.push_with(entry, stamp);
+            }
+            self.touch();
+        }
+    }
+
     /// Something joins the running turn (a message, a notice): what the
     /// reply showed so far becomes its own segment, and the turn goes on
     /// in a fresh live reply.
@@ -628,6 +738,7 @@ impl Chat {
     /// only a live subscription keeps current.
     pub(crate) fn shelved(mut self) -> Self {
         self.live = None;
+        self.settle_tail();
         self.status = Status::default();
         self.load_request = None;
         self.older_request = None;
@@ -709,7 +820,10 @@ impl Shelf {
 pub fn plain_text(chat: &Chat, entry: &Entry, label: &dyn Fn(&str) -> String) -> String {
     match entry {
         Entry::User { text, images, .. } => {
-            let mut parts = vec![text.trim().to_owned()];
+            // Documents as `[file: name]` (the iPhone's `plainUserText`).
+            let (typed, files) = super::super::attachments::split(text);
+            let mut parts = vec![typed.trim().to_owned()];
+            parts.extend(files.iter().map(|file| format!("[file: {}]", file.name)));
             if !images.is_empty() {
                 let s = if images.len() == 1 { "" } else { "s" };
                 parts.push(format!("{} image attachment{s}", images.len()));
@@ -831,6 +945,7 @@ impl Model {
             self.shelf.keep(old);
             self.restore_draft();
             self.ui.close_scoped = true;
+            self.opened();
         }
         if self.page != Page::Chat {
             self.ui.close_all = true;
@@ -896,19 +1011,109 @@ impl Model {
                 let old = std::mem::replace(&mut self.chat, chat);
                 self.shelf.keep(old);
                 self.restore_draft();
+                self.opened();
             }
             return Vec::new();
         }
         self.open(id.to_owned())
     }
 
+    /// The conversation just opened: what was toggled in it, whether it
+    /// was unread.
+    fn opened(&mut self) {
+        let Some(id) = self.chat.id.clone() else {
+            return;
+        };
+        let kept = self.kept();
+        let prefix = format!("{id}\u{0}");
+        self.chat.expanded = kept
+            .disclosures
+            .iter()
+            .filter_map(|entry| entry.strip_prefix(&prefix))
+            .map(str::to_owned)
+            .collect();
+        self.chat.opened_unread = self.open_summary().is_some_and(|s| s.unread);
+        self.chat.touch();
+    }
+
+    pub(crate) fn kept(&self) -> Kept {
+        self.persist.section(super::super::store::UI, KEPT)
+    }
+
+    fn keep(&mut self, kept: &Kept) {
+        self.persist
+            .set_section(super::super::store::UI, KEPT, kept);
+    }
+
+    /// A disclosure toggled in the open conversation, kept (the newest
+    /// 1000 across conversations).
+    fn keep_toggle(&mut self, key: &str, on: bool) {
+        let Some(id) = self.chat.id.clone() else {
+            return;
+        };
+        let mut kept = self.kept();
+        let entry = format!("{id}\u{0}{key}");
+        kept.disclosures.retain(|kept| *kept != entry);
+        if on {
+            kept.disclosures.push(entry);
+        }
+        let over = kept.disclosures.len().saturating_sub(KEPT_DISCLOSURES);
+        kept.disclosures.drain(..over);
+        self.keep(&kept);
+    }
+
+    /// Show all work flipped: every fold opened one by one closes, in every
+    /// conversation (tool, thinking and notice disclosures stay).
+    pub(crate) fn close_folds(&mut self) {
+        let before = self.chat.expanded.len();
+        self.chat.expanded.retain(|key| !is_fold_key(key));
+        if self.chat.expanded.len() != before {
+            self.chat.touch();
+        }
+        let mut kept = self.kept();
+        let count = kept.disclosures.len();
+        kept.disclosures.retain(|entry| {
+            !entry
+                .split_once('\u{0}')
+                .is_some_and(|(_, key)| is_fold_key(key))
+        });
+        if kept.disclosures.len() != count {
+            self.keep(&kept);
+        }
+    }
+
+    /// Where the open conversation was last read, if it was kept.
+    pub(crate) fn saved_anchor(&self, conv: &str) -> Option<SavedAnchor> {
+        self.kept()
+            .anchors
+            .into_iter()
+            .rev()
+            .find(|anchor| anchor.conv == conv)
+    }
+
+    /// Keeps where a conversation is read (the 20 newest).
+    pub(crate) fn save_anchor(&mut self, anchor: SavedAnchor) {
+        let mut kept = self.kept();
+        if kept.anchors.last() == Some(&anchor) {
+            return;
+        }
+        kept.anchors.retain(|kept| kept.conv != anchor.conv);
+        kept.anchors.push(anchor);
+        let over = kept.anchors.len().saturating_sub(KEPT_ANCHORS);
+        kept.anchors.drain(..over);
+        self.keep(&kept);
+    }
+
     pub(super) fn handle_chat(&mut self, act: Act) -> Vec<Value> {
         match act {
             Act::ToggleExpanded(key) => {
                 let mut commands = Vec::new();
-                if !self.chat.expanded.remove(&key) {
+                let on = !self.chat.expanded.remove(&key);
+                if on {
                     self.chat.expanded.insert(key.clone());
                 }
+                self.keep_toggle(&key, on);
+                self.ui.haptic(super::super::ui::Haptic::Selection);
                 let defaults = Disclosure::of(&self.persist);
                 if self.chat.is_open(&key, defaults)
                     && let Some(tool) = key.strip_prefix("tool:")
@@ -1055,10 +1260,15 @@ impl Model {
             ActionItem::new("Copy message", Action::Ui(UiAct::Copy(text.clone()))).icon(Icon::Copy),
         ];
         if user {
+            // What was typed (its documents are not attached again).
+            let typed = match self.chat.by_stamp(stamp) {
+                Some(Entry::User { text, .. }) => super::super::attachments::split(text).0,
+                _ => text.clone(),
+            };
             items.push(
                 ActionItem::new(
                     "Edit in composer",
-                    Action::Composer(composer::Act::Insert(text.clone())),
+                    Action::Composer(composer::Act::Insert(typed)),
                 )
                 .icon(Icon::Pencil),
             );
@@ -1173,7 +1383,13 @@ impl Model {
     }
 
     /// The open conversation's events (and deletions of any).
-    pub(super) fn apply_chat(&mut self, event: Event, _now: Instant) -> Vec<Value> {
+    pub(super) fn apply_chat(&mut self, event: Event, now: Instant) -> Vec<Value> {
+        let commands = self.apply_chat_event(event, now);
+        self.chat.settle_tail();
+        commands
+    }
+
+    fn apply_chat_event(&mut self, event: Event, _now: Instant) -> Vec<Value> {
         match event {
             Event::ConversationDeleted { conv_id, .. } => {
                 self.shelf.forget(&conv_id);
@@ -1199,9 +1415,11 @@ impl Model {
                 if fresh {
                     self.chat.load_request = None;
                     // The live reply comes again with the window (its
-                    // identity kept when it is the same turn).
+                    // identity kept when it is the same turn); the window
+                    // holds the notices that waited after it.
                     if !streaming {
                         self.chat.live = None;
+                        self.chat.tail.clear();
                     }
                     self.chat.echoes.clear();
                     self.chat.error = None;
@@ -1257,17 +1475,32 @@ impl Model {
                     let pending = window.pending_ai.clone();
                     self.chat.splice(window, false);
                     match pending {
-                        // The daemon says the turn is over.
+                        // The daemon says the turn is over (its window
+                        // holds the notices that waited after it).
                         Some(None) => {
                             self.chat.live = None;
+                            self.chat.tail.clear();
                             self.chat.status = Status::default();
                         }
                         None if had_live && !self.open_summary().is_some_and(|s| s.streaming) => {
                             self.chat.live = None;
+                            self.chat.tail.clear();
                             self.chat.status = Status::default();
                         }
                         _ => {}
                     }
+                }
+                Vec::new()
+            }
+            // Saved or cleared (the iPhone's: one box, the new text).
+            Event::SystemInstructionsUpdated(e) => {
+                if self.chat.id.as_deref() == Some(&e.conv_id) {
+                    self.chat.instructions = if e.text.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![e.text]
+                    };
+                    self.chat.touch();
                 }
                 Vec::new()
             }
@@ -1297,7 +1530,9 @@ impl Model {
                     let mut changed = false;
                     for output in outputs {
                         self.chat.outputs_requested.remove(&output.tool_call_id);
+                        // A subagent's id: its row offers the conversation.
                         changed |= output.output.trim().is_empty()
+                            || output.output.contains("conversation_id")
                             || shows(&self.chat, &output.tool_call_id);
                         self.chat.outputs.insert(output.tool_call_id, output.output);
                     }
@@ -1611,13 +1846,20 @@ impl Model {
                     chat.live_mut();
                 }
             }
+            // An error splits the reply; another notice waits after it.
             Event::SystemMessage { text, color, .. } => {
-                chat.commit_segment();
-                chat.push(Entry::System {
+                let terminal = color.as_deref() == Some("error") || text.starts_with('✗');
+                let entry = Entry::System {
                     text,
                     color,
                     metadata: None,
-                });
+                };
+                if terminal {
+                    chat.commit_segment();
+                    chat.push(entry);
+                } else {
+                    chat.push_notice(entry);
+                }
             }
             Event::StreamRetry {
                 attempt,

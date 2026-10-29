@@ -223,7 +223,8 @@ impl Model {
             return;
         }
         if self.chat.id.is_some() && self.page == Page::Chat {
-            self.chat.push(Entry::System {
+            // After a streaming reply, not inside it (C2, PAR-161).
+            self.chat.push_notice(Entry::System {
                 text: text.to_owned(),
                 color: match level {
                     Level::Info => None,
@@ -232,7 +233,6 @@ impl Model {
                 },
                 metadata: None,
             });
-            self.chat.touch();
         } else if level == Level::Info {
             self.ui.toast(text);
         } else {
