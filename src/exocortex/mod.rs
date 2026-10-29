@@ -6,6 +6,7 @@
 pub mod anim;
 pub mod app;
 pub mod clipboard;
+pub mod commands;
 pub mod drafts;
 pub mod editor;
 pub mod gesture;
@@ -13,6 +14,7 @@ pub mod handoff;
 pub mod images;
 pub mod line;
 pub mod link;
+pub mod macros;
 pub mod markdown;
 pub mod model;
 pub mod proto;
