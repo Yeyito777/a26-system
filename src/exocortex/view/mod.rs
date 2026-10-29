@@ -17,6 +17,7 @@ pub mod chat_header;
 pub mod code;
 pub mod composer;
 pub mod draft;
+pub mod files;
 pub mod frame;
 pub mod list;
 pub mod markdown_layout;

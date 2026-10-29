@@ -13,7 +13,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -81,7 +81,8 @@ pub fn available() -> bool {
 }
 
 struct Recording {
-    child: Child,
+    /// Which recording (a newer one replaces it).
+    serial: u64,
     stdin: Option<ChildStdin>,
 }
 
@@ -135,7 +136,22 @@ pub fn command(what: Do) {
     }
 }
 
+/// Keeps the screen on while a recording runs and the app is in front
+/// (Moon's `awake`, docs/app-services.md), on a thread: Moon answers at
+/// once, but the UI never waits on it.
+fn awake(on: bool) {
+    if cfg!(test) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("exocortex-awake".into())
+        .spawn(move || {
+            crate::control::send(if on { "awake on" } else { "awake off" });
+        });
+}
+
 fn start(shared: &'static Arc<Shared>) {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     stop_recording(shared, true);
     let spawned = Command::new(hook())
         .arg("dictate")
@@ -157,9 +173,11 @@ fn start(shared: &'static Arc<Shared>) {
     };
     let stdout = child.stdout.take();
     let stdin = child.stdin.take();
+    let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     if let Ok(mut recording) = shared.recording.lock() {
-        *recording = Some(Recording { child, stdin });
+        *recording = Some(Recording { serial, stdin });
     }
+    awake(true);
     let wake = shared.clone();
     let _ = std::thread::Builder::new()
         .name("exocortex-dictate".into())
@@ -175,11 +193,14 @@ fn start(shared: &'static Arc<Shared>) {
                     }
                 }
             }
-            // Reap it (it exits once it answered or its stdin closed).
+            // Reap it (it exits once it answered or its stdin closed); the
+            // screen may sleep again unless a newer recording runs.
+            let _ = child.wait();
             if let Ok(mut recording) = wake.recording.lock()
-                && let Some(mut done) = recording.take()
+                && recording.as_ref().is_some_and(|r| r.serial == serial)
             {
-                let _ = done.child.wait();
+                *recording = None;
+                awake(false);
             }
             let _ = sender.send(Line::Exited);
             wake.waker.wake();

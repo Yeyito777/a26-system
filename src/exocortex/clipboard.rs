@@ -42,11 +42,13 @@ pub fn copy(text: &str) {
 }
 
 /// The clipboard's text: Moon's (what any app copied), else what this app
-/// copied last. Asks Moon synchronously (a local socket, answered at once,
-/// at most 200 ms); a user's paste is worth that.
+/// copied last. Asks Moon synchronously (a local socket, answered at once;
+/// up to 1 MiB of text, escaped, may take a moment): a user's paste is
+/// worth that.
 pub fn paste() -> Option<String> {
     if !cfg!(test)
-        && let Some(result) = control::query("clipboard get")
+        && let Some(result) =
+            control::query_long("clipboard get", std::time::Duration::from_secs(1), 8 << 20)
     {
         return result
             .get("text")

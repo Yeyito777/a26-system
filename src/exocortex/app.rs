@@ -25,6 +25,7 @@ use crate::present::Presenter;
 use super::anim;
 use super::clipboard;
 use super::dictation;
+use super::files;
 use super::gesture::{Axis, Gesture, Recognizer};
 use super::handoff;
 use super::line::{self, Waker};
@@ -319,6 +320,7 @@ impl Context<'_> {
                 Effect::HideKeyboard => self.hide_keyboard(),
                 Effect::Paste => self.model.paste_text(clipboard::paste()),
                 Effect::Dictate(what) => dictation::command(what),
+                Effect::Files(job) => files::command(job),
                 Effect::StatusBar => ui::status_bar(&theme::status_bar()),
                 Effect::Reveal(stamp) => {
                     self.view.reveal(self.model, stamp, self.height);
@@ -646,8 +648,11 @@ impl Context<'_> {
         }
         // The composer's (Moon's `multiline` keyboard: Return is a line
         // break and the keyboard stays up).
-        if !self.model.composer_key(input) {
+        let Some(commands) = self.model.composer_key(input) else {
             return false;
+        };
+        for command in commands {
+            self.link.send(command);
         }
         self.take_ui(now);
         self.view.follow = true;
@@ -806,9 +811,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         };
         redraw |= cx.take_ui(now);
 
-        // The composer's microphone (D).
+        // The composer's microphone and attachments (D).
         for line in dictation::take() {
             cx.model.dictation_line(line);
+            redraw = true;
+        }
+        for done in files::take() {
+            cx.model.files_done(done);
             redraw = true;
         }
         redraw |= cx.take_ui(now);
@@ -1227,6 +1236,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             line::pollfd(link.fd(), libc::POLLIN),
             line::pollfd(shell.waker.fd(), libc::POLLIN),
             line::pollfd(dictation::fd().unwrap_or(-1), libc::POLLIN),
+            line::pollfd(files::fd().unwrap_or(-1), libc::POLLIN),
         ];
         slept_at = Instant::now();
         line::poll(&mut fds, timeout)?;

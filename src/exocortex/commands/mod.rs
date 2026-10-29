@@ -7,6 +7,7 @@
 
 pub mod env;
 pub mod inline;
+pub mod paths;
 pub mod queue_targets;
 pub mod registry;
 pub mod run;
