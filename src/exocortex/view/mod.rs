@@ -1321,9 +1321,9 @@ mod tests {
         view.list_scroll.offset = 100.0;
         draw(&mut canvas, &mut model, &mut view, None, now);
         for to in [161.0, 140.0, 900.0, 600.0] {
-            let old = list_frame(&model, &view, None, height, now).unwrap();
+            let old = list_frame(&mut model, &view, None, height, now).unwrap();
             view.list_scroll.offset = to;
-            let new = list_frame(&model, &view, None, height, now).unwrap();
+            let new = list_frame(&mut model, &view, None, height, now).unwrap();
             let damage = draw_list_update(&mut canvas, &mut model, &mut view, &old, &new, now)
                 .expect("incremental");
             assert_eq!(damage.rows.len(), 1);
@@ -1333,10 +1333,12 @@ mod tests {
             assert!(full.pixels == canvas.pixels, "list frame at {to} differs");
         }
         // Pressing a row and letting go redraws that row alone.
-        let press = Hit::Action(Action::Nav(Nav::OpenConversation("c5".into())));
+        let press = Hit::Action(Action::List(crate::exocortex::model::sidebar::Act::Open(
+            "c5".into(),
+        )));
         for (before, after) in [(None, Some(&press)), (Some(&press), None)] {
-            let old = list_frame(&model, &view, before, height, now).unwrap();
-            let new = list_frame(&model, &view, after, height, now).unwrap();
+            let old = list_frame(&mut model, &view, before, height, now).unwrap();
+            let new = list_frame(&mut model, &view, after, height, now).unwrap();
             let damage = draw_list_update(&mut canvas, &mut model, &mut view, &old, &new, now)
                 .expect("incremental");
             assert_eq!(damage.rows.len(), 1);
@@ -1357,11 +1359,15 @@ mod tests {
         let y = (list_top(&model) + ROW_H / 2.0) as i16;
         assert_eq!(
             hit(&mut model, &mut view, 2216.0, 400, y, now),
-            Some(Hit::Action(Action::Nav(Nav::OpenConversation("c".into()))))
+            Some(Hit::Action(Action::List(
+                crate::exocortex::model::sidebar::Act::Open("c".into())
+            )))
         );
         assert_eq!(
             hit(&mut model, &mut view, 2216.0, 1020, 90, now),
-            Some(Hit::Action(Action::Nav(Nav::NewConversation)))
+            Some(Hit::Action(Action::List(
+                crate::exocortex::model::sidebar::Act::NewChat
+            )))
         );
         let mut canvas = Canvas::new(1080, 2216);
         draw(&mut canvas, &mut model, &mut view, None, now);

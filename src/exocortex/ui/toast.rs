@@ -265,6 +265,10 @@ impl Snackbar {
 }
 
 impl Overlay for Snackbar {
+    fn label(&self) -> String {
+        format!("{} · {}", self.text, self.button)
+    }
+
     fn modal(&self) -> bool {
         false
     }
