@@ -6,7 +6,7 @@
 use serde_json::Value;
 
 use super::super::find;
-use super::super::model::{Action, Effect, Model, ops};
+use super::super::model::{Action, Chat, Effect, Model, ops};
 use super::super::proto::{Block, Entry};
 use super::super::theme;
 use super::super::ui::Haptic;
@@ -54,15 +54,31 @@ fn entry_text(entry: &Entry) -> Option<(&'static str, String)> {
     }
 }
 
-/// The loaded entries as the search reads them: index, role, plain text.
-fn messages(entries: &[Entry]) -> Vec<(usize, String, String)> {
-    entries
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entry)| {
-            let (role, text) = entry_text(entry)?;
-            Some((index, role.to_owned(), text))
-        })
+/// A match in the System Instructions: they are pinned at the top of the
+/// transcript, not an entry (`Chat::instructions`).
+const INSTRUCTIONS: usize = usize::MAX;
+
+/// What the search reads: the conversation's own System Instructions, then
+/// the loaded entries (index, role, plain text).
+fn messages(chat: &Chat) -> Vec<(usize, String, String)> {
+    let instructions = chat.own_instructions().map(|text| {
+        (
+            INSTRUCTIONS,
+            "SYSTEM INSTRUCTIONS".to_owned(),
+            text.to_owned(),
+        )
+    });
+    instructions
+        .into_iter()
+        .chain(
+            chat.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    let (role, text) = entry_text(entry)?;
+                    Some((index, role.to_owned(), text))
+                }),
+        )
         .collect()
 }
 
@@ -84,6 +100,10 @@ impl Model {
                     self.open_panel(panel::Panel::Find(conv));
                 }
             }
+            Act::Open(INSTRUCTIONS) => {
+                self.ui.haptic(Haptic::Selection);
+                self.ui.effects.push(Effect::RevealTop);
+            }
             Act::Open(index) => {
                 if let Some(&stamp) = self.chat.stamps.get(index) {
                     self.ui.haptic(Haptic::Selection);
@@ -99,7 +119,7 @@ impl Model {
 pub fn build(model: &Model, _conv: &str) -> Built {
     let p = theme::p();
     let query = model.ops.find.clone().unwrap_or_default();
-    let hits = find::search_messages(&messages(&model.chat.entries), &query, find::MAX_MATCHES);
+    let hits = find::search_messages(&messages(&model.chat), &query, find::MAX_MATCHES);
     let total = hits.len();
     let mut rows = vec![Row::Section {
         title: match total {
@@ -165,7 +185,11 @@ mod tests {
                 metadata: None,
             },
         ];
-        let hits = find::search_messages(&messages(&entries), "deploy", 500);
+        let mut chat = Chat::default();
+        for entry in entries {
+            chat.push(entry);
+        }
+        let hits = find::search_messages(&messages(&chat), "deploy", 500);
         assert_eq!(hits.len(), 4, "accents and case folded");
         assert_eq!(hits[0].role, "USER");
         assert_eq!(hits[1].key, 1);
@@ -174,6 +198,19 @@ mod tests {
             chars[hits[0].start..hits[0].end].iter().collect::<String>(),
             "Déploy"
         );
+    }
+
+    /// The System Instructions are searched too, though not an entry
+    /// (pinned at the top); a match there scrolls to the top.
+    #[test]
+    fn the_system_instructions_are_found_and_shown() {
+        let mut model = Model::new();
+        model.chat.instructions = vec!["Always run the deploy checks.".into()];
+        let hits = find::search_messages(&messages(&model.chat), "deploy", 500);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].role, "SYSTEM INSTRUCTIONS");
+        model.handle(Action::Ops(ops::Act::Find(Act::Open(hits[0].key))));
+        assert!(model.ui.effects.contains(&Effect::RevealTop));
     }
 
     #[test]

@@ -435,7 +435,20 @@ fn is_fold_key(key: &str) -> bool {
         || (key.starts_with("u:") && !key.contains('/'))
 }
 
+/// How the daemon starts the folder's AGENTS.md context it shows first
+/// among a window's System Instructions.
+const FOLDER_INSTRUCTIONS: &str = "# Context from AGENTS.md:";
+
 impl Chat {
+    /// The conversation's own System Instructions (`/instructions`, the
+    /// System prompt sheet, Edit…): the last of the window's, unless that is
+    /// the folder's context alone.
+    pub fn own_instructions(&self) -> Option<&str> {
+        let last = self.instructions.last()?;
+        let folder_only = self.instructions.len() == 1 && last.starts_with(FOLDER_INSTRUCTIONS);
+        (!folder_only && !last.trim().is_empty()).then_some(last.as_str())
+    }
+
     /// Whether the disclosure at `key` is open: its default, unless the
     /// user toggled it.
     pub fn is_open(&self, key: &str, defaults: Disclosure) -> bool {

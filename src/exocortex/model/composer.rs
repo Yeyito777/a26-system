@@ -1494,10 +1494,7 @@ impl Model {
                     .detail(detail),
             );
         }
-        let instructions = self.chat.entries.iter().find_map(|e| match e {
-            Entry::SystemInstructions { text } if !text.trim().is_empty() => Some(text.clone()),
-            _ => None,
-        });
+        let instructions = self.chat.own_instructions().map(str::to_owned);
         if let Some(text) = instructions {
             let empty = self.composer.text.trim().is_empty();
             let action = if empty {

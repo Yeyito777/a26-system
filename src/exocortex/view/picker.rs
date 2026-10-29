@@ -25,7 +25,7 @@ use super::super::theme::{
 use super::super::ui::icons::{self, Icon, Style};
 use super::super::ui::overlay::{Body, Cx, Overlay, Response};
 use super::super::ui::widgets;
-use super::CHAT_TOP;
+use super::chat_top;
 use super::composer;
 
 const IN_FOR: Duration = Duration::from_millis(160);
@@ -216,7 +216,7 @@ impl Overlay for Picker {
         }
         let g = composer::geometry(model, cx.height, cx.keyboard);
         let bottom = g.band_top() + 17.0 - GAP;
-        let room = bottom - CHAT_TOP - S3;
+        let room = bottom - chat_top() - S3;
         let wanted = HEAD + self.rows().len().min(3) as f32 * ROW + self.hint_h();
         let h = wanted.min(room).min(MAX_H).round();
         if h < MIN_H.min(wanted) {

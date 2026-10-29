@@ -54,12 +54,18 @@ enum Item {
     },
 }
 
+/// A row: a label and a detail line, growing with the text.
+fn row_h() -> f32 {
+    theme::grown(ACTION_ITEM, 100.0)
+}
+
 impl Item {
     fn height(&self) -> f32 {
         match self {
-            Item::Head { .. } => 150.0,
-            Item::Row { .. } => ACTION_ITEM,
-            Item::Section(_) => 101.0,
+            // Their text grows with the text size (`theme::grown`).
+            Item::Head { .. } => theme::grown(150.0, 100.0),
+            Item::Row { .. } => row_h(),
+            Item::Section(_) => theme::grown(101.0, 40.0),
             Item::Lines { lines, note: false } => 28.0 + lines.len() as f32 * T_SMALL.line() + 28.0,
             Item::Lines { lines, note: true } => {
                 11.0 + lines.len() as f32 * T_CAPTION.line() + 11.0
@@ -339,7 +345,7 @@ impl SheetContent for FolderSheet {
 
     fn item_at(&self, _cx: &Cx, _x: f32, y: f32) -> Option<usize> {
         self.rows()
-            .find(|(_, top, _)| y >= *top && y < top + ACTION_ITEM)
+            .find(|(_, top, _)| y >= *top && y < top + row_h())
             .map(|(index, _, _)| index)
     }
 

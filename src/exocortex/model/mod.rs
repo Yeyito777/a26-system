@@ -117,6 +117,9 @@ pub enum Effect {
     /// The chat scrolls to an entry (its stamp) and stops following (E: a
     /// Find in chat match).
     Reveal(u64),
+    /// The chat scrolls to its top, where the System Instructions are
+    /// pinned (a Find match in them).
+    RevealTop,
 }
 
 /// What the model asks of the interface: overlays to open or close and
@@ -249,6 +252,18 @@ impl Model {
     /// what was kept from before).
     pub fn chat_pending(&self) -> bool {
         self.chat.load_request.is_some()
+    }
+
+    /// What the app says while it is not connected (the chat's subtitle,
+    /// the list's pill and its loading state): a restart or stop the daemon
+    /// announced (PAR-029), else reconnecting, or connecting the first time.
+    pub fn link_status(&self) -> &'static str {
+        match self.ops.usage.link.shutdown.as_deref() {
+            Some("restart") => "Daemon restarting…",
+            Some(_) => "Daemon stopped",
+            None if self.was_connected => "Reconnecting…",
+            None => "Connecting…",
+        }
     }
 
     /// The conversation shown in the chat, if any, for the bridge.
@@ -448,6 +463,12 @@ impl Model {
                 .map(|pending| (id.to_owned(), pending))
         });
         let mut commands = Vec::new();
+        // A pong for a ping of ours: the daemon's round trip (Settings'
+        // connection card, as the iPhone's "12 ms").
+        if let (Event::Pong { .. }, Some((_, pending))) = (&event, &settled) {
+            let rtt = now.saturating_duration_since(pending.sent);
+            self.ops.usage.link.rtt_ms = Some(rtt.as_millis() as u64);
+        }
         match &event {
             Event::Pong { req_id, .. } if req_id.is_some() && *req_id == self.ping => {
                 self.ready = true;

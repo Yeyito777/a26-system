@@ -35,6 +35,26 @@ pub enum Axis {
     Horizontal,
 }
 
+/// Where a page swipe goes (PAR-001: Settings | List | Chat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    /// Right: the page to the left (Back).
+    Back,
+    /// Left: the page to the right.
+    Forward,
+}
+
+/// A horizontal drag nothing inside the page took, ended `(dx, dy)` from
+/// where it started at `(vx, vy)` px/s: a page swipe when it is mostly
+/// horizontal and went a third of the width or was flicked, as the edge
+/// swipe is.
+pub fn page_swipe(dx: f32, dy: f32, vx: f32, vy: f32, width: f32) -> Option<Page> {
+    let horizontal = dx.abs() > dy.abs() * 1.5;
+    let far = dx.abs() > width * BACK_TRAVEL;
+    let fast = vx.abs() > BACK_FLICK && vx.abs() > vy.abs() * 1.5 && vx * dx > 0.0;
+    (horizontal && (far || fast)).then_some(if dx > 0.0 { Page::Back } else { Page::Forward })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Gesture {
     /// A finger came down: highlight what it is on.
@@ -279,6 +299,25 @@ impl Recognizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_swipe_goes_a_third_of_the_width_or_is_flicked() {
+        let w = 1080.0;
+        assert_eq!(page_swipe(400.0, 30.0, 300.0, 0.0, w), Some(Page::Back));
+        assert_eq!(
+            page_swipe(-400.0, 30.0, -300.0, 0.0, w),
+            Some(Page::Forward)
+        );
+        // Short but fast; short and slow; fast the other way.
+        assert_eq!(
+            page_swipe(-150.0, 10.0, -2400.0, 100.0, w),
+            Some(Page::Forward)
+        );
+        assert_eq!(page_swipe(150.0, 10.0, 800.0, 0.0, w), None);
+        assert_eq!(page_swipe(150.0, 10.0, -2400.0, 0.0, w), None);
+        // Diagonal is not a page swipe.
+        assert_eq!(page_swipe(400.0, 350.0, 3000.0, 2500.0, w), None);
+    }
 
     fn ms(start: Instant, ms: u64) -> Instant {
         start + Duration::from_millis(ms)
