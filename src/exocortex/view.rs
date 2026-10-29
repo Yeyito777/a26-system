@@ -162,10 +162,18 @@ struct Placed {
 }
 
 /// Where the reader is: pieces on screen (entry stamp, index in the entry,
-/// the piece itself) and how far below the transcript's top edge each
-/// starts.
+/// the piece itself) and where each was in the transcript.
 pub struct Anchor {
     pieces: Vec<(u64, u32, Rc<Laid>, f32)>,
+}
+
+/// The chat as a pass of the event loop found it (`ViewState::before`), so
+/// the pass's end (`ViewState::settle`) can keep the reader's place.
+pub struct Before {
+    id: Option<String>,
+    start: (u64, u64),
+    height: f32,
+    anchor: Option<Anchor>,
 }
 
 #[derive(Default)]
@@ -1532,7 +1540,7 @@ impl ViewState {
     }
 
     /// Where the reader is, unless following the newest message.
-    pub fn anchor(&mut self, model: &Model, now: Instant) -> Option<Anchor> {
+    fn anchor(&mut self, model: &Model, now: Instant) -> Option<Anchor> {
         if self.follow {
             return None;
         }
@@ -1544,37 +1552,84 @@ impl ViewState {
             .iter()
             .filter(|item| item.stamp != 0)
             .take(6)
-            .map(|item| (item.stamp, item.index, item.laid.clone(), item.y - offset))
+            .map(|item| (item.stamp, item.index, item.laid.clone(), item.y))
             .collect();
         (!pieces.is_empty()).then_some(Anchor { pieces })
     }
 
-    /// Scrolls so the reader's place is where it was, after the transcript
-    /// changed above it (older history, a fresh window, a row opened).
+    /// Moves the scroll by as much as the reader's place moved in the
+    /// transcript (older history, a fresh window or a row opened above it),
+    /// and by nothing else: what a finger or a fling did meanwhile stays.
     /// Returns false when none of its pieces is still there.
-    pub fn restore(&mut self, model: &Model, anchor: &Anchor, now: Instant) -> bool {
+    fn restore(&mut self, model: &Model, anchor: &Anchor) -> bool {
         self.layout(model);
         // The same piece of the same entry; nearest its old index (a row
         // opened above it in the entry moves it down the list).
-        let found = anchor
-            .pieces
-            .iter()
-            .find_map(|(stamp, index, laid, delta)| {
-                self.layout
-                    .items
-                    .iter()
-                    .filter(|item| item.stamp == *stamp && Rc::ptr_eq(&item.laid, laid))
-                    .min_by_key(|item| item.index.abs_diff(*index))
-                    .map(|item| item.y - delta)
-            });
-        let Some(offset) = found else {
+        let moved = anchor.pieces.iter().find_map(|(stamp, index, laid, y)| {
+            self.layout
+                .items
+                .iter()
+                .filter(|item| item.stamp == *stamp && Rc::ptr_eq(&item.laid, laid))
+                .min_by_key(|item| item.index.abs_diff(*index))
+                .map(|item| item.y - y)
+        });
+        let Some(moved) = moved else {
             return false;
         };
-        let shift = offset - self.chat_scroll.value(now);
-        if shift != 0.0 {
-            self.chat_scroll.shift(shift);
+        if moved != 0.0 {
+            self.chat_scroll.shift(moved);
         }
         true
+    }
+
+    /// The chat at the start of an event loop pass.
+    pub fn before(&mut self, model: &Model, now: Instant) -> Before {
+        if model.page != Page::Chat {
+            return Before {
+                id: None,
+                start: (0, 0),
+                height: 0.0,
+                anchor: None,
+            };
+        }
+        Before {
+            id: model.chat.id.clone(),
+            start: (model.chat.start, model.chat.start_block),
+            height: self.content_height(model),
+            anchor: self.anchor(model, now),
+        }
+    }
+
+    /// At the end of a pass (after its input and daemon events): keeps what
+    /// the reader looks at in place if the transcript changed above it, and
+    /// follows the newest message from the bottom. Never undoes a drag or a
+    /// fling.
+    pub fn settle(&mut self, model: &Model, before: Before, height: f32, now: Instant) {
+        if model.page != Page::Chat {
+            return;
+        }
+        let same = before.id == model.chat.id && before.id.is_some();
+        let height_now = self.content_height(model);
+        let older_added = same && (model.chat.start, model.chat.start_block) < before.start;
+        let kept = same
+            && !self.follow
+            && before
+                .anchor
+                .as_ref()
+                .is_some_and(|anchor| self.restore(model, anchor));
+        if older_added && !self.follow && !kept {
+            self.chat_scroll.shift(height_now - before.height);
+        }
+        let max = self.chat_max(model, height);
+        if self.follow && !self.chat_scroll.dragging() {
+            self.chat_scroll.reset();
+            self.chat_scroll.offset = max;
+        } else if !self.chat_scroll.dragging()
+            && self.chat_scroll.value(now) >= max - 40.0
+            && max > 0.0
+        {
+            self.follow = true;
+        }
     }
 
     /// The transcript is scrolled near its oldest loaded message.
@@ -3272,8 +3327,9 @@ mod tests {
     }
 
     #[test]
-    fn the_reader_stays_put_when_older_history_arrives() {
+    fn the_reader_stays_put_when_older_history_arrives_mid_drag() {
         let now = Instant::now();
+        let height = 900.0;
         let mut model = Model::new();
         model.on_connected();
         let commands = model.handle(Action::OpenConversation("c".into()));
@@ -3294,26 +3350,39 @@ mod tests {
             parse_event(&page("conversation_loaded", &request, 10, 20)),
             now,
         );
+        // Asked for (its Loading… row shows above).
+        let older = model.load_older();
+        let request = older[0]["reqId"].as_str().unwrap().to_owned();
         let mut view = ViewState::new();
         view.follow = false;
         view.chat_scroll.offset = 700.0;
-        let anchor = view.anchor(&model, now).expect("an anchor");
-        let (stamp, index, _, delta) = anchor.pieces[0].clone();
-        let older = model.load_older();
-        let request = older[0]["reqId"].as_str().unwrap().to_owned();
+        view.layout(&model);
+        let first = view
+            .layout
+            .items
+            .iter()
+            .find(|item| item.y >= 700.0)
+            .unwrap();
+        let (laid, on_screen) = (first.laid.clone(), first.y - 700.0);
+        // One pass of the loop: the finger moves 20 px down (toward older
+        // messages) and the older page lands.
+        let before = view.before(&model, now);
+        view.chat_scroll.begin(500.0, now);
+        view.chat_scroll.moved(520.0, 5000.0, now);
         model.apply(
             parse_event(&page("conversation_history_loaded", &request, 0, 10)),
             now,
         );
-        assert!(view.restore(&model, &anchor, now));
+        view.settle(&model, before, height, now);
         let item = view
             .layout
             .items
             .iter()
-            .find(|item| item.stamp == stamp && item.index == index)
+            .find(|item| Rc::ptr_eq(&item.laid, &laid))
             .unwrap();
         assert!(item.y > 700.0, "older history above it");
-        assert_eq!(item.y - view.chat_scroll.value(now), delta);
+        // Where it was, moved with the finger.
+        assert_eq!(item.y - view.chat_scroll.value(now), on_screen + 20.0);
     }
 
     #[test]
@@ -3326,9 +3395,9 @@ mod tests {
         let text = view.layout.items[2].laid.clone();
         view.follow = false;
         view.chat_scroll.offset = view.layout.items[2].y;
-        let anchor = view.anchor(&model, now).unwrap();
+        let before = view.before(&model, now);
         model.handle(Action::ToggleExpanded("group:t0".into()));
-        assert!(view.restore(&model, &anchor, now));
+        view.settle(&model, before, 900.0, now);
         let item = view
             .layout
             .items
@@ -3336,6 +3405,44 @@ mod tests {
             .find(|item| Rc::ptr_eq(&item.laid, &text))
             .unwrap();
         assert_eq!(item.y, view.chat_scroll.value(now));
+    }
+
+    /// A real finger: motion after motion, each pass of the event loop
+    /// handling a few (and now and then a streamed chunk) before its frame.
+    /// Every frame must move the transcript with the finger.
+    #[test]
+    fn a_sustained_drag_scrolls_every_frame() {
+        let height = 900.0;
+        let (mut model, mut view) = long_chat(height);
+        let now = Instant::now();
+        model.apply(
+            parse_event(r#"{"type":"streaming_started","convId":"c","provider":"a","model":"m","startedAt":7}"#),
+            now,
+        );
+        view.follow = false;
+        let max = view.chat_max(&model, height);
+        view.chat_scroll.offset = (max / 2.0).round();
+        let start = view.chat_scroll.offset;
+        view.chat_scroll.begin(600.0, now);
+        for pass in 1..=30 {
+            let damage = update_matches(&mut model, &mut view, height, |model, view| {
+                let before = view.before(model, now);
+                for motion in 1..=3 {
+                    let y = 600.0 + ((pass - 1) * 3 + motion) as f32 * 1.5;
+                    view.chat_scroll.moved(y, max, now);
+                    view.follow = false;
+                }
+                if pass % 4 == 0 {
+                    model.apply(
+                        parse_event(r#"{"type":"text_chunk","convId":"c","text":"more words "}"#),
+                        now,
+                    );
+                }
+                view.settle(model, before, height, now);
+            });
+            assert!(damage.moved.is_some(), "pass {pass} did not scroll");
+            assert_eq!(view.chat_scroll.value(now), start - pass as f32 * 4.5);
+        }
     }
 
     /// Draws the frame, applies `change`, updates the frame incrementally,

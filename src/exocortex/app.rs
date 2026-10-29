@@ -42,6 +42,8 @@ const DOTS_EVERY: Duration = Duration::from_millis(420);
 /// window before "Loading…" is drawn (Moon holds its page slide for the
 /// first frame up to 150 ms), so it usually slides in with its messages.
 const HOLD_FOR_WINDOW: Duration = Duration::from_millis(110);
+/// At most this long is spent on queued X input before a frame is drawn.
+const INPUT_BUDGET: Duration = Duration::from_millis(6);
 
 struct Renderer {
     window: Window,
@@ -271,6 +273,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let mut back: Option<(Instant, bool, bool)> = None;
     // Until when the first frame of a conversation opened empty waits.
     let mut hold_until: Option<Instant> = None;
+    // An X event already read from the connection, not yet handled.
+    let mut queued_x: Option<XEvent> = None;
 
     // The first frame is drawn before the window maps (as the System app).
     draw_frame(
@@ -289,22 +293,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let now = Instant::now();
         let before_depth = page_depth(&model);
         let before_folders = model.folders.len();
-        let before_start = (
-            model.chat.id.clone(),
-            model.chat.start,
-            model.chat.start_block,
-        );
-        let before_height = if model.page == Page::Chat {
-            view.content_height(&model)
-        } else {
-            0.0
-        };
+        let before_id = model.chat.id.clone();
         // The reader's place, kept when the transcript changes above it.
-        let anchor = if model.page == Page::Chat {
-            view.anchor(&model, now)
-        } else {
-            None
-        };
+        let before_view = view.before(&model, now);
 
         // Daemon events.
         let applying = Instant::now();
@@ -367,8 +358,21 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // X events.
-        while let Some(event) = conn.poll_for_event()? {
+        // X events, all that are queued (a motion only moves the scroll; the
+        // frame after shows the latest), within a budget so a flood of input
+        // can never hold frames off.
+        let reading = Instant::now();
+        loop {
+            if reading.elapsed() > INPUT_BUDGET {
+                break;
+            }
+            let event = match queued_x.take() {
+                Some(event) => event,
+                None => match conn.poll_for_event()? {
+                    Some(event) => event,
+                    None => break,
+                },
+            };
             let now = Instant::now();
             renderer.presenter.note_event(&event);
             match event {
@@ -591,7 +595,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
 
         if model.page == Page::Chat
-            && model.chat.id != before_start.0
+            && model.chat.id != before_id
             && let Some(id) = &model.chat.id
         {
             opening = Some((id.clone(), now));
@@ -620,33 +624,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
 
         // Keep the transcript where the user left it.
-        if model.page == Page::Chat {
-            let height_now = view.content_height(&model);
-            let older_added = before_start.0 == model.chat.id
-                && (model.chat.start, model.chat.start_block) < (before_start.1, before_start.2);
-            let kept = before_start.0 == model.chat.id
-                && !view.follow
-                && anchor
-                    .as_ref()
-                    .is_some_and(|anchor| view.restore(&model, anchor, now));
-            if older_added && !view.follow && !kept {
-                let delta = height_now - before_height;
-                view.chat_scroll.shift(delta);
-            }
-            let max = view.chat_max(&model, height);
-            if view.follow && !view.chat_scroll.dragging() {
-                view.chat_scroll.reset();
-                view.chat_scroll.offset = max;
-            } else if !view.chat_scroll.dragging()
-                && view.chat_scroll.value(now) >= max - 40.0
-                && max > 0.0
-            {
-                view.follow = true;
-            }
-            if view.near_top(now) {
-                for command in model.load_older() {
-                    link.send(command);
-                }
+        view.settle(&model, before_view, height, now);
+        if model.page == Page::Chat && view.near_top(now) {
+            for command in model.load_older() {
+                link.send(command);
             }
         }
 
@@ -773,8 +754,16 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         if let Some(at) = model.answer_deadline() {
             soonest(at);
         }
-        let timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+        let mut timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
         conn.flush()?;
+        // An event the connection has already read (during a round trip, or
+        // left by the budget) does not make its socket readable: look first.
+        if queued_x.is_none() {
+            queued_x = conn.poll_for_event()?;
+        }
+        if queued_x.is_some() {
+            timeout = Some(Duration::ZERO);
+        }
         let mut fds = [
             line::pollfd(conn.stream().as_raw_fd(), libc::POLLIN),
             line::pollfd(link.fd(), libc::POLLIN),
