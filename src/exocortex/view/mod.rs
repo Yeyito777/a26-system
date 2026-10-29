@@ -1526,7 +1526,7 @@ mod tests {
             data.pixels = Some(crate::exocortex::proto::Pixels {
                 width: 200,
                 height: 100,
-                argb: (0..20000).map(|i| 0xff00_0000 | i as u32 * 97).collect(),
+                argb: (0..20000).map(|i| 0xff00_0000 | (i as u32 * 97)).collect(),
             });
             model.apply(crate::exocortex::proto::Event::ImageData(data), now);
         });
