@@ -181,13 +181,41 @@ first and leave the text; macros (`macros.rs`, the TUI's catalog in
 `macros.json`, regenerated with `scripts/sync-exocortex-macros.ts`) expand
 with the daemon's paths. Command results show as notices in the transcript
 (long ones, `/help`, `/model`, in the reader; a new chat's as toasts).
+Valid commands, macros and their arguments are drawn in the command colour
+as they are typed. A path word at the caret (`~/`, `./`, `../`, `/a/`)
+completes from the daemon host's files (`list_path_directory`, through
+`commands/paths.rs`: one prefetch and one targeted request per folder,
+listings 15 s fresh and 5 min stale), never the phone's. The chat's ⋯ menu
+has Edit… (the TUI's Ctrl+W): the chat's queued messages back into the
+composer, its last sent messages to rewind and edit, its instructions as
+`/instructions …`.
+
+"+" opens Add attachment or voice: Browse files, Paste image, Record voice
+(`model/attach.rs`). The file browser (`view/files.rs`) is a sheet over the
+phone's own files, starting at home (Android's shared storage stays locked
+under Moon, so it is not there): Up, folders, files with size and date,
+dotfiles on request. Paste image (and the edit menu's Paste when the
+clipboard holds no text) takes the image Moon keeps (`clipboard get image`;
+X's CLIPBOARD on a host without Moon). Files are read, and the clipboard's
+image fetched, on threads (`files.rs`), into the draft they were chosen for;
+a tray of chips in the island (a PNG's thumbnail, else a glyph; name, size,
+✕) scrolls sideways. Images (PNG, JPEG, GIF, WebP up to 4 MB) go as `images`
+on `send_message`, `queue_message` and a new chat's `initialMessage`; other
+files as their text (UTF-8, else Latin-1 for known text types; up to
+120,000 characters, cut and marked) in the iPhone's `<exocortex_file …>`
+envelope after the message (`attachments.rs`). Six items and 12 MB with the
+text at most; no images to a model without vision; commands carry none. A
+send that does not arrive, a rewind and a queued message pulled back give
+them back (documents out of their envelopes, images whose bytes the daemon
+still has). A draft's attachments are kept in memory only.
 
 The mic shows when nothing is typed: it runs Moon's voice hook
 (`dictation.rs`), and a recording strip takes the editor's row (cancel, the
 red dot and the clock, the waveform of the hook's levels, finish). The words
 go in at the caret of the draft they were spoken for, wherever the user is
 by then; a recording ends with its chat and stops by itself before the
-capture's 120 s limit; transcription is given up on after 90 s.
+capture's 120 s limit; transcription is given up on after 90 s. While it
+records, Moon keeps the screen on (`awake on`, then `awake off`).
 
 Sending `turns` matters: without it the daemon does not page at all. It
 sends the whole history on every open (790 KB for a long conversation) and
@@ -295,7 +323,7 @@ the interfaces below. Every file's header says whose it is.
 | `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands (`list/actions.rs`), changes shown before the daemon answers (`list/pending.rs`), menus, prompts and pickers (`list/menus.rs`), the folder inspector (`list/sheets.rs`) |
 | `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `highlight.rs`, `math/`, `links.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks (highlighted), tables, math; links and the file sheet; images in the transcript, their cache and the viewer; the reader, selection and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
-| `view/composer.rs`, `view/picker.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts, the mic, the command picker, commands and macros |
+| `view/composer.rs`, `view/picker.rs`, `view/files.rs`, `model/composer.rs`, `model/attach.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `attachments.rs`, `files.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu, the attachment tray), sending, the queue, kept drafts, the mic, attachments and the file browser, the command picker, commands, macros and path completion |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
 
 A package adds its new files (`list/*.rs`, `commands/*.rs`, `sheets/*.rs`
@@ -329,8 +357,10 @@ additions are the only shared edits.
 - **No I/O in the model.** It asks the interface through `model.ui`:
   `ui.open(Box<dyn Overlay>)`, `ui.toast(text)`, `ui.error_toast(text)`,
   `ui.haptic(Haptic)`, `ui.effect(Effect::{Copy, OpenUrl, ShowKeyboard,
-  HideKeyboard})`, and `close_all` / `close_top` / `close_scoped`. The event
-  loop takes them after every change; tests read them.
+  HideKeyboard, Paste, Dictate, Files, StatusBar})`, and `close_all` /
+  `close_top` / `close_scoped`. The event loop takes them after every
+  change; tests read them. What a thread of the loop's finds comes back
+  through the model (`dictation_line`, `files_done`).
 - **Requests.** Issue every request whose answer matters through
   `model.requests.issue(owner, kind, conv, within, now)` (or `track` an id
   you made) with your `Owner` and a deadline (`requests::DEFAULT_WITHIN`
