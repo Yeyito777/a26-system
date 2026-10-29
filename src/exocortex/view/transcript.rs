@@ -43,9 +43,7 @@ use super::blocks::{
 use super::markdown_layout::{md_gap, state_key};
 use super::media::{Strip, lay_strip};
 use super::ops::{Laid, draw_ops, px, quantized};
-use super::tools::{
-    Child, Output, expandable, lay_tool, output_state, subagent_child, tool_run,
-};
+use super::tools::{Child, Output, expandable, lay_tool, output_state, subagent_child, tool_run};
 use super::{CHAT_TOP, ViewState, hash_of, transcript_bounds};
 
 /// What a placed piece belongs to (what a long press on it opens).
@@ -3761,10 +3759,14 @@ mod tests {
             )
         };
         let user = |text: &str, at: u64| {
-            format!(r#"{{"type":"user","text":"{text}","metadata":{{"startedAt":{at},"model":"m","tokens":0}}}}"#)
+            format!(
+                r#"{{"type":"user","text":"{text}","metadata":{{"startedAt":{at},"model":"m","tokens":0}}}}"#
+            )
         };
         let wake = |text: &str, at: u64, kind: &str| {
-            format!(r#"{{"type":"user","text":"{text}","metadata":{{"startedAt":{at},"model":"m","tokens":0,"automation":{{"kind":"{kind}","sourceId":"kid"}}}}}}"#)
+            format!(
+                r#"{{"type":"user","text":"{text}","metadata":{{"startedAt":{at},"model":"m","tokens":0,"automation":{{"kind":"{kind}","sourceId":"kid"}}}}}}"#
+            )
         };
         let calls = |prefix: &str, n: usize| -> String {
             (0..n)
@@ -3808,8 +3810,17 @@ mod tests {
         ]
         .join(",");
         let mut model = open_folded(&entries);
-        assert!(model.chat.loaded && !model.chat.entries.is_empty(), "{:?}", serde_json::from_str::<serde_json::Value>(&format!("[{entries}]")).err());
-        feed(&mut model, &[r#"{"type":"conversation_updated","summary":{"id":"kid","provider":"anthropic","model":"m","effort":"low","title":"Timeline agent","pinned":false,"sortOrder":1,"streaming":false,"unread":false,"parentConversationId":"c"}}"#]);
+        assert!(
+            model.chat.loaded && !model.chat.entries.is_empty(),
+            "{:?}",
+            serde_json::from_str::<serde_json::Value>(&format!("[{entries}]")).err()
+        );
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"conversation_updated","summary":{"id":"kid","provider":"anthropic","model":"m","effort":"low","title":"Timeline agent","pinned":false,"sortOrder":1,"streaming":false,"unread":false,"parentConversationId":"c"}}"#,
+            ],
+        );
         model.ops.external_styles = vec![crate::exocortex::proto::ExternalToolStyle {
             cmd: "gmail".into(),
             label: "Gmail".into(),
@@ -3831,15 +3842,26 @@ mod tests {
         save(&canvas, "p1-opened.png");
         // All work shown: bash segments in their tools' colours, the subagent.
         model.persist.update_settings(|s| s.show_all_work = true);
-        feed(&mut model, &[r#"{"type":"history_updated","convId":"c","entries":[],"historyStartIndex":11}"#]);
-        let long = (0..20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\\n");
+        feed(
+            &mut model,
+            &[r#"{"type":"history_updated","convId":"c","entries":[],"historyStartIndex":11}"#],
+        );
+        let long = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\\n");
         let more = format!(
             r#"{},{{"type":"ai","blocks":[{{"type":"tool_call","toolCallId":"x","toolName":"exo","input":{{"subagent":"Build the timeline view and its tests","args":{{"model":"opus","effort":"xhigh"}}}},"summary":"subagent"}},{{"type":"tool_result","toolCallId":"x","toolName":"exo","output":"{{\"conversation_id\":\"kid\"}}","isError":false}},{{"type":"tool_call","toolCallId":"r","toolName":"Read","input":{{}},"summary":"{long}"}},{{"type":"tool_result","toolCallId":"r","toolName":"Read","output":"","isError":false}},{{"type":"tool_call","toolCallId":"g","toolName":"bash","input":{{"command":"x"}},"summary":"cd ~/mail && gmail search newer_than:1d | head -5 && echo done"}},{{"type":"tool_result","toolCallId":"g","toolName":"bash","output":"","isError":false}}],{}}}"#,
             user("Delegate the timeline", 70_000),
             meta(70_001, 71_000)
         );
         let mut model2 = open_with(&more);
-        feed(&mut model2, &[r#"{"type":"conversation_updated","summary":{"id":"kid","provider":"anthropic","model":"m","effort":"low","title":"Timeline agent","pinned":false,"sortOrder":1,"streaming":false,"unread":false,"parentConversationId":"c"}}"#]);
+        feed(
+            &mut model2,
+            &[
+                r#"{"type":"conversation_updated","summary":{"id":"kid","provider":"anthropic","model":"m","effort":"low","title":"Timeline agent","pinned":false,"sortOrder":1,"streaming":false,"unread":false,"parentConversationId":"c"}}"#,
+            ],
+        );
         model2.ops.external_styles = model.ops.external_styles.clone();
         model2.ops.styles_version += 1;
         let mut view = ViewState::new();

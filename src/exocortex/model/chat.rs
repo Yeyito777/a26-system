@@ -1113,6 +1113,7 @@ impl Model {
                     self.chat.expanded.insert(key.clone());
                 }
                 self.keep_toggle(&key, on);
+                self.ui.haptic(super::super::ui::Haptic::Selection);
                 let defaults = Disclosure::of(&self.persist);
                 if self.chat.is_open(&key, defaults)
                     && let Some(tool) = key.strip_prefix("tool:")

@@ -11,7 +11,6 @@
 //! Offsets are bytes where the TS counts UTF-16 units: the shell syntax is
 //! ASCII, so both find the same places. Whitespace is JavaScript's (`\s`,
 //! `trim`), not Rust's.
-#![allow(dead_code)] // view/tools.rs calls it next.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
@@ -70,6 +69,8 @@ pub struct CallDisplay {
 
 /// What a collapsed call shows (`collapseToolCall`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+// The TUI's, kept with its tests (the view folds by laid-out rows).
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct Collapsed<'a> {
     pub visible: Cow<'a, [LogicalLine]>,
     /// Rows left out, for "… +N more lines"; 0 when all of it shows.
@@ -238,6 +239,8 @@ pub fn sanitize(text: &str) -> Cow<'_, str> {
 /// The TUI's collapse rule: shell calls always show in full; others over
 /// `COLLAPSE_AFTER_ROWS` rows (hard lines wrapped at `cols` characters) show
 /// their first `COLLAPSED_ROWS` until opened.
+// The TUI's, kept with its tests (the view folds by laid-out rows).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn collapse(display: &CallDisplay, cols: usize) -> Collapsed<'_> {
     let cols = cols.max(8);
     let rows = |hard: &str| hard.chars().count().div_ceil(cols).max(1);
@@ -413,6 +416,8 @@ impl Heredoc<'_> {
 /// `resolveToolDisplay`: for bash, the external tool its first real
 /// executable is; else the registry's style, an MCP server's name, or the
 /// tool's name.
+// The TUI's, kept with its tests (the view folds by laid-out rows).
+#[cfg_attr(not(test), allow(dead_code))]
 fn resolve_display<'a>(
     tool_name: &'a str,
     summary: &'a str,
