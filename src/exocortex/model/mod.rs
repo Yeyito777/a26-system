@@ -322,7 +322,7 @@ impl Model {
     }
 
     pub fn handle(&mut self, action: Action) -> Vec<Value> {
-        match action {
+        let commands = match action {
             Action::Nav(nav) => self.handle_nav(nav),
             Action::List(act) => self.handle_list(act),
             Action::Chat(act) => self.handle_chat(act),
@@ -333,7 +333,10 @@ impl Model {
                 self.handle_ui(act);
                 Vec::new()
             }
-        }
+        };
+        // The list shows a sent message and a new conversation at once (B).
+        self.list_observe(&commands);
+        commands
     }
 
     fn handle_nav(&mut self, nav: Nav) -> Vec<Value> {
@@ -1201,7 +1204,7 @@ mod tests {
         ))));
         assert_eq!(
             opened(&mut model),
-            vec!["menu: Next unread, Undo last deletion, Redo deletion, Settings"]
+            vec!["menu: Select chats, Next unread, Undo last deletion, Redo deletion, Settings"]
         );
     }
 }

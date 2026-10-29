@@ -38,7 +38,7 @@ lands), and scrolling up asks for the older page again.
 | Screen | Daemon traffic |
 | --- | --- |
 | The list | `conversations_list` (first page, then the rest), kept current by `conversation_updated`, `conversation_deleted`, `sidebar_items_reordered`, `sidebar_state_patched`, `conversation_moved`, `queue_updated` (queued counts) |
-| List commands | `pin_conversation`, `mark_conversation`, `mute_conversation`, `delete_conversation`, `pin_folder`, `mute_folder`, `delete_folder`, each followed by a `ping` with its reqId (`updateStatusOnly`); `rename_conversation`, `create_folder`, `rename_folder` (acked); `undo_delete`, `redo_delete` (answered by `conversation_restored` or a state patch); `list_conversations` to start over |
+| List commands | `pin_conversation`, `pin_folder`, `pin_sidebar_items`, `mark_conversation`, `mute_conversation`, `mute_folder`, `move_sidebar_items` (refused: a `conversations_list` with its reqId), `delete_conversation`, `delete_conversations`, `delete_folder`, each followed by a `ping` with its reqId (`updateStatusOnly`); `rename_conversation`, `create_folder` (with the items to move in), `rename_folder` (acked); `clone_conversation`, `undo_delete`, `redo_delete` (answered by `conversation_restored` or a state patch); `load_folder_instructions`, `set_folder_instructions`; `list_conversations` to start over (pull to refresh, Retry) |
 | A conversation | `load_conversation` with `turns`, the `viewport` and an `initialBackfill` (which subscribes and marks it read): a window of about two screens, then the older page behind it from the same snapshot; older pages (15 turns) with `load_conversation_history` as the user scrolls up, joined where a page ends inside an entry; the stream (`streaming_started`, `block_start`, `text_chunk`, `thinking_chunk`, `streaming_sync`, `tool_call`, `tool_result`, `message_complete`, `streaming_stopped`, `user_message`, `system_message`, `history_updated`, whose `pendingAI: null` ends the live reply); after each stop the newest page again, so the history settles on the daemon's copy. Leaving it `unsubscribe`s. |
 | Sending | `send_message` (shown at once, confirmed by the daemon's `user_message` or `streaming_started` with the same `startedAt`); while it works, Send asks "Deliver message": **Next turn** (Steer now on other providers) or **Message end**, `queue_message` with that `timing` (shown as queued until delivered; sent directly if the turn ended meanwhile); a new conversation is `new_conversation` with its first message and only the draft's explicit model choices (in the folder whose "+" was tapped). Refused or unconfirmed in 20 s: the text goes back into the draft it came from, with the error above the composer |
 | The queue | a queued bubble tapped: Edit… (`update_queued_message`), deliver at the other timing, Edit in composer, Move earlier / later (`move_queued_message`), Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it). `/queue [target]` in a message puts it on the daemon's idle queue (`source: global-idle` with its `waitTarget`) |
@@ -64,10 +64,24 @@ streaming, warning waiting, success unread; a muted folder mutes what is in
 it) and badges (◆ subagents, $ background commands, ◷ Chrono), a folder with
 its count, unread badge and "+" for a new chat in it. The search field
 filters titles and folder names (results 160 ms after the last key). A long
-press opens a row's menu; deleting offers Undo. Most list commands answer
-nothing, so each is followed by a `ping` with its reqId: the daemon handles a
-client's commands in order, so a change the list does not show by the `pong`
-was not made, and the app says so and asks for the list again.
+press opens a row's menu (pin, mark and mute side by side; rename, emoji
+mark, move to folder, clone, select, copy id, delete; a folder's has its
+inspector, with its own instructions); deleting offers Undo. Select mode
+(the ⋯ menu's Select chats) checks rows and moves, pins, groups into a new
+folder or deletes them. Pulling the list down past the top asks for it
+again.
+
+A change shows at once (`list/pending.rs`): the fields it expects are
+projected over the daemon's values after every event until the daemon shows
+or answers them, so other traffic cannot flicker it back; placement follows
+the daemon's rules (a pin goes to the bottom of the pinned section, a move
+to the top of its folder's unpinned section). A message sent bumps its
+conversation and a new conversation shows at once (`Model::handle` shows
+the list what goes out, `list_observe`). Most list commands answer nothing,
+so each is followed by a `ping` with its reqId: the daemon handles a
+client's commands in order, so a change the daemon's state does not show by
+the `pong` was not made: it is taken back, the user told, and the list asked
+for again. An unanswered change goes after 10 s.
 
 The transcript is the iPhone's (roadmap §3.6.6–3.6.14, `fake-02…08`): the
 user's bubbles right-aligned with an accent rail (sent ones not yet echoed
@@ -254,7 +268,7 @@ the interfaces below. Every file's header says whose it is.
 | `view/mod.rs`, `view/frame.rs`, `view/ops.rs` | A | page composition and hit testing, the frame pipeline, laid-out pieces |
 | `model/mod.rs` | A | `Model`, `Action`, the pages, the connection, the event fan-out, `Ui` |
 | `proto/mod.rs`, `proto/fixtures.jsonl` | A | `Event`, `parse_event`, the bootstrap |
-| `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands, menus and prompts (`list/actions.rs`) |
+| `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands (`list/actions.rs`), changes shown before the daemon answers (`list/pending.rs`), menus, prompts and pickers (`list/menus.rs`), the folder inspector (`list/sheets.rs`) |
 | `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks, tables; images in the transcript, their cache and the viewer; the reader and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
 | `view/composer.rs`, `view/picker.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts, the mic, the command picker, commands and macros |
