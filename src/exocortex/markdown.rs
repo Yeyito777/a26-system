@@ -19,6 +19,9 @@ pub enum Style {
     Link,
     /// `~~struck through~~`.
     Strike,
+    /// Inline TeX (`$…$`, `\(…\)`, `$$…$$` within a line): the span's text
+    /// is its source, drawn as Unicode (`math.rs`).
+    Math,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -226,6 +229,8 @@ pub enum MdBlock {
         lines: Vec<String>,
     },
     Table(Table),
+    /// Display math (`$$…$$`, `\[…\]` starting a block): its TeX.
+    Math(String),
     Rule,
 }
 
@@ -306,6 +311,15 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
                 lang: String::new(),
                 lines: code,
             });
+            continue;
+        }
+        if let Some((tex, taken)) = display_math(trimmed, &mut lines.clone()) {
+            flush(&mut blocks, &mut paragraph, &mut quote);
+            list.clear();
+            for _ in 0..taken {
+                lines.next();
+            }
+            blocks.push(MdBlock::Math(tex));
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix('>') {
@@ -389,6 +403,121 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
     }
     flush(&mut blocks, &mut paragraph, &mut quote);
     blocks
+}
+
+/// Display math starting `line`: `$$…$$` or `\[…\]`, closed at the end of
+/// this line or a following one (no blank line between), its closer
+/// followed by nothing but spaces. Its TeX and how many more lines it took.
+fn display_math<'a>(
+    line: &str,
+    rest: &mut impl Iterator<Item = &'a str>,
+) -> Option<(String, usize)> {
+    let (open, close) = if line.starts_with("$$") && !line.starts_with("$$$") {
+        ("$$", "$$")
+    } else if line.starts_with("\\[") {
+        ("\\[", "\\]")
+    } else {
+        return None;
+    };
+    let mut tex = String::new();
+    let mut current = &line[open.len()..];
+    let mut taken = 0;
+    loop {
+        if let Some(at) = current.find(close) {
+            if !current[at + close.len()..].trim().is_empty() {
+                return None;
+            }
+            tex.push_str(&current[..at]);
+            let tex = tex.trim().to_owned();
+            return (!tex.is_empty()).then_some((tex, taken));
+        }
+        tex.push_str(current);
+        tex.push('\n');
+        current = rest.next()?;
+        if current.trim().is_empty() {
+            return None;
+        }
+        taken += 1;
+    }
+}
+
+/// Whether `$content$` reads as math, not prose (the TUI's
+/// `likelyDollarMath`): "$5 and $10" and "$HOME and $PATH" stay text.
+fn likely_math(content: &str) -> bool {
+    if content.is_empty()
+        || content.starts_with(char::is_whitespace)
+        || content.ends_with(char::is_whitespace)
+        || content.contains('\n')
+    {
+        return false;
+    }
+    let first_digit = content.starts_with(|c: char| c.is_ascii_digit());
+    if first_digit
+        && (content
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ',' || c == '.')
+            || content.contains(','))
+    {
+        return false;
+    }
+    let words: Vec<&str> = content.split_whitespace().collect();
+    let plain_words = words.len() > 1
+        && words[0].chars().all(|c| c.is_ascii_alphabetic())
+        && words[1..]
+            .iter()
+            .all(|w| w.chars().all(|c| c.is_ascii_alphanumeric()))
+        && content.split(char::is_whitespace).all(|w| !w.is_empty());
+    if plain_words || content.contains(['"', '`']) {
+        return false;
+    }
+    content.chars().any(|c| {
+        c.is_ascii_alphanumeric()
+            || ('α'..='ω').contains(&c)
+            || ('Α'..='Ω').contains(&c)
+            || "\\_^=+*/<>()[]{}|−∞∑∫".contains(c)
+    })
+}
+
+/// Where inline math starting at `at` (`$`, `$$`, `\(`) ends: its TeX and
+/// the offset after its closer.
+fn inline_math(text: &str, at: usize) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    let line_end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+    if text[at..].starts_with("\\(") {
+        let close = text[at + 2..line_end].find("\\)")? + at + 2;
+        let tex = &text[at + 2..close];
+        return (!tex.trim().is_empty()).then_some((tex, close + 2));
+    }
+    if text[at..].starts_with("$$") {
+        if text[at..].starts_with("$$$") {
+            return None;
+        }
+        let close = text[at + 2..line_end].find("$$")? + at + 2;
+        let tex = &text[at + 2..close];
+        return (!tex.trim().is_empty()).then_some((tex, close + 2));
+    }
+    // `$…$`: not right after a word, quote or `=` (shell, US$5), the closer
+    // on the same line, not followed by `$`, a digit or `_`.
+    if at > 0
+        && matches!(bytes[at - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'"' | b'\'' | b'=' | b'/')
+    {
+        return None;
+    }
+    let mut j = at + 1;
+    let close = loop {
+        if j >= line_end {
+            return None;
+        }
+        if bytes[j] == b'$' && bytes[j - 1] != b'\\' {
+            break j;
+        }
+        j += 1;
+    };
+    if matches!(bytes.get(close + 1), Some(b'$' | b'0'..=b'9' | b'_')) {
+        return None;
+    }
+    let tex = &text[at + 1..close];
+    likely_math(tex).then_some((tex, close + 1))
 }
 
 /// Leading whitespace in columns (a tab is four).
@@ -710,6 +839,17 @@ fn parse_inline(text: &str, style: Style, out: &mut Vec<Span>) {
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
+        // Inline math (not inside code or a link's label).
+        if (c == b'$' || (c == b'\\' && bytes.get(i + 1) == Some(&b'(')))
+            && style != Style::Code
+            && let Some((tex, end)) = inline_math(text, i)
+        {
+            push(out, &text[plain_start..i], style);
+            out.push(Span::new(tex.trim(), Style::Math));
+            i = end;
+            plain_start = i;
+            continue;
+        }
         match c {
             b'\\' if i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() => {
                 push(out, &text[plain_start..i], style);
@@ -963,7 +1103,7 @@ mod tests {
 
     #[test]
     fn the_iphones_rich_transcript() {
-        let text = "## Summary\n\nThe report says revenue **grew 12%** and costs *fell*; see [the dashboard](https://example.com/q3) and [notes](./docs/q3-notes.md).\n\n- [x] Tests pass (104)\n- [ ] Gmail needs re-auth\n  - nested detail\n\n> Costs are seasonal.\n\nInline math $E = mc^2$ and money: $5 and $10.\n\n```ts\nexport function grow(rate: number): number {\n  // compound\n}\n```\n\n| Metric | Q2 | Q3 |\n|:--|--:|--:|\n| Revenue | 100 | 112 |\n| Costs | 80 | 76 |\n\n---\n\nDone.";
+        let text = "## Summary\n\nThe report says revenue **grew 12%** and costs *fell*; see [the dashboard](https://example.com/q3) and [notes](./docs/q3-notes.md).\n\n- [x] Tests pass (104)\n- [ ] Gmail needs re-auth\n  - nested detail\n\n> Costs are seasonal.\n\nInline math $E = mc^2$ and money: $5 and $10.\n\n$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\n```ts\nexport function grow(rate: number): number {\n  // compound\n}\n```\n\n| Metric | Q2 | Q3 |\n|:--|--:|--:|\n| Revenue | 100 | 112 |\n| Costs | 80 | 76 |\n\n---\n\nDone.";
         let kinds: Vec<&str> = parse(text)
             .iter()
             .map(|b| match b {
@@ -973,13 +1113,14 @@ mod tests {
                 MdBlock::Quote(_) => "quote",
                 MdBlock::Code { .. } => "code",
                 MdBlock::Table(_) => "table",
+                MdBlock::Math(_) => "math",
                 MdBlock::Rule => "hr",
             })
             .collect();
         assert_eq!(
             kinds,
             [
-                "h", "p", "li", "li", "li", "quote", "p", "code", "table", "hr", "p"
+                "h", "p", "li", "li", "li", "quote", "p", "math", "code", "table", "hr", "p"
             ]
         );
     }
@@ -988,7 +1129,7 @@ mod tests {
     /// block but the one still growing is already what it will be.
     #[test]
     fn a_streaming_prefix_only_changes_its_last_block() {
-        let full = "## Summary\n\nRevenue **grew 12%**; see [it](https://x.y).\n\n- [x] Tests pass\n- [ ] Gmail\n  - nested\n\n> Costs are seasonal.\n\n```ts\nexport function grow() {\n  return 1;\n}\n```\n\n| Metric | Q2 |\n|:--|--:|\n| Revenue | 100 |\n\n~~~\nt\n~~~\n\n    indented\n\n---\n\nDone.";
+        let full = "## Summary\n\nRevenue **grew 12%**; see [it](https://x.y).\n\n- [x] Tests pass\n- [ ] Gmail\n  - nested\n\n> Costs are seasonal.\n\nMath $x^2$ here.\n\n$$\\frac{a}{b}$$\n\n```ts\nexport function grow() {\n  return 1;\n}\n```\n\n| Metric | Q2 |\n|:--|--:|\n| Revenue | 100 |\n\n~~~\nt\n~~~\n\n    indented\n\n---\n\nDone.";
         let done = parse(full);
         let cuts: Vec<usize> = full
             .char_indices()
@@ -1009,6 +1150,54 @@ mod tests {
 
     fn span(text: &str, style: Style) -> Span {
         Span::new(text, style)
+    }
+
+    #[test]
+    fn math_inline_and_display_with_the_currency_guard() {
+        assert_eq!(
+            inline("Inline math $E = mc^2$ and money: $5 and $10."),
+            vec![
+                span("Inline math ", Style::Plain),
+                span("E = mc^2", Style::Math),
+                span(" and money: $5 and $10.", Style::Plain),
+            ]
+        );
+        assert_eq!(
+            inline("$HOME and $PATH"),
+            vec![span("$HOME and $PATH", Style::Plain)]
+        );
+        assert_eq!(
+            inline("US$5 or $33,055"),
+            vec![span("US$5 or $33,055", Style::Plain)]
+        );
+        assert_eq!(
+            inline("by \\(x_1\\) and $$y^2$$ here"),
+            vec![
+                span("by ", Style::Plain),
+                span("x_1", Style::Math),
+                span(" and ", Style::Plain),
+                span("y^2", Style::Math),
+                span(" here", Style::Plain),
+            ]
+        );
+        assert_eq!(
+            inline("`$x$` \\$5"),
+            vec![span("$x$", Style::Code), span(" $5", Style::Plain)]
+        );
+        assert_eq!(
+            parse("Before\n\n$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\nAfter"),
+            vec![
+                MdBlock::Paragraph(vec![span("Before", Style::Plain)]),
+                MdBlock::Math("\\int_0^1 x^2\\,dx = \\frac{1}{3}".into()),
+                MdBlock::Paragraph(vec![span("After", Style::Plain)]),
+            ]
+        );
+        assert_eq!(
+            parse("\\[\na + b\n\\]"),
+            vec![MdBlock::Math("a + b".into())]
+        );
+        // Unclosed (streaming): text until it closes.
+        assert!(matches!(&parse("$$\\int")[0], MdBlock::Paragraph(_)));
     }
 
     fn link(text: &str, target: &str) -> Span {

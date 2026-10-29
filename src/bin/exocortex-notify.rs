@@ -324,6 +324,7 @@ fn reply_body(entries: &[Entry]) -> String {
             }
             markdown::MdBlock::Code { lines, .. } => lines.join(" "),
             markdown::MdBlock::Table(table) => table.text(),
+            markdown::MdBlock::Math(tex) => tex,
             markdown::MdBlock::Rule => String::new(),
         })
         .collect();

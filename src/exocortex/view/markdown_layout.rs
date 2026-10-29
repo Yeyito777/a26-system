@@ -12,11 +12,12 @@ use crate::gfx::{RectF, Rgb};
 use crate::text::{self, Weight};
 
 use super::super::markdown::{self, LinkKind, MdBlock, Span, Style, link_kind};
+use super::super::math;
 use super::super::model::rich::Rich;
-use super::super::model::{Action, rich};
+use super::super::model::{Action, UiAct, rich};
 use super::super::theme::{
     self, HAIRLINE, LIST_INDENT, MARKDOWN_GAP, MARKER_GAP, QUOTE_BAR, QUOTE_INDENT, T_BODY,
-    T_CAPTION, T_CODE, T_H1, T_H2, T_H3, T_H4, T_INLINE_CODE,
+    T_CAPTION, T_CODE, T_H1, T_H2, T_H3, T_H4, T_INLINE_CODE, T_SMALL, TARGET,
 };
 use super::code;
 use super::ops::{self, Laid, Op};
@@ -55,7 +56,7 @@ pub fn font(style: Style, size: f32) -> (Weight, f32, Rgb) {
             p.secondary_accent,
         ),
         Style::Link => (Weight::Mono, size, p.link),
-        Style::Strike => (Weight::Mono, size, p.text),
+        Style::Strike | Style::Math => (Weight::Mono, size, p.text),
     }
 }
 
@@ -106,7 +107,15 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
     let mut after_space = true;
     for span in spans {
         let (weight, fsize, _) = font(span.style, size);
-        for (index, part) in span.text.split('\n').enumerate() {
+        // Inline math is drawn as its Unicode rendering.
+        let rendered;
+        let text = if span.style == Style::Math {
+            rendered = math::inline(&span.text);
+            rendered.as_str()
+        } else {
+            span.text.as_str()
+        };
+        for (index, part) in text.split('\n').enumerate() {
             if index > 0 {
                 finish(&mut lines, &mut line, &mut x);
                 after_space = true;
@@ -487,6 +496,9 @@ fn block_into(
         MdBlock::Table(grid) => {
             y = table::lay(laid, grid, x, width, y);
         }
+        MdBlock::Math(tex) => {
+            y = lay_display_math(laid, tex, x, width, y);
+        }
         MdBlock::Rule => {
             laid.ops.push(ops::rect(
                 RectF::new(x, y + 12.0, width, HAIRLINE),
@@ -496,6 +508,118 @@ fn block_into(
         }
     }
     y
+}
+
+/// Display math (§3.6.7): its rows in a monospaced grid (as the TUI lays
+/// them out), centred, scrolled sideways when wider than the transcript;
+/// "Copy LaTeX" under it. Returns the bottom.
+fn lay_display_math(laid: &mut Laid, tex: &str, x: f32, width: f32, top: f32) -> f32 {
+    let p = theme::p();
+    let size = BODY;
+    let line_h = (size * 1.3).round();
+    let cell = text::measure("M", Weight::Mono, size).max(1.0);
+    let columns = (width / cell).floor().max(8.0) as usize;
+    let rows = math::display(tex, columns);
+    let cols = rows
+        .iter()
+        .map(|row| row.chars().count())
+        .max()
+        .unwrap_or(0);
+    let grid_w = cols as f32 * cell;
+    let left = if grid_w <= width {
+        x + ((width - grid_w) / 2.0).round()
+    } else {
+        x
+    };
+    let mut row_ops = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let baseline = top + index as f32 * line_h + (line_h + size * 0.74) / 2.0;
+        grid_text(&mut row_ops, row, left, baseline, size, cell, p.text);
+    }
+    let h = rows.len().max(1) as f32 * line_h;
+    if grid_w > width {
+        let key = super::super::images::hash_of(("math", tex));
+        laid.ops.push(Op::Clip {
+            rect: RectF::new(x, top - 8.0, width, h + 16.0),
+            xscroll: Some(key),
+            yscroll: None,
+            ops: row_ops,
+        });
+        laid.xmax.push((key, (grid_w - width).ceil()));
+    } else {
+        laid.ops.extend(row_ops);
+    }
+    // "Copy LaTeX", a target under it.
+    let ty = T_SMALL;
+    let y = top + h + 4.0;
+    let label = "Copy LaTeX";
+    let label_w = text::measure(label, ty.weight, ty.px());
+    laid.ops.push(ops::text(
+        x + 6.0,
+        y + (TARGET + ty.px() * 0.74) / 2.0,
+        label,
+        ty.weight,
+        ty.px(),
+        p.muted,
+    ));
+    laid.hits.push((
+        RectF::new(x, y, (label_w + 12.0).max(TARGET), TARGET),
+        Action::Ui(UiAct::Copy(tex.to_owned())),
+    ));
+    y + TARGET
+}
+
+/// A row of a monospaced grid: ASCII runs as text, every other character
+/// in its own cell (glyphs from fallback fonts are not a cell wide).
+fn grid_text(
+    ops: &mut Vec<Op>,
+    row: &str,
+    left: f32,
+    baseline: f32,
+    size: f32,
+    cell: f32,
+    color: Rgb,
+) {
+    let mut run = String::new();
+    let mut run_start = 0;
+    let mut column = 0;
+    let flush = |ops: &mut Vec<Op>, run: &mut String, start: usize| {
+        if !run.trim().is_empty() {
+            ops.push(ops::text(
+                left + start as f32 * cell,
+                baseline,
+                std::mem::take(run),
+                Weight::Mono,
+                size,
+                color,
+            ));
+        }
+        run.clear();
+    };
+    for c in row.chars() {
+        if c.is_ascii() {
+            if run.is_empty() {
+                run_start = column;
+            }
+            run.push(c);
+        } else {
+            flush(ops, &mut run, run_start);
+            if !c.is_whitespace() {
+                let glyph = c.to_string();
+                let w = text::measure(&glyph, Weight::Mono, size);
+                ops.push(ops::text(
+                    (left + column as f32 * cell + (cell - w) / 2.0).round(),
+                    baseline,
+                    glyph,
+                    Weight::Mono,
+                    size,
+                    color,
+                ));
+            }
+        }
+        column += 1;
+    }
+    flush(ops, &mut run, run_start);
 }
 
 /// Monospaced lines in a box (code, a tool's input or output), broken at
