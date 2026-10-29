@@ -123,6 +123,9 @@ pub(crate) struct CachedPlan {
 pub struct TranscriptView {
     /// The jump button: shown or not, and the fade since.
     jump: Option<(bool, Tween)>,
+    /// The scroll offset the last frame showed (the button waits for the
+    /// transcript to stop moving).
+    last_offset: Option<f32>,
     /// The transcript's rows at the last frame (for `animate`).
     bounds: (f32, f32),
 }
@@ -1273,13 +1276,19 @@ pub(crate) fn frame(
     view.transcript.bounds = (top, bottom);
     let max = (view.layout.height - (bottom - top)).max(0.0);
     let loading = model.chat.older_request.is_some() || !model.chat.loaded;
-    let wanted = max - offset > JUMP_THRESHOLD && !loading;
+    // Not while the transcript moves under it (a drag, a fling): a floating
+    // button over moving rows would cost its rows in every frame. It fades
+    // in once the transcript is still, and goes at once.
+    let moving = view.transcript.last_offset.is_some_and(|last| last != offset)
+        || view.chat_scroll.dragging();
+    view.transcript.last_offset = Some(offset);
+    let wanted = max - offset > JUMP_THRESHOLD && !loading && !moving;
     let shown = view.transcript.jump.as_ref().is_some_and(|(on, _)| *on);
-    if wanted != shown {
-        let from = jump_alpha(view, now) as f32 / 32.0;
-        let to = if wanted { 1.0 } else { 0.0 };
-        let tween = Tween::new(now, JUMP_FADE, from, to);
-        view.transcript.jump = Some((wanted, tween));
+    if wanted && !shown {
+        let tween = Tween::new(now, JUMP_FADE, 0.0, 1.0);
+        view.transcript.jump = Some((true, tween));
+    } else if !wanted && shown {
+        view.transcript.jump = None;
     }
     let jump = jump_alpha(view, now);
     let rect = jump_rect(bottom);
@@ -2049,6 +2058,8 @@ mod tests {
         );
         view.chat_scroll.offset = max - 400.0;
         chat_frame(&model, &mut view, None, HEIGHT, t0);
+        assert_eq!(jump_alpha(&view, t0 + JUMP_FADE), 0, "not while it moves");
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
         let shown = t0 + JUMP_FADE;
         assert_eq!(jump_alpha(&view, shown), 32);
         // Its tap jumps to the newest message.
@@ -2074,7 +2085,7 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_under_the_jump_button_matches_a_full_redraw() {
+    fn the_jump_button_steps_aside_while_the_transcript_moves() {
         let mut model = open_with(&long_entries(16));
         let mut view = ViewState::new();
         let t0 = Instant::now();
@@ -2082,18 +2093,27 @@ mod tests {
         view.follow = false;
         view.chat_scroll.offset = (max / 2.0).round();
         chat_frame(&model, &mut view, None, HEIGHT, t0);
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
         let t = t0 + JUMP_FADE;
-        for to in [37.0, -20.0, 5.0, 120.0] {
+        assert_eq!(jump_alpha(&view, t), 32);
+        // The first step of a scroll takes it away (its rows drawn once).
+        let damage = update(&mut model, &mut view, (t, t), |_, view| {
+            view.chat_scroll.offset += 37.0;
+        });
+        assert!(damage.moved.is_some());
+        assert_eq!(jump_alpha(&view, t), 0);
+        // Then a scroll costs only the strip it uncovers.
+        for step in [-20.0, 5.0, 120.0] {
             let damage = update(&mut model, &mut view, (t, t), |_, view| {
-                view.chat_scroll.offset += to;
+                view.chat_scroll.offset += step;
             });
-            assert!(damage.moved.is_some());
-            // The strip the move uncovered and the button's rows.
-            assert!(
-                rows(&damage) <= to.abs() as i32 + 122 + 2 * 44 + 11 + 2 * to.abs() as i32 + 4,
-                "{damage:?}"
-            );
+            assert!(rows(&damage) <= step.abs() as i32 + 2, "{damage:?}");
         }
+        // Still again: it fades back in, in its own columns.
+        let damage = update(&mut model, &mut view, (t, t + JUMP_FADE), |_, _| {});
+        assert!(damage.moved.is_none());
+        assert!(rows(&damage) <= 122 + 2 * 44 + 11 + 4, "{damage:?}");
+        assert_eq!(jump_alpha(&view, t + JUMP_FADE), 32);
     }
 
     #[test]
