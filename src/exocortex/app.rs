@@ -25,7 +25,7 @@ use crate::present::Presenter;
 use super::anim;
 use super::clipboard;
 use super::dictation;
-use super::gesture::{Axis, Gesture, Recognizer};
+use super::gesture::{self, Axis, Gesture, Recognizer};
 use super::handoff;
 use super::line::{self, Waker};
 use super::link::{DaemonLink, LinkEvent};
@@ -233,6 +233,9 @@ struct Input {
     dragging: Option<ScrollArea>,
     /// The horizontal scroller a sideways drag moves, and the finger's last x.
     sideways: Option<(u64, f32)>,
+    /// A sideways drag nothing on the page took: a page swipe from here
+    /// (PAR-001), decided when the finger lifts.
+    page_swipe: Option<(f32, f32)>,
     /// The inner scroller a vertical drag moves (a tall table's rows, C1),
     /// and the finger's last y.
     inner: Option<(u64, f32)>,
@@ -518,6 +521,8 @@ impl Context<'_> {
                 if let Some((key, last)) = &mut self.input.sideways {
                     view::horizontal_drag(self.view, *key, x - *last);
                     *last = x;
+                } else if self.input.editing.is_none() {
+                    self.input.page_swipe = Some((start_x, start_y));
                 }
                 true
             }
@@ -561,7 +566,18 @@ impl Context<'_> {
                 }
                 true
             }
-            Gesture::DragEnd { axis, .. } => {
+            Gesture::DragEnd {
+                axis, x, y, vx, vy, ..
+            } => {
+                if let Some((start_x, start_y)) = self.input.page_swipe.take() {
+                    match gesture::page_swipe(x - start_x, y - start_y, vx, vy, self.width) {
+                        Some(gesture::Page::Back) if self.model.page != Page::Settings => {
+                            self.perform(Action::Nav(Nav::Back));
+                        }
+                        Some(gesture::Page::Forward) => self.forward(),
+                        _ => {}
+                    }
+                }
                 if axis == Axis::Vertical {
                     match self.input.dragging.take() {
                         Some(ScrollArea::List) => {
@@ -605,11 +621,26 @@ impl Context<'_> {
                 let changed = self.input.pressed.is_some();
                 self.input.pressed = None;
                 self.input.editing = None;
+                self.input.page_swipe = None;
                 if !self.view.overlays.has_modal() {
                     self.view.lifted = None;
                 }
                 changed
             }
+        }
+    }
+
+    /// A page swipe to the left: Settings to the list, the list to the
+    /// conversation it last showed (as the iPhone's pager keeps it).
+    fn forward(&mut self) {
+        match self.model.page {
+            Page::Settings => self.perform(Action::Nav(Nav::CloseSettings)),
+            Page::List => {
+                if let Some(id) = self.model.sidebar.selected.clone() {
+                    self.perform(Action::Nav(Nav::OpenConversation(id)));
+                }
+            }
+            Page::Chat => {}
         }
     }
 
