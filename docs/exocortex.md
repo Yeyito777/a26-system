@@ -102,28 +102,15 @@ are discarded.
   about 6 ms a face on a fast core), the ones the first frame does not use on
   other threads at start.
 
-On the A26 (sandboxed Moon, the user's real conversations): the longest
-conversation (EXO, 790 KB of history) opened in 9.8 s before this and opens in
-about 20 ms now (a reopened one draws in about 15 ms); its whole history lays
-out in 61 ms, a re-layout after a change takes 0.2 ms; streaming frames draw
-and present in 2.2 ms on average, scrolling frames in 2.2 ms (p95 3.5 ms).
-
-Drawing is the System app's CPU canvas and `Presenter`. Layout is cached per
-history entry, so a streaming reply lays out only itself, and every vertical
-position is snapped to 1/16 px so that moving drawn pixels by whole rows gives
-exactly what drawing them there would. A frame is drawn incrementally when
-the last one is known (`view::ChatFrame`, `ListFrame`): a scroll moves the
-transcript's (or list's) rows on the canvas and, with `Presenter::scroll`,
-in the server's pixmap, then draws only the uncovered strip; a reply that
-grows, a press, the working dots, the bar and the composer redraw only
-their rows (from the first op of the reply that changed). The presenter then
-compares and uploads only those rows (`Presenter::present_rows`); rows moved
-on the server are marked stale rather than moved in its shadow too, and are
-uploaded, not compared, when next drawn. Tests check each kind of
-incremental frame against a full redraw, pixel for pixel, and that nothing
-changed outside its damage. `EXOCORTEX_APP_VERIFY=1` makes the app check
-every incremental frame against a full redraw at run time and log any
-difference (development only: it costs a full draw per frame).
+Measured on the A26 (Moon in a sandbox on a hidden Xorg, the user's real
+daemon and conversations; before, then after this work): opening the longest
+conversation (EXO, 82 entries, over 790 KB of history) 11.9 s, then 17 ms to
+its first frame with messages (10 ms reopened); a short one 84-94 ms, then
+13 ms (10 ms reopened). Drag-scrolling EXO, draw and present per frame: mean
+4.0 ms, p95 7.9 ms, then 2.4 ms, p95 3.7 ms. A streaming reply: mean 7.1 ms,
+p95 21.9 ms, then 3.5 ms, p95 15 ms. Back in front after 30 s frozen while a
+reply streamed: first frame in 14 ms, caught up in 27 ms. The list on a cold
+start: about 95 ms after the process starts, both.
 
 ## Notifications: `exocortex-notify`
 
