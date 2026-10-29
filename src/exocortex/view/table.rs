@@ -104,8 +104,12 @@ pub fn lay(laid: &mut Laid, table: &Table, x: f32, width: f32, top: f32) -> f32 
         RectF::new(x, body_top - HAIRLINE, grid_w, HAIRLINE),
         c.rule_table,
     ));
+    // Links in cells: tap targets in the grid's content.
+    let mut header_links = Vec::new();
+    let mut body_links = Vec::new();
     cells(
         &mut grid,
+        &mut header_links,
         &header,
         &table.align,
         x,
@@ -129,7 +133,16 @@ pub fn lay(laid: &mut Laid, table: &Table, x: f32, width: f32, top: f32) -> f32 
     let mut body = Vec::new();
     let mut y = body_top;
     for (row, h) in &rows {
-        cells(&mut body, row, &table.align, x, y, col_w, None);
+        cells(
+            &mut body,
+            &mut body_links,
+            row,
+            &table.align,
+            x,
+            y,
+            col_w,
+            None,
+        );
         body.push(ops::rect(
             RectF::new(x, y + h - HAIRLINE, grid_w, HAIRLINE),
             c.rule_table,
@@ -173,6 +186,27 @@ pub fn lay(laid: &mut Laid, table: &Table, x: f32, width: f32, top: f32) -> f32 
         grid.extend(body);
     }
     let overflow = (grid_w - view_w).ceil();
+    let xkey = (overflow > 0.0).then_some(key);
+    let grid_clip = RectF::new(x, top, view_w, grid_h);
+    let body_clip = RectF::new(x, body_top, view_w, body_h);
+    for (links, clip, ykey) in [
+        (header_links, grid_clip, None),
+        (body_links, body_clip, tall.then(|| rows_key(key))),
+    ] {
+        for (rect, action) in links {
+            if xkey.is_none() && ykey.is_none() {
+                laid.hits.push((rect, action));
+            } else {
+                laid.scrolled_hits.push(ops::ScrolledHit {
+                    clip,
+                    xscroll: xkey,
+                    yscroll: ykey,
+                    rect,
+                    action,
+                });
+            }
+        }
+    }
     if overflow > 0.0 {
         laid.ops.push(Op::Clip {
             rect: RectF::new(x, top, view_w, grid_h),
@@ -230,6 +264,7 @@ fn bold(span: &Span) -> Span {
 #[allow(clippy::too_many_arguments)]
 fn cells(
     ops: &mut Vec<Op>,
+    links: &mut Vec<(RectF, Action)>,
     row: &[Vec<Vec<Run>>],
     align: &[Align],
     x: f32,
@@ -275,6 +310,16 @@ fn cells(
                     color,
                     alpha: if run.style == Style::Strike { 0.6 } else { 1.0 },
                 });
+                if let (Style::Link, Some(link)) = (run.style, &run.link) {
+                    ops.push(ops::rect(
+                        RectF::new(rx, (base + 4.0).round(), run.w, HAIRLINE),
+                        c.link_underline,
+                    ));
+                    links.push((
+                        RectF::new(rx - 6.0, base - line_h * 0.7, run.w + 12.0, line_h),
+                        Action::Rich(rich::Act::OpenLink(link.to_string())),
+                    ));
+                }
             }
         }
     }
@@ -356,6 +401,28 @@ mod tests {
         let mut laid = Laid::default();
         lay(&mut laid, &t, 40.0, 1000.0, 0.0);
         assert!(laid.ymax.is_empty());
+    }
+
+    #[test]
+    fn links_in_a_scrolled_table_are_where_they_show() {
+        let t = table(
+            "| a | b | c | d |\n|---|---|---|---|\n| x | y | z | [far](https://far.example) |",
+        );
+        let mut laid = Laid::default();
+        lay(&mut laid, &t, 40.0, 1000.0, 0.0);
+        assert_eq!(laid.scrolled_hits.len(), 1);
+        let hit = &laid.scrolled_hits[0];
+        assert_eq!(hit.xscroll, Some(key(&t)));
+        let mut offsets = std::collections::HashMap::new();
+        let (cx, cy) = (hit.rect.x + 10.0, hit.rect.y + 10.0);
+        // The fourth column starts past the clip: not tappable until scrolled.
+        assert!(cx > 1040.0 && !hit.contains(cx, cy, &offsets));
+        offsets.insert(key(&t), 200.0);
+        assert!(hit.contains(cx - 200.0, cy, &offsets));
+        assert_eq!(
+            hit.action,
+            Action::Rich(rich::Act::OpenLink("https://far.example".into()))
+        );
     }
 
     #[test]

@@ -1778,6 +1778,12 @@ pub(crate) fn hit(
                 return Some(action.clone());
             }
         }
+        // Inside scrollers (links in tables, C1), where they are now.
+        for hit in &item.laid.scrolled_hits {
+            if hit.contains(x, y - iy, &view.xscroll) {
+                return Some(hit.action.clone());
+            }
+        }
     }
     None
 }
