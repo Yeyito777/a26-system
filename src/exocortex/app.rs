@@ -28,7 +28,7 @@ use super::gesture::{Axis, Gesture, Recognizer};
 use super::handoff;
 use super::line::{self, Waker};
 use super::link::{DaemonLink, LinkEvent};
-use super::model::{Action, Effect, Model, Nav, Page, chat, composer};
+use super::model::{Action, Effect, Model, Nav, Page, chat, composer, sidebar};
 use super::proto;
 use super::screens::settings;
 use super::store::{self, Store};
@@ -218,7 +218,7 @@ fn withdraw_notification(conversation: String) {
 fn page_depth(model: &Model) -> usize {
     match model.page {
         Page::Settings => 0,
-        Page::List => 1 + model.sidebar.path.len(),
+        Page::List => 1,
         Page::Chat => 100,
     }
 }
@@ -583,6 +583,11 @@ impl Context<'_> {
             }
             return true;
         }
+        // The list's search field (B).
+        if self.model.page == Page::List {
+            self.perform(Action::List(sidebar::Act::Key(input)));
+            return true;
+        }
         // The composer's (Moon's `multiline` keyboard: Return is a line
         // break and the keyboard stays up).
         if !self.model.composer_key(input) {
@@ -692,7 +697,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     while running {
         let now = Instant::now();
         let before_depth = page_depth(&model);
-        let before_folders = model.sidebar.path.len();
         let before_id = model.chat.id.clone();
         // The reader's place, kept when the transcript changes above it.
         let before_view = view.before(&model, now);
@@ -924,11 +928,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // A page change slides (Moon snapshots the old page first).
         let after_depth = page_depth(&model);
         if after_depth != before_depth {
-            // Each folder level opens at its top (one scroll serves them
-            // all); back from a chat, the list is where it was.
-            if model.sidebar.path.len() != before_folders {
-                view.list_scroll.reset();
-            }
             if model.page == Page::Chat {
                 view.chat_scroll.reset();
                 view.follow = true;
@@ -960,7 +959,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             let _ = handoff::write_view(showing.as_deref());
             shown = Some(showing);
         }
-        if model.page != Page::Chat && input.keyboard && !input.keyboard_for_overlay {
+        if model.page != Page::Chat
+            && input.keyboard
+            && !input.keyboard_for_overlay
+            && !model.list_keeps_keyboard()
+        {
             control::hide_keyboard();
             input.keyboard = false;
             view.keyboard = false;
@@ -968,6 +971,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
         // Keep the transcript where the user left it.
         view.settle(&model, before_view, height, now);
+        // Bring a revealed list row into view (B).
+        redraw |= view::list::settle(&mut model, &mut view, height, now);
         if model.page == Page::Chat && view.near_top(now) {
             for command in model.load_older() {
                 link.send(command);
