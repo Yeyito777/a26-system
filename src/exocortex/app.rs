@@ -30,6 +30,7 @@ use super::line::{self, Waker};
 use super::link::{DaemonLink, LinkEvent};
 use super::model::{Action, Effect, Model, Nav, Page, chat, composer};
 use super::proto;
+use super::screens::settings;
 use super::store::{self, Store};
 use super::theme;
 use super::ui::overlay::Response;
@@ -238,6 +239,8 @@ struct Input {
     keyboard: bool,
     /// …by an overlay (a prompt), which puts it away when it goes.
     keyboard_for_overlay: bool,
+    /// A drag the composer's editor took (a selection handle, its text).
+    editing: Option<view::composer::EditDrag>,
 }
 
 /// What acting on input needs.
@@ -256,7 +259,9 @@ impl Context<'_> {
     fn perform(&mut self, action: Action) {
         let depth = page_depth(self.model);
         match &action {
-            Action::Composer(composer::Act::Send) => self.view.follow = true,
+            Action::Composer(composer::Act::Send | composer::Act::Deliver(_)) => {
+                self.view.follow = true
+            }
             // The tapped row stays under the finger as it opens.
             Action::Chat(chat::Act::ToggleExpanded(_)) => self.view.follow = false,
             Action::Nav(_) if self.input.keyboard => self.hide_keyboard(),
@@ -306,6 +311,8 @@ impl Context<'_> {
                     self.view.follow = true;
                 }
                 Effect::HideKeyboard => self.hide_keyboard(),
+                Effect::Paste => self.model.paste_text(clipboard::paste()),
+                Effect::StatusBar => ui::status_bar(&theme::status_bar()),
             }
             changed = true;
         }
@@ -344,6 +351,30 @@ impl Context<'_> {
             }
         }
         let height = self.height;
+        // A drag on the composer's editor: a selection handle (or the
+        // caret) moved, or its text scrolled.
+        if let Gesture::DragStart {
+            x,
+            y,
+            start_x,
+            start_y,
+            edge: false,
+            ..
+        } = gesture
+            && self.model.page == Page::Chat
+            && let Some(drag) =
+                view::composer::drag_start(self.model, height, self.view.keyboard, start_x, start_y)
+        {
+            self.input.pressed = None;
+            self.view.lifted = None;
+            self.input.editing = Some(drag);
+            if let Some(action) =
+                view::composer::drag(self.model, height, self.view.keyboard, drag, x, y)
+            {
+                self.perform(action);
+            }
+            return true;
+        }
         match gesture {
             Gesture::Down { x, y } => {
                 self.input.pressed =
@@ -354,6 +385,35 @@ impl Context<'_> {
             Gesture::Lift { x, y } => {
                 self.view.lifted = view::liftable(self.model, self.view, height, x, y, now);
                 self.view.lifted.is_some()
+            }
+            Gesture::LongPressMove { x, y } => {
+                match view::long_press_move(self.model, self.view, height, x, y) {
+                    Some(action) => {
+                        self.perform(action);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            Gesture::LongPressEnd { .. } if self.model.composer.selecting => {
+                self.input.pressed = None;
+                self.perform(Action::Composer(composer::Act::EndSelect));
+                true
+            }
+            Gesture::Drag { x, y, .. } if self.input.editing.is_some() => {
+                if let Some(drag) = self.input.editing
+                    && let Some(action) =
+                        view::composer::drag(self.model, height, self.view.keyboard, drag, x, y)
+                {
+                    self.perform(action);
+                }
+                true
+            }
+            Gesture::DragEnd { .. } if self.input.editing.is_some() => {
+                if let Some(action) = self.input.editing.take().and_then(view::composer::drag_end) {
+                    self.perform(action);
+                }
+                true
             }
             Gesture::LongPress { x, y } => {
                 self.input.pressed = None;
@@ -405,7 +465,8 @@ impl Context<'_> {
                     }
                     Some(ScrollArea::Settings) => {
                         self.view.settings_scroll.begin(start_y, now);
-                        self.view.settings_scroll.moved(y, 0.0, now);
+                        let max = settings::max_scroll(self.model, height);
+                        self.view.settings_scroll.moved(y, max, now);
                     }
                     None => {}
                 }
@@ -451,7 +512,10 @@ impl Context<'_> {
                         self.view.list_scroll.moved(y, max, now);
                     }
                     Some(ScrollArea::Chat) => self.drag_chat(y, now),
-                    Some(ScrollArea::Settings) => self.view.settings_scroll.moved(y, 0.0, now),
+                    Some(ScrollArea::Settings) => {
+                        let max = settings::max_scroll(self.model, height);
+                        self.view.settings_scroll.moved(y, max, now);
+                    }
                     None => {}
                 }
                 true
@@ -478,7 +542,10 @@ impl Context<'_> {
                             let max = self.view.chat_max(self.model, height);
                             self.view.chat_scroll.end(max, now);
                         }
-                        Some(ScrollArea::Settings) => self.view.settings_scroll.end(0.0, now),
+                        Some(ScrollArea::Settings) => {
+                            let max = settings::max_scroll(self.model, height);
+                            self.view.settings_scroll.end(max, now);
+                        }
                         None => {}
                     }
                 }
@@ -491,10 +558,7 @@ impl Context<'_> {
                 self.view.lifted = None;
                 match view::hit(self.model, self.view, height, x as i16, y as i16, now) {
                     Some(Hit::Action(action)) => self.perform(action),
-                    Some(Hit::Composer) => {
-                        self.show_keyboard(KeyboardPurpose::Text);
-                        self.view.follow = true;
-                    }
+                    Some(Hit::Composer) => self.perform(Action::Composer(composer::Act::Focus)),
                     Some(Hit::Transcript) => self.hide_keyboard(),
                     None => {}
                 }
@@ -510,12 +574,12 @@ impl Context<'_> {
             Gesture::Cancel | Gesture::LongPressEnd { .. } => {
                 let changed = self.input.pressed.is_some();
                 self.input.pressed = None;
+                self.input.editing = None;
                 if !self.view.overlays.has_modal() {
                     self.view.lifted = None;
                 }
                 changed
             }
-            Gesture::LongPressMove { .. } => false,
         }
     }
 
@@ -545,22 +609,12 @@ impl Context<'_> {
             }
             return true;
         }
-        if self.model.page != Page::Chat {
+        // The composer's (Moon's `multiline` keyboard: Return is a line
+        // break and the keyboard stays up).
+        if !self.model.composer_key(input) {
             return false;
         }
-        match input {
-            KeyInput::Character(character) => self.model.composer.text.push(character),
-            KeyInput::Backspace => {
-                self.model.composer.text.pop();
-            }
-            KeyInput::Enter => {
-                self.perform(Action::Composer(composer::Act::Send));
-                // Moon puts its keyboard away on Return; a chat keeps it.
-                if self.input.keyboard {
-                    self.show_keyboard(KeyboardPurpose::Text);
-                }
-            }
-        }
+        self.take_ui(now);
         self.view.follow = true;
         true
     }
@@ -596,7 +650,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             .ui
             .error_toast(format!("{name} could not be read: changes are not kept."));
     }
-    ui::status_bar(theme::STATUS_BAR);
+    ui::status_bar(&theme::status_bar());
 
     let (conn, screen_number) = x11rb::rust_connection::RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_number];
@@ -802,7 +856,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     }
                     // Moon knows the app by now: its status bar takes the
                     // theme's background (asked again, the same colour).
-                    ui::status_bar(theme::STATUS_BAR);
+                    ui::status_bar(&theme::status_bar());
                     shell.ask();
                     next_shell_poll = now + SHELL_POLL;
                     redraw = true;
@@ -955,7 +1009,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 let max = view.chat_max(&model, height);
                 view.chat_scroll.step(max, now)
             }
-            Page::Settings => view.settings_scroll.step(0.0, now),
+            Page::Settings => {
+                let max = settings::max_scroll(&model, height);
+                view.settings_scroll.step(max, now)
+            }
         };
         {
             let mut overlays = std::mem::take(&mut view.overlays);
@@ -1124,6 +1181,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     if input.keyboard {
         control::hide_keyboard();
     }
+    model.flush_drafts();
     store.take(&mut model.persist, Instant::now());
     store.flush_all();
     handoff::clear_view();

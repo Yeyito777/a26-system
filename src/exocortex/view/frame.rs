@@ -14,6 +14,7 @@ use std::time::Instant;
 use crate::gfx::Canvas;
 
 use super::super::model::{Model, Page};
+use super::super::screens::settings::{self, SettingsFrame};
 use super::super::theme;
 use super::super::ui::overlay::{Body, Cx, Scroller};
 use super::{ChatFrame, Hit, ListFrame, ViewState, chat_frame, draw_chat_update, list};
@@ -32,9 +33,8 @@ pub struct FrameDamage {
 pub enum PageFrame {
     Chat(ChatFrame),
     List(ListFrame),
-    /// A page drawn whole when anything about it changes, named by a key of
-    /// what it shows (Settings).
-    Keyed(u64),
+    /// Settings (E): its scroll, switches and the rest (`SettingsFrame`).
+    Settings(SettingsFrame),
     /// Something drawn whole every frame (a loading chat, the connection
     /// pill).
     Volatile,
@@ -73,7 +73,7 @@ pub fn record(
             .map_or(PageFrame::Volatile, PageFrame::Chat),
         Page::List => list::list_frame(model, view, pressed, height, now)
             .map_or(PageFrame::Volatile, PageFrame::List),
-        Page::Settings => PageFrame::Keyed(super::super::screens::settings::frame_key(
+        Page::Settings => PageFrame::Settings(settings::settings_frame(
             model,
             view,
             super::pressed_action(pressed),
@@ -270,7 +270,9 @@ pub fn update(
             (PageFrame::List(a), PageFrame::List(b)) => {
                 list::draw_list_update(canvas, model, view, a, b, now)?
             }
-            (PageFrame::Keyed(a), PageFrame::Keyed(b)) if a == b => FrameDamage::default(),
+            (PageFrame::Settings(a), PageFrame::Settings(b)) => {
+                settings::draw_settings_update(canvas, model, view, a, b, now)?
+            }
             _ => return None,
         };
         let page_changed = page.moved.is_some() || !page.rows.is_empty();
@@ -317,6 +319,9 @@ pub fn update(
                 (PageFrame::List(a), PageFrame::List(b)) => {
                     list::draw_list_update(canvas, model, view, a, b, now)?
                 }
+                (PageFrame::Settings(a), PageFrame::Settings(b)) => {
+                    settings::draw_settings_update(canvas, model, view, a, b, now)?
+                }
                 _ => return None,
             };
             if page.moved.is_some() {
@@ -357,7 +362,7 @@ fn page_unchanged(old: &PageFrame, new: &PageFrame) -> bool {
     match (old, new) {
         (PageFrame::Chat(a), PageFrame::Chat(b)) => a.same_as(b),
         (PageFrame::List(a), PageFrame::List(b)) => a == b,
-        (PageFrame::Keyed(a), PageFrame::Keyed(b)) => a == b,
+        (PageFrame::Settings(a), PageFrame::Settings(b)) => a == b,
         _ => false,
     }
 }

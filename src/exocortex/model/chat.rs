@@ -356,9 +356,9 @@ impl Model {
         };
         let old = std::mem::replace(&mut self.chat, draft);
         self.shelf.keep(old);
-        self.ops.draft_selection = None;
         self.ui.close_all = true;
         self.page = Page::Chat;
+        self.restore_draft();
         previous
             .map(|id| proto::unsubscribe(&id))
             .into_iter()
@@ -393,6 +393,7 @@ impl Model {
                 });
                 let old = std::mem::replace(&mut self.chat, chat);
                 self.shelf.keep(old);
+                self.restore_draft();
             }
             return Vec::new();
         }

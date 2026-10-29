@@ -1,41 +1,277 @@
-//! What the user writes (WP-D): the composer's text, drafts per
-//! conversation, sending (or queueing while a turn runs), new
-//! conversations, stopping a turn, and the queue the daemon keeps.
+//! What the user writes (WP-D): the composer's text with its caret and
+//! selection (`editor.rs`), drafts per conversation and per new chat kept
+//! across restarts (`drafts.rs`), sending (or queueing at the next turn or
+//! the message's end while a turn runs), new conversations with only the
+//! choices the user made, stopping a turn, and the queue the daemon keeps.
+//!
+//! Sending is optimistic (PAR-185): the text leaves the composer at once
+//! and shows in the transcript; a refusal or a deadline puts it back into
+//! the draft it came from, wherever the user is by then (PAR-189), and
+//! says why above the composer.
 
+use std::cell::Cell;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use super::super::drafts::Drafts;
+use super::super::editor::{self, Cursor};
 use super::super::proto::{self, Entry, Event, Queued};
 use super::super::requests::{self, Owner, Pending};
-use super::{Chat, Echo, Effect, Live, Model, now_ms};
+use super::super::ui::Haptic;
+use super::super::ui::sheet::{self, ActionItem, ActionList, Tone};
+use super::{Action, Chat, Echo, Effect, Live, Model, Page, UiAct, now_ms};
 use crate::control::KeyboardPurpose;
+use crate::keys::KeyInput;
+
+/// A message and its attachments may not be larger (PAR-191).
+pub const BUDGET: usize = 12 << 20;
+/// Typing is written into `drafts.json` this long after it pauses (the
+/// store then waits its own 500 ms).
+const SAVE_AFTER: Duration = Duration::from_millis(300);
+
+/// When a message joins a turn that is running (PAR-183).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Timing {
+    /// Before the next tool round ("Steer now" on providers that steer).
+    NextTurn,
+    /// After the response finishes.
+    MessageEnd,
+}
+
+impl Timing {
+    pub fn wire(self) -> &'static str {
+        match self {
+            Timing::NextTurn => "next-turn",
+            Timing::MessageEnd => "message-end",
+        }
+    }
+}
+
+/// An end of the selection a finger moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum End {
+    /// The caret (with no selection, the caret itself).
+    Caret,
+    Anchor,
+}
+
+/// An error shown above the composer for one draft (PAR-186).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComposerError {
+    pub text: String,
+    pub since: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Send,
+    Queue,
+    New,
+}
+
+/// A message on its way: what to put back if it does not arrive.
+#[derive(Debug, Clone)]
+struct Submission {
+    kind: Kind,
+    conv: String,
+    /// The draft it came from.
+    key: String,
+    text: String,
+    started_at: u64,
+    queue_id: Option<String>,
+}
 
 /// The composer's state.
 #[derive(Debug, Default)]
 pub struct Composer {
-    /// What is typed.
+    /// What is typed: the shown draft's text.
     pub text: String,
-    /// Drafts of conversations not open, by id.
-    pub drafts: HashMap<String, String>,
-    /// The daemon's queue, every conversation's (`queue_updated`), plus
-    /// what was queued from here and not yet confirmed. The transcript
-    /// reads it (queued bubbles).
+    /// The caret and the selection in it.
+    pub cursor: Cursor,
+    /// The draft `text` belongs to (a conversation id or a new chat's
+    /// `draft:<folder>`); None before any.
+    pub key: Option<String>,
+    /// How far the editor's text is scrolled up (px), and whether the next
+    /// frame scrolls the caret into view. The view resolves both (it knows
+    /// the wrap and the editor's height), hence cells.
+    pub scroll: Cell<f32>,
+    pub reveal: Cell<bool>,
+    /// When the caret last moved (it shows solid for a blink after).
+    pub since: Option<Instant>,
+    /// The edit menu (Copy, Paste, …) shown for this serial, if any.
+    pub menu: Option<u64>,
+    serial: u64,
+    /// A long press is selecting: moving the finger extends it.
+    pub selecting: bool,
+    /// The kept drafts.
+    pub drafts: Drafts,
+    /// Typed since the drafts were last written into the kept file.
+    unsaved: Option<Instant>,
+    /// Errors per draft key.
+    pub errors: HashMap<String, ComposerError>,
+    /// Messages sent or queued and not yet confirmed, by request id.
+    inflight: HashMap<String, Submission>,
+    /// The daemon's queue, every conversation's (`queue_updated`).
     pub queued: Vec<Queued>,
+    /// Queued from here, not in the daemon's queue yet (request id).
+    pending: Vec<(String, Queued)>,
+    /// Removals asked for and not yet acknowledged: queue id → request id
+    /// (and whether its text goes back into the draft).
+    removing: HashMap<String, (String, bool)>,
+    /// A queued message's last error (a removal refused).
+    queue_errors: HashMap<String, String>,
+    /// Stops on their way: conversation → request id.
+    stopping: HashMap<String, String>,
+}
+
+impl Composer {
+    /// The caret and selection, inside the text.
+    pub fn cursor(&self) -> Cursor {
+        self.cursor.clamped(&self.text)
+    }
+
+    /// Whether a message from draft `key` is on its way.
+    pub fn submitting(&self, key: &str) -> bool {
+        self.inflight.values().any(|s| s.key == key)
+    }
+
+    /// The queued message `id` is not confirmed by the daemon yet.
+    pub fn optimistic(&self, id: &str) -> bool {
+        self.pending.iter().any(|(_, q)| q.id == id)
+    }
+
+    /// The queued message `id` is being removed.
+    pub fn removing(&self, id: &str) -> bool {
+        self.removing.contains_key(id)
+    }
+
+    pub fn queue_error(&self, id: &str) -> Option<&str> {
+        self.queue_errors.get(id).map(String::as_str)
+    }
+
+    /// The queue: the daemon's, then what was queued from here and is not
+    /// in it yet.
+    pub fn all_queued(&self) -> impl Iterator<Item = &Queued> {
+        self.queued.iter().chain(
+            self.pending
+                .iter()
+                .map(|(_, q)| q)
+                .filter(|q| !self.queued.iter().any(|d| d.id == q.id)),
+        )
+    }
+
+    fn find_queued(&self, id: &str) -> Option<&Queued> {
+        self.all_queued().find(|q| q.id == id)
+    }
+
+    /// The caret moved or the text changed: the caret shows, scrolled into
+    /// view; a menu for the old state goes.
+    fn touched(&mut self, now: Instant) {
+        self.since = Some(now);
+        self.reveal.set(true);
+        self.menu = None;
+    }
+
+    fn edited(&mut self, now: Instant) {
+        self.touched(now);
+        self.unsaved = Some(now);
+        if let Some(key) = &self.key {
+            self.errors.remove(key);
+        }
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.cursor = Cursor::at(text.len());
+        self.text = text;
+        self.scroll.set(0.0);
+        self.reveal.set(true);
+        self.menu = None;
+        self.selecting = false;
+    }
+}
+
+/// The label under a queued bubble, as the TUI words it (PAR-143):
+/// "queued: next turn", "queued: steer", "queued: message end", or the idle
+/// queue's "queued: after …" / "queued: at 14:05" / "queued: global idle".
+pub fn queue_label(q: &Queued, provider: Option<&str>) -> String {
+    if q.source == "global-idle" {
+        let wait = q.wait_target.as_ref();
+        let field = |name: &str| {
+            wait.and_then(|w| w.get(name))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned()
+        };
+        return match field("type").as_str() {
+            "delay" => {
+                let delay = wait
+                    .and_then(|w| w.get("delayMs"))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0);
+                format!("queued: at {}", clock((q.created_at + delay) / 1000.0))
+            }
+            "conversation" => format!("queued: after {}", field("label")),
+            "folder" => format!("queued: after folder {}", field("label")),
+            _ => "queued: global idle".into(),
+        };
+    }
+    if q.timing != "next-turn" {
+        return "queued: message end".into();
+    }
+    if q.automation.is_some() || provider.is_none_or(|p| p == "anthropic") {
+        "queued: next turn".into()
+    } else {
+        "queued: steer".into()
+    }
+}
+
+/// `14:05` in local time.
+fn clock(seconds: f64) -> String {
+    // SAFETY: localtime_r fills the zeroed tm from a valid time_t.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let time = seconds as i64 as _;
+        libc::localtime_r(&time, &mut tm);
+        tm
+    };
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
+/// The order the TUI shows queued messages in: next turn, message end, an
+/// idle queue's targets, the global idle queue; the daemon's order within.
+pub fn queue_order(q: &Queued) -> u8 {
+    if q.source != "global-idle" {
+        return if q.timing == "next-turn" { 0 } else { 1 };
+    }
+    match q
+        .wait_target
+        .as_ref()
+        .and_then(|w| w.get("type"))
+        .and_then(Value::as_str)
+    {
+        None | Some("global") => 3,
+        _ => 2,
+    }
 }
 
 /// What the user does with the composer; other areas use these too (C2's
 /// message menu, E's commands): `Insert`, `RestoreDraft`, `Focus`.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // Insert, RestoreDraft and Focus are for C2, D and E.
+#[allow(dead_code)] // Insert, RestoreDraft and Focus are for C2 and E.
 pub enum Act {
+    /// The trailing button: Send, or (while a turn runs) the choice of
+    /// when the message joins it.
     Send,
+    /// The choice made: queue for the next turn or the message's end (sent
+    /// at once if the turn ended meanwhile, PAR-257).
+    Deliver(Timing),
     /// Stop the turn (not gated on readiness, PAR-197).
     Abort,
     /// Give the composer the keyboard.
     Focus,
-    /// Insert text where the caret is (D: at the caret; for now at the end).
+    /// Insert text where the caret is.
     Insert(String),
     /// Put text back into a conversation's draft (`None`: the new
     /// conversation's): a rewind, a failed send.
@@ -43,101 +279,582 @@ pub enum Act {
         conv: Option<String>,
         text: String,
     },
-    /// The "+" button (D: attachments, P2).
+    /// The "+" button (attachments, P2).
     Attach,
+    /// A tap in the editor at text `index`; `focused`: the keyboard was up.
+    Place {
+        index: usize,
+        focused: bool,
+    },
+    /// A long press at `index`: its word selected, the menu.
+    SelectWord(usize),
+    /// A finger moving an end of the selection (or the caret) to `index`.
+    MoveEnd {
+        end: End,
+        index: usize,
+    },
+    /// That finger let go: the menu for what is selected.
+    EndSelect,
+    /// The editor's text dragged to this scroll.
+    Scroll(f32),
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+    /// Select the word at the caret.
+    Select,
+    /// The error label's ✕.
+    DismissError,
+    /// A queued message tapped: its actions.
+    Queued(String),
+    /// Remove a queued message (PAR-259).
+    Unqueue(String),
+    /// Take a queued message back into the composer (PAR-261).
+    PullBack(String),
 }
 
 impl Model {
-    /// Keeps what is typed as the open conversation's draft.
-    pub(super) fn save_draft(&mut self) {
-        let text = std::mem::take(&mut self.composer.text);
+    /// The draft key of what the composer shows now: the open
+    /// conversation's, or the new chat's (`draft_key`, E).
+    pub fn shown_draft_key(&self) -> String {
         match &self.chat.id {
-            Some(id) if !text.trim().is_empty() => {
-                self.composer.drafts.insert(id.clone(), text);
-            }
-            Some(id) => {
-                self.composer.drafts.remove(id);
-            }
-            None => {}
+            Some(id) => id.clone(),
+            None => self.draft_key(),
         }
     }
 
-    /// Shows the open conversation's draft in the composer.
-    pub(super) fn restore_draft(&mut self) {
-        self.composer.text = self
-            .chat
+    /// The composer's error, if the shown draft has one.
+    pub fn composer_error_label(&self) -> Option<&ComposerError> {
+        self.composer
+            .key
+            .as_ref()
+            .and_then(|key| self.composer.errors.get(key))
+    }
+
+    /// A message from the shown draft is on its way.
+    pub fn submitting(&self) -> bool {
+        self.composer
+            .key
+            .as_ref()
+            .is_some_and(|key| self.composer.submitting(key))
+    }
+
+    /// A Stop for the open conversation is on its way.
+    pub fn stopping(&self) -> bool {
+        self.chat
             .id
             .as_ref()
-            .and_then(|id| self.composer.drafts.get(id).cloned())
-            .unwrap_or_default();
+            .is_some_and(|id| self.composer.stopping.contains_key(id))
+    }
+
+    /// The provider of the open conversation (or the new chat's choice).
+    fn provider(&self) -> String {
+        self.selection().provider
+    }
+
+    /// Keeps what is typed as its draft (the composer keeps showing it).
+    pub(super) fn save_draft(&mut self) {
+        self.composer.drafts.load(&self.persist);
+        if let Some(key) = self.composer.key.clone()
+            && self
+                .composer
+                .drafts
+                .set(&key, &self.composer.text, now_ms())
+        {
+            self.composer.unsaved = Some(Instant::now());
+        }
+        self.write_drafts();
+    }
+
+    /// Shows the draft of what is open now (a conversation, or a new chat
+    /// in the list's folder).
+    pub(super) fn restore_draft(&mut self) {
+        let key = self.shown_draft_key();
+        if self.composer.key.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.composer.drafts.load(&self.persist);
+        let text = self
+            .composer
+            .drafts
+            .get(&key)
+            .unwrap_or_default()
+            .to_owned();
+        self.composer.set_text(text);
+        self.composer.key = Some(key);
+    }
+
+    /// Writes the drafts into the kept file now.
+    fn write_drafts(&mut self) {
+        if self.composer.unsaved.take().is_some() {
+            if let Some(key) = self.composer.key.clone() {
+                let text = self.composer.text.clone();
+                self.composer.drafts.set(&key, &text, now_ms());
+            }
+            self.composer.drafts.save(&mut self.persist);
+        }
+    }
+
+    /// Writes typing into the kept drafts once it pauses; whether anything
+    /// shows differently (never).
+    pub(super) fn composer_tick(&mut self, now: Instant) -> bool {
+        if self
+            .composer
+            .unsaved
+            .is_some_and(|at| now >= at + SAVE_AFTER)
+        {
+            self.composer.drafts.load(&self.persist);
+            self.write_drafts();
+        }
+        false
+    }
+
+    /// When `composer_tick` next has something to do.
+    pub(super) fn composer_deadline(&self) -> Option<Instant> {
+        self.composer.unsaved.map(|at| at + SAVE_AFTER)
+    }
+
+    /// Writes everything typed into the kept drafts (the app is closing).
+    #[allow(dead_code)]
+    pub fn flush_drafts(&mut self) {
+        self.composer.drafts.load(&self.persist);
+        self.write_drafts();
+    }
+
+    /// A key from Moon's keyboard (`keyboard show multiline`: Return is a
+    /// line break). Returns whether the composer changed.
+    pub fn composer_key(&mut self, input: KeyInput) -> bool {
+        if self.page != Page::Chat {
+            return false;
+        }
+        let now = Instant::now();
+        let mut cursor = self.composer.cursor;
+        let changed = match input {
+            KeyInput::Character(character) => {
+                cursor.insert(&mut self.composer.text, character.encode_utf8(&mut [0; 4]))
+            }
+            KeyInput::Enter => cursor.insert(&mut self.composer.text, "\n"),
+            KeyInput::Backspace => cursor.backspace(&mut self.composer.text),
+        };
+        self.composer.cursor = cursor;
+        self.composer.selecting = false;
+        if changed {
+            self.composer.edited(now);
+        } else {
+            self.composer.touched(now);
+        }
+        true
+    }
+
+    /// Text from the clipboard, pasted at the caret (`Effect::Paste`'s
+    /// answer).
+    pub fn paste_text(&mut self, text: Option<String>) {
+        match text.filter(|text| !text.is_empty()) {
+            Some(text) => {
+                let mut cursor = self.composer.cursor;
+                if cursor.insert(&mut self.composer.text, &text) {
+                    self.composer.cursor = cursor;
+                    self.composer.edited(Instant::now());
+                }
+            }
+            None => self.ui.toast("Nothing to paste."),
+        }
     }
 
     pub(super) fn handle_composer(&mut self, act: Act) -> Vec<Value> {
+        let now = Instant::now();
         match act {
-            Act::Send => self.send(),
+            Act::Send => {
+                // Disabled until the daemon is ready (PAR-184, PAR-197).
+                if !self.ready || self.composer.text.trim().is_empty() {
+                    Vec::new()
+                } else if self.chat.id.is_some() && self.streaming() {
+                    self.deliver_menu();
+                    Vec::new()
+                } else {
+                    self.submit(None)
+                }
+            }
+            Act::Deliver(timing) => self.submit(Some(timing)),
             Act::Abort => self.abort(),
             Act::Focus => {
-                self.ui.effect(Effect::ShowKeyboard(KeyboardPurpose::Text));
+                self.ui
+                    .effect(Effect::ShowKeyboard(KeyboardPurpose::Multiline));
+                self.composer.touched(now);
                 Vec::new()
             }
             Act::Insert(text) => {
-                self.composer.text.push_str(&text);
-                Vec::new()
-            }
-            Act::RestoreDraft { conv, text } => {
-                if conv == self.chat.id {
-                    self.composer.text = text;
-                } else if let Some(conv) = conv {
-                    self.composer.drafts.insert(conv, text);
+                let mut cursor = self.composer.cursor;
+                if cursor.insert(&mut self.composer.text, &text) {
+                    self.composer.cursor = cursor;
+                    self.composer.edited(now);
                 }
                 Vec::new()
             }
-            Act::Attach => Vec::new(),
+            Act::RestoreDraft { conv, text } => {
+                let key = conv.unwrap_or_else(|| self.draft_key());
+                self.restore_into(&key, &text);
+                Vec::new()
+            }
+            Act::Attach => {
+                self.ui.toast("Attachments are not available yet.");
+                Vec::new()
+            }
+            Act::Place { index, focused } => {
+                let cursor = self.composer.cursor();
+                let index = editor::snap(&self.composer.text, index);
+                if !focused {
+                    self.ui
+                        .effect(Effect::ShowKeyboard(KeyboardPurpose::Multiline));
+                    self.ui.haptic(Haptic::Light);
+                }
+                let on_selection = cursor
+                    .selection()
+                    .is_some_and(|(a, b)| index >= a && index <= b);
+                let at_caret = cursor.selection().is_none() && index == cursor.caret;
+                if focused && (on_selection || at_caret) {
+                    // A second tap where the caret is, or on the selection:
+                    // the menu, or away with it.
+                    if self.composer.menu.is_some() {
+                        self.composer.menu = None;
+                    } else {
+                        self.open_edit_menu();
+                    }
+                    return Vec::new();
+                }
+                self.composer.cursor = Cursor::at(index);
+                self.composer.selecting = false;
+                self.composer.touched(now);
+                Vec::new()
+            }
+            Act::SelectWord(index) => {
+                self.ui
+                    .effect(Effect::ShowKeyboard(KeyboardPurpose::Multiline));
+                self.composer.cursor = Cursor::word(&self.composer.text, index);
+                self.composer.selecting = true;
+                self.composer.touched(now);
+                Vec::new()
+            }
+            Act::MoveEnd { end, index } => {
+                let index = editor::snap(&self.composer.text, index);
+                let mut cursor = self.composer.cursor();
+                match (end, cursor.selection().is_some()) {
+                    (End::Caret, false) if !self.composer.selecting => {
+                        cursor = Cursor::at(index);
+                    }
+                    (End::Anchor, _) => cursor.anchor = index,
+                    (End::Caret, _) => cursor.caret = index,
+                }
+                if cursor != self.composer.cursor {
+                    self.composer.cursor = cursor;
+                    self.composer.touched(now);
+                }
+                Vec::new()
+            }
+            Act::EndSelect => {
+                self.composer.selecting = false;
+                if self.composer.cursor().selection().is_some() {
+                    self.open_edit_menu();
+                }
+                Vec::new()
+            }
+            Act::Scroll(to) => {
+                self.composer.scroll.set(to);
+                self.composer.reveal.set(false);
+                Vec::new()
+            }
+            Act::Copy => {
+                let selected = self
+                    .composer
+                    .cursor()
+                    .selected(&self.composer.text)
+                    .to_owned();
+                if !selected.is_empty() {
+                    self.ui.effect(Effect::Copy(selected));
+                    self.ui.haptic(Haptic::Selection);
+                }
+                self.composer.menu = None;
+                Vec::new()
+            }
+            Act::Cut => {
+                let mut cursor = self.composer.cursor;
+                if let Some(cut) = cursor.cut(&mut self.composer.text) {
+                    self.composer.cursor = cursor;
+                    self.ui.effect(Effect::Copy(cut));
+                    self.ui.haptic(Haptic::Selection);
+                    self.composer.edited(now);
+                }
+                self.composer.menu = None;
+                Vec::new()
+            }
+            Act::Paste => {
+                self.composer.menu = None;
+                self.ui.effect(Effect::Paste);
+                Vec::new()
+            }
+            Act::SelectAll => {
+                self.composer.cursor = Cursor::select_all(&self.composer.text);
+                self.composer.touched(now);
+                self.open_edit_menu();
+                Vec::new()
+            }
+            Act::Select => {
+                let caret = self.composer.cursor().caret;
+                self.composer.cursor = Cursor::word(&self.composer.text, caret);
+                self.composer.touched(now);
+                self.open_edit_menu();
+                Vec::new()
+            }
+            Act::DismissError => {
+                if let Some(key) = &self.composer.key {
+                    self.composer.errors.remove(key);
+                }
+                Vec::new()
+            }
+            Act::Queued(id) => {
+                self.queued_menu(&id);
+                Vec::new()
+            }
+            Act::Unqueue(id) => self.unqueue(&id, false),
+            Act::PullBack(id) => self.unqueue(&id, true),
+        }
+    }
+
+    /// The edit menu over the caret or the selection (Cut, Copy, Paste,
+    /// Select, Select all).
+    fn open_edit_menu(&mut self) {
+        self.composer.serial += 1;
+        let serial = self.composer.serial;
+        self.composer.menu = Some(serial);
+        self.ui
+            .open(Box::new(crate::exocortex::view::composer::EditMenu::new(
+                serial,
+            )));
+    }
+
+    /// "Deliver message" (PAR-183): the next turn (or Steer now), or the
+    /// message's end.
+    fn deliver_menu(&mut self) {
+        if self.composer.text.trim().is_empty() {
+            return;
+        }
+        let steer = self.provider() != "anthropic";
+        let items = vec![
+            ActionItem::new(
+                if steer { "Steer now" } else { "Next turn" },
+                Action::Composer(Act::Deliver(Timing::NextTurn)),
+            )
+            .icon(super::super::ui::icons::Icon::Bolt)
+            .detail("Before the next tool round")
+            .tone(Tone::Warning),
+            ActionItem::new(
+                "Message end",
+                Action::Composer(Act::Deliver(Timing::MessageEnd)),
+            )
+            .icon(super::super::ui::icons::Icon::Clock)
+            .detail("After this response finishes"),
+        ];
+        self.ui.open(Box::new(sheet::action_sheet(
+            ActionList::new("Deliver message", items).scoped(),
+        )));
+    }
+
+    /// A queued message's actions (PAR-259, PAR-261).
+    fn queued_menu(&mut self, id: &str) {
+        let Some(q) = self.composer.find_queued(id).cloned() else {
+            return;
+        };
+        let provider = self
+            .sidebar
+            .conversations
+            .get(&q.conv_id)
+            .map(|s| s.provider.as_str());
+        let label = queue_label(&q, provider);
+        let optimistic = self.composer.optimistic(id);
+        let mut items = Vec::new();
+        if !optimistic && q.command.is_none() && q.automation.is_none() {
+            items.push(
+                ActionItem::new(
+                    "Edit in composer",
+                    Action::Composer(Act::PullBack(id.to_owned())),
+                )
+                .icon(super::super::ui::icons::Icon::Rewind)
+                .detail("Remove from the queue and put it back in the draft"),
+            );
+        }
+        items.push(
+            ActionItem::new("Copy text", Action::Ui(UiAct::Copy(q.text.clone())))
+                .icon(super::super::ui::icons::Icon::Copy),
+        );
+        items.push(
+            ActionItem::new(
+                "Remove from queue",
+                Action::Composer(Act::Unqueue(id.to_owned())),
+            )
+            .icon(super::super::ui::icons::Icon::Trash)
+            .tone(Tone::Destructive),
+        );
+        let subtitle = format!(
+            "Delivers {}{}",
+            label.trim_start_matches("queued: "),
+            if optimistic {
+                " · waiting for Exocortex…"
+            } else {
+                ""
+            }
+        );
+        self.ui.open(Box::new(sheet::action_sheet(
+            ActionList::new("Queued message", items)
+                .subtitle(subtitle)
+                .scoped(),
+        )));
+    }
+
+    fn unqueue(&mut self, id: &str, pull_back: bool) -> Vec<Value> {
+        if self.composer.removing.contains_key(id) || !self.ready {
+            return Vec::new();
+        }
+        if self.composer.optimistic(id) {
+            self.ui
+                .toast("Exocortex has not confirmed this message yet.");
+            return Vec::new();
+        }
+        let conv = self.composer.find_queued(id).map(|q| q.conv_id.clone());
+        let request = self.requests.issue(
+            Owner::Composer,
+            "unqueue",
+            conv.as_deref(),
+            requests::DEFAULT_WITHIN,
+            Instant::now(),
+        );
+        self.composer
+            .removing
+            .insert(id.to_owned(), (request.clone(), pull_back));
+        self.composer.queue_errors.remove(id);
+        self.chat.touch();
+        vec![proto::unqueue_message(&request, id)]
+    }
+
+    /// Puts `text` back into draft `key` without losing what is there.
+    fn restore_into(&mut self, key: &str, text: &str) {
+        if self.composer.key.as_deref() == Some(key) {
+            let current = std::mem::take(&mut self.composer.text);
+            let merged = if current.trim().is_empty() || current == text {
+                text.to_owned()
+            } else {
+                format!("{text}\n{current}")
+            };
+            self.composer.set_text(merged);
+            self.composer.since = Some(Instant::now());
+            self.composer.unsaved = Some(Instant::now());
+        } else {
+            self.composer.drafts.load(&self.persist);
+            self.composer.drafts.restore(key, text, now_ms());
+            self.composer.drafts.save(&mut self.persist);
         }
     }
 
     fn abort(&mut self) -> Vec<Value> {
-        match (self.chat.id.clone(), self.connected) {
-            (Some(id), true) => {
-                let started = self.chat.live.as_ref().map(|live| live.started_at);
-                let request = self.requests.issue(
-                    Owner::Composer,
-                    "abort",
-                    Some(&id),
-                    requests::ABORT_WITHIN,
-                    Instant::now(),
-                );
-                vec![proto::abort(&request, &id, started)]
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    pub(super) fn send(&mut self) -> Vec<Value> {
-        let text = self.composer.text.trim().to_owned();
-        if text.is_empty() || !self.ready {
+        let Some(id) = self.chat.id.clone() else {
+            return Vec::new();
+        };
+        if !self.connected {
             return Vec::new();
         }
-        self.composer.text.clear();
-        let started_at = now_ms();
+        if self.composer.stopping.contains_key(&id) {
+            self.ui
+                .toast("Exocortex is already stopping this response.");
+            return Vec::new();
+        }
+        let started = self.chat.live.as_ref().map(|live| live.started_at);
+        let request = self.requests.issue(
+            Owner::Composer,
+            "abort",
+            Some(&id),
+            requests::ABORT_WITHIN,
+            Instant::now(),
+        );
+        self.composer.stopping.insert(id.clone(), request.clone());
+        vec![proto::abort(&request, &id, started)]
+    }
+
+    /// Sends what is typed: to the open conversation (queued at `timing`
+    /// while it works, at the message's end by default), or as a new
+    /// conversation's first message.
+    pub(super) fn submit(&mut self, timing: Option<Timing>) -> Vec<Value> {
+        let text = self.composer.text.trim().to_owned();
+        let key = self.shown_draft_key();
+        if text.is_empty() || !self.ready || self.composer.submitting(&key) {
+            return Vec::new();
+        }
+        if text.len() > BUDGET {
+            self.composer.errors.insert(
+                key,
+                ComposerError {
+                    text: "Message exceeds the 12 MB attachment budget. Remove an item before sending."
+                        .into(),
+                    since: Instant::now(),
+                },
+            );
+            return Vec::new();
+        }
         let now = Instant::now();
+        let started_at = now_ms();
+        self.composer.set_text(String::new());
+        self.composer.key = Some(key.clone());
+        self.composer.errors.remove(&key);
+        self.composer.drafts.load(&self.persist);
+        if self.composer.drafts.remove(&key) {
+            self.composer.drafts.save(&mut self.persist);
+        }
+        self.composer.unsaved = None;
         match self.chat.id.clone() {
-            Some(id) => {
-                self.composer.drafts.remove(&id);
-                if self.streaming() {
-                    // Joins the running turn, as the TUI's Enter does.
-                    let request = self.requests.id();
-                    let queue_id = format!("phone-{started_at}");
-                    self.composer.queued.push(Queued {
+            Some(id) if self.streaming() => {
+                let timing = timing.unwrap_or(Timing::MessageEnd);
+                let request = self.requests.issue(
+                    Owner::Composer,
+                    "queue",
+                    Some(&id),
+                    requests::DEFAULT_WITHIN,
+                    now,
+                );
+                let queue_id = format!(
+                    "phone-{started_at}-{:06x}",
+                    started_at.wrapping_mul(2654435761) & 0xff_ffff
+                );
+                self.composer.pending.push((
+                    request.clone(),
+                    Queued {
                         id: queue_id.clone(),
                         conv_id: id.clone(),
                         text: text.clone(),
-                        timing: "message-end".into(),
+                        timing: timing.wire().into(),
+                        source: "daemon".into(),
+                        created_at: started_at as f64,
                         ..Queued::default()
-                    });
-                    self.chat.touch();
-                    return vec![proto::queue_message(&request, &queue_id, &id, &text)];
-                }
+                    },
+                ));
+                self.composer.inflight.insert(
+                    request.clone(),
+                    Submission {
+                        kind: Kind::Queue,
+                        conv: id.clone(),
+                        key,
+                        text: text.clone(),
+                        started_at,
+                        queue_id: Some(queue_id.clone()),
+                    },
+                );
+                self.chat.touch();
+                vec![proto::queue_message(
+                    &request,
+                    &queue_id,
+                    &id,
+                    &text,
+                    timing.wire(),
+                )]
+            }
+            Some(id) => {
                 let request = self.requests.issue(
                     Owner::Composer,
                     "send",
@@ -150,6 +867,17 @@ impl Model {
                     started_at,
                 });
                 self.chat.touch();
+                self.composer.inflight.insert(
+                    request.clone(),
+                    Submission {
+                        kind: Kind::Send,
+                        conv: id.clone(),
+                        key,
+                        text: text.clone(),
+                        started_at,
+                        queue_id: None,
+                    },
+                );
                 vec![proto::send_message(&request, &id, &text, started_at)]
             }
             None => {
@@ -164,17 +892,34 @@ impl Model {
                     requests::DEFAULT_WITHIN,
                     now,
                 );
-                let selection = self.selection();
-                let mut command =
-                    proto::new_conversation(&request, &id, &selection, &text, started_at);
-                if let Some(folder) = self.current_folder() {
-                    command["folderId"] = Value::String(folder.to_owned());
-                }
+                // Only what the user chose for this draft: the daemon applies
+                // its defaults to the rest (E's overrides, PAR-277).
+                let mut command = proto::new_conversation(
+                    &request,
+                    &id,
+                    None,
+                    self.current_folder(),
+                    &text,
+                    started_at,
+                );
+                self.new_conversation_fields(&mut command);
+                self.composer.inflight.insert(
+                    request,
+                    Submission {
+                        kind: Kind::New,
+                        conv: id.clone(),
+                        key,
+                        text: text.clone(),
+                        started_at,
+                        queue_id: None,
+                    },
+                );
                 self.chat = Chat {
-                    id: Some(id),
+                    id: Some(id.clone()),
                     loaded: true,
                     ..Chat::default()
                 };
+                self.composer.key = Some(id);
                 // The daemon echoes no user_message for a conversation's
                 // first message: it is the conversation's first entry.
                 self.chat.push(Entry::User {
@@ -191,37 +936,672 @@ impl Model {
         }
     }
 
-    /// Messages waiting to join the open conversation.
+    /// Messages waiting to join the open conversation, in the TUI's order.
     pub fn queued_here(&self) -> Vec<&Queued> {
-        self.composer
-            .queued
-            .iter()
+        let mut queued: Vec<&Queued> = self
+            .composer
+            .all_queued()
             .filter(|q| Some(q.conv_id.as_str()) == self.chat.id.as_deref())
-            .collect()
+            .collect();
+        queued.sort_by_key(|q| queue_order(q));
+        queued
+    }
+
+    /// The caption under a queued bubble: when it is delivered, or that
+    /// it is being removed, or why it was not.
+    pub fn queued_caption(&self, q: &Queued) -> String {
+        if self.composer.removing(&q.id) {
+            return "Removing…".into();
+        }
+        if let Some(error) = self.composer.queue_error(&q.id) {
+            return error.to_owned();
+        }
+        let provider = self
+            .sidebar
+            .conversations
+            .get(&q.conv_id)
+            .map(|s| s.provider.as_str());
+        queue_label(q, provider)
+    }
+
+    /// A message from here arrived: no longer on its way.
+    fn arrived(&mut self, request: &str) {
+        if let Some(submission) = self.composer.inflight.remove(request)
+            && let Some(queue_id) = submission.queue_id
+        {
+            self.composer.pending.retain(|(_, q)| q.id != queue_id);
+        }
+        self.requests.forget(request);
     }
 
     pub(super) fn apply_composer(&mut self, event: &Event, _now: Instant) -> Vec<Value> {
-        if let Event::QueueUpdated { messages, .. } = event {
-            self.composer.queued = messages.clone();
-            self.chat.touch();
+        match event {
+            Event::QueueUpdated {
+                messages,
+                settled_queue_ids,
+            } => {
+                self.composer.queued = messages.clone();
+                // Queued from here: confirmed once the daemon lists or
+                // settles it.
+                let confirmed: Vec<String> = self
+                    .composer
+                    .pending
+                    .iter()
+                    .filter(|(_, q)| {
+                        messages.iter().any(|m| m.id == q.id) || settled_queue_ids.contains(&q.id)
+                    })
+                    .map(|(request, _)| request.clone())
+                    .collect();
+                for request in confirmed {
+                    self.arrived(&request);
+                }
+                // Removed: gone from the queue it was settled in.
+                let removed: Vec<String> = self
+                    .composer
+                    .removing
+                    .keys()
+                    .filter(|id| {
+                        settled_queue_ids.contains(id) && !messages.iter().any(|m| &m.id == *id)
+                    })
+                    .cloned()
+                    .collect();
+                for id in removed {
+                    self.unqueued(&id);
+                }
+                self.chat.touch();
+            }
+            Event::Ack {
+                req_id: Some(req_id),
+                ..
+            } => {
+                if self.composer.inflight.contains_key(req_id) {
+                    self.arrived(req_id);
+                    self.chat.touch();
+                }
+                let removed = self
+                    .composer
+                    .removing
+                    .iter()
+                    .find(|(_, (request, _))| request == req_id)
+                    .map(|(id, _)| id.clone());
+                if let Some(id) = removed {
+                    self.unqueued(&id);
+                    self.chat.touch();
+                }
+                self.composer
+                    .stopping
+                    .retain(|_, request| request != req_id);
+            }
+            Event::ConversationCreated {
+                req_id: Some(req_id),
+                ..
+            } => {
+                if self.composer.inflight.contains_key(req_id) {
+                    self.arrived(req_id);
+                }
+            }
+            // A send is accepted by its echo or by the turn it starts.
+            Event::UserMessage {
+                conv_id,
+                started_at: Some(started_at),
+                ..
+            } => self.echoed(conv_id, *started_at),
+            Event::StreamingStarted {
+                conv_id,
+                started_at,
+                ..
+            } => self.echoed(conv_id, *started_at),
+            Event::MessageComplete { conv_id, .. } | Event::StreamingStopped { conv_id, .. } => {
+                self.composer.stopping.remove(conv_id);
+            }
+            Event::QueueNotice(notice) => {
+                // PAR-263: said above the composer of its conversation.
+                if let Some(conv) = &notice.conv_id {
+                    self.composer.errors.insert(
+                        conv.clone(),
+                        ComposerError {
+                            text: notice.message.clone(),
+                            since: Instant::now(),
+                        },
+                    );
+                    if self.chat.id.as_ref() != Some(conv) || self.page != Page::Chat {
+                        self.ui.error_toast(notice.message.clone());
+                    }
+                } else {
+                    self.ui.error_toast(notice.message.clone());
+                }
+            }
+            Event::ConversationDeleted { conv_id, .. } => {
+                self.composer.drafts.load(&self.persist);
+                if self.composer.drafts.remove(conv_id) {
+                    self.composer.drafts.save(&mut self.persist);
+                }
+                if self.composer.key.as_ref() == Some(conv_id) {
+                    self.composer.set_text(String::new());
+                    self.composer.key = None;
+                    self.composer.unsaved = None;
+                }
+            }
+            _ => {}
         }
         Vec::new()
     }
 
+    fn echoed(&mut self, conv: &str, started_at: f64) {
+        let started = started_at as u64;
+        let request = self
+            .composer
+            .inflight
+            .iter()
+            .find(|(_, s)| s.kind == Kind::Send && s.conv == conv && s.started_at == started)
+            .map(|(request, _)| request.clone());
+        if let Some(request) = request {
+            self.arrived(&request);
+        }
+    }
+
+    /// The daemon removed queued message `id` as asked.
+    fn unqueued(&mut self, id: &str) {
+        let Some((request, pull_back)) = self.composer.removing.remove(id) else {
+            return;
+        };
+        self.requests.forget(&request);
+        let removed = self.composer.find_queued(id).cloned();
+        self.composer.queued.retain(|q| q.id != id);
+        if let Some(q) = removed
+            && pull_back
+        {
+            self.restore_into(&q.conv_id, &q.text);
+        }
+    }
+
+    /// A message did not arrive: its text back into the draft it came from,
+    /// and why, there.
+    fn fail_send(&mut self, submission: Submission, why: &str) {
+        let message = match submission.kind {
+            Kind::Send => format!("Not sent: {why}"),
+            Kind::Queue => format!("Not queued: {why}"),
+            Kind::New => format!("Could not start the chat: {why}"),
+        };
+        match submission.kind {
+            Kind::Send => {
+                if self.chat.id.as_deref() == Some(submission.conv.as_str()) {
+                    self.chat
+                        .echoes
+                        .retain(|echo| echo.started_at != submission.started_at);
+                    self.chat.touch();
+                }
+            }
+            Kind::Queue => {
+                if let Some(queue_id) = &submission.queue_id {
+                    self.composer.pending.retain(|(_, q)| &q.id != queue_id);
+                }
+                self.chat.touch();
+            }
+            Kind::New => {
+                // Back to the new chat it was written in, if still there.
+                if self.chat.id.as_deref() == Some(submission.conv.as_str()) {
+                    self.chat = Chat {
+                        loaded: true,
+                        ..Chat::default()
+                    };
+                    self.composer.key = Some(self.shown_draft_key());
+                }
+            }
+        }
+        self.restore_into(&submission.key, &submission.text);
+        let shown = self.page == Page::Chat
+            && self.composer.key.as_deref() == Some(submission.key.as_str());
+        self.composer.errors.insert(
+            submission.key,
+            ComposerError {
+                text: message.clone(),
+                since: Instant::now(),
+            },
+        );
+        if !shown {
+            self.ui.error_toast(message);
+        }
+    }
+
+    /// The connection dropped: nothing on its way will be answered.
+    pub(super) fn composer_disconnected(&mut self) {
+        let inflight: Vec<Submission> = self.composer.inflight.drain().map(|(_, s)| s).collect();
+        for submission in inflight {
+            self.fail_send(
+                submission,
+                "the connection dropped before Exocortex confirmed it.",
+            );
+        }
+        self.composer.pending.clear();
+        self.composer.removing.clear();
+        self.composer.stopping.clear();
+    }
+
     /// An error answering one of the composer's requests; true when
-    /// handled (D: restore a failed send into its draft, PAR-185).
-    pub(super) fn composer_error(&mut self, _id: &str, _message: &str) -> bool {
+    /// handled.
+    pub(super) fn composer_error(&mut self, id: &str, message: &str) -> bool {
+        if let Some(submission) = self.composer.inflight.remove(id) {
+            self.fail_send(submission, message);
+            return true;
+        }
+        let refused = self
+            .composer
+            .removing
+            .iter()
+            .find(|(_, (request, _))| request == id)
+            .map(|(queue_id, _)| queue_id.clone());
+        if let Some(queue_id) = refused {
+            self.composer.removing.remove(&queue_id);
+            self.composer
+                .queue_errors
+                .insert(queue_id, message.to_owned());
+            self.ui.error_toast(format!("Not removed: {message}"));
+            self.chat.touch();
+            return true;
+        }
+        self.composer.stopping.retain(|_, request| request != id);
         false
     }
 
     /// One of the composer's requests was not answered in time.
-    pub(super) fn composer_timeout(&mut self, _id: &str, pending: &Pending) -> bool {
-        let message = match pending.kind {
-            "abort" => "Stop did not reach Exocortex. Try again.",
-            "send" | "new" => "Exocortex did not confirm the message.",
-            _ => return self.generic_timeout(),
-        };
-        self.ui.error_toast(message);
-        true
+    pub(super) fn composer_timeout(&mut self, id: &str, pending: &Pending) -> bool {
+        match pending.kind {
+            "send" | "new" | "queue" => {
+                if let Some(submission) = self.composer.inflight.remove(id) {
+                    self.fail_send(submission, "Exocortex did not confirm it in time.");
+                }
+                true
+            }
+            "abort" => {
+                self.composer.stopping.retain(|_, request| request != id);
+                self.ui
+                    .error_toast("Stop did not reach Exocortex. Try again.");
+                true
+            }
+            "unqueue" => self.composer_error(id, "Exocortex did not answer. Try again."),
+            _ => self.generic_timeout(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exocortex::model::Nav;
+    use crate::exocortex::proto::parse_event;
+    use crate::exocortex::store::DRAFTS;
+
+    fn summary(id: &str, streaming: bool) -> String {
+        format!(
+            r#"{{"type":"conversation_updated","summary":{{"id":"{id}","provider":"anthropic","model":"m","effort":"low","title":"{id}","pinned":false,"sortOrder":0,"streaming":{streaming},"unread":false}}}}"#
+        )
+    }
+
+    /// Ready, with conversations `c` and `d` (`c` working when `streaming`),
+    /// `c` open.
+    fn ready(streaming: bool) -> Model {
+        let mut model = Model::new();
+        let bootstrap = model.on_connected();
+        let ping = bootstrap.last().unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let now = Instant::now();
+        model.apply(
+            parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
+            now,
+        );
+        model.apply(parse_event(&summary("c", streaming)), now);
+        model.apply(parse_event(&summary("d", false)), now);
+        open(&mut model, "c");
+        model
+    }
+
+    fn open(model: &mut Model, id: &str) {
+        let commands = model.handle(Action::Nav(Nav::OpenConversation(id.into())));
+        let load = commands
+            .iter()
+            .find(|c| c["type"] == "load_conversation")
+            .unwrap();
+        let request = load["reqId"].as_str().unwrap().to_owned();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_loaded","reqId":"{request}","convId":"{id}","entries":[{{"type":"user","text":"q"}},{{"type":"ai","blocks":[{{"type":"text","text":"a"}}]}}],"historyStartIndex":0}}"#
+            )),
+            Instant::now(),
+        );
+    }
+
+    fn type_text(model: &mut Model, text: &str) {
+        for character in text.chars() {
+            model.composer_key(if character == '\n' {
+                KeyInput::Enter
+            } else {
+                KeyInput::Character(character)
+            });
+        }
+    }
+
+    fn opened(model: &mut Model) -> Vec<String> {
+        model
+            .ui
+            .opening
+            .drain(..)
+            .map(|overlay| overlay.label())
+            .collect()
+    }
+
+    fn apply(model: &mut Model, line: &str) -> Vec<Value> {
+        model.apply(parse_event(line), Instant::now())
+    }
+
+    #[test]
+    fn typing_return_and_backspace_edit_at_the_caret() {
+        let mut model = ready(false);
+        type_text(&mut model, "helo\nworld");
+        assert_eq!(model.composer.text, "helo\nworld", "Return is a line break");
+        model.handle(Action::Composer(Act::Place {
+            index: 3,
+            focused: true,
+        }));
+        type_text(&mut model, "l");
+        assert_eq!(model.composer.text, "hello\nworld");
+        model.composer_key(KeyInput::Backspace);
+        model.composer_key(KeyInput::Backspace);
+        assert_eq!(model.composer.text, "heo\nworld");
+        // A second tap at the caret opens the edit menu; Select all, Cut.
+        let caret = model.composer.cursor().caret;
+        model.handle(Action::Composer(Act::Place {
+            index: caret,
+            focused: true,
+        }));
+        assert_eq!(opened(&mut model), vec!["edit menu: "]);
+        model.handle(Action::Composer(Act::SelectAll));
+        model.handle(Action::Composer(Act::Cut));
+        assert!(model.composer.text.is_empty());
+        assert!(
+            model
+                .ui
+                .effects
+                .contains(&Effect::Copy("heo\nworld".into()))
+        );
+        model.ui.effects.clear();
+        model.handle(Action::Composer(Act::Paste));
+        assert_eq!(model.ui.effects, vec![Effect::Paste]);
+        model.paste_text(Some("pasted\r\ntext".into()));
+        assert_eq!(model.composer.text, "pasted\ntext");
+        model.paste_text(None);
+        assert_eq!(
+            opened(&mut model).last().map(String::as_str),
+            Some("Nothing to paste.")
+        );
+    }
+
+    #[test]
+    fn a_send_is_confirmed_by_its_echo() {
+        let mut model = ready(false);
+        type_text(&mut model, "Hello");
+        let sent = model.handle(Action::Composer(Act::Send));
+        assert_eq!(sent[0]["type"], "send_message");
+        assert!(model.composer.text.is_empty() && model.submitting());
+        let started = sent[0]["startedAt"].as_u64().unwrap();
+        apply(
+            &mut model,
+            &format!(
+                r#"{{"type":"user_message","convId":"c","text":"Hello","startedAt":{started}}}"#
+            ),
+        );
+        assert!(!model.submitting());
+        assert!(model.requests.is_empty(), "nothing waited on");
+    }
+
+    #[test]
+    fn a_refused_send_goes_back_into_its_draft_after_navigating_away() {
+        let mut model = ready(false);
+        type_text(&mut model, "Hello");
+        let sent = model.handle(Action::Composer(Act::Send));
+        let request = sent[0]["reqId"].as_str().unwrap().to_owned();
+        assert_eq!(model.chat.echoes.len(), 1);
+        open(&mut model, "d");
+        type_text(&mut model, "other");
+        opened(&mut model);
+        apply(
+            &mut model,
+            &format!(
+                r#"{{"type":"error","reqId":"{request}","convId":"c","message":"Already streaming"}}"#
+            ),
+        );
+        // Said where the user is; the text waits in c's draft.
+        assert_eq!(opened(&mut model), vec!["Not sent: Already streaming"]);
+        assert_eq!(model.composer.text, "other");
+        open(&mut model, "c");
+        assert_eq!(model.composer.text, "Hello");
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some("Not sent: Already streaming")
+        );
+        assert!(model.chat.echoes.is_empty());
+        // Typing clears the error.
+        type_text(&mut model, "!");
+        assert!(model.composer_error_label().is_none());
+    }
+
+    #[test]
+    fn an_unconfirmed_send_is_restored_when_its_deadline_passes() {
+        let mut model = ready(false);
+        type_text(&mut model, "Hello");
+        model.handle(Action::Composer(Act::Send));
+        type_text(&mut model, "typed since");
+        model.expire(Instant::now() + requests::DEFAULT_WITHIN + Duration::from_secs(1));
+        assert_eq!(model.composer.text, "Hello\ntyped since");
+        assert!(
+            model
+                .composer_error_label()
+                .unwrap()
+                .text
+                .starts_with("Not sent:")
+        );
+    }
+
+    #[test]
+    fn a_failed_new_chat_comes_back_as_its_folders_draft() {
+        let mut model = ready(false);
+        model.sidebar.path.push("f1".into());
+        model.handle(Action::Nav(Nav::NewConversation));
+        assert_eq!(model.composer.key.as_deref(), Some("draft:f1"));
+        type_text(&mut model, "First message");
+        let sent = model.handle(Action::Composer(Act::Send));
+        assert_eq!(sent[0]["type"], "new_conversation");
+        assert_eq!(sent[0]["folderId"], "f1");
+        // A blank draft: the daemon's defaults (PAR-277).
+        for key in ["provider", "model", "effort"] {
+            assert!(sent[0].get(key).is_none(), "{key}");
+        }
+        let request = sent[0]["reqId"].as_str().unwrap().to_owned();
+        assert!(model.chat.id.is_some());
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"error","reqId":"{request}","message":"Not authenticated"}}"#),
+        );
+        assert!(model.chat.id.is_none(), "back to the new chat");
+        assert_eq!(model.composer.text, "First message");
+        assert_eq!(model.composer.key.as_deref(), Some("draft:f1"));
+        assert!(model.composer_error_label().is_some());
+    }
+
+    #[test]
+    fn deliver_message_queues_at_the_chosen_timing_or_sends_once_the_turn_ended() {
+        let mut model = ready(true);
+        type_text(&mut model, "steer");
+        assert!(model.handle(Action::Composer(Act::Send)).is_empty());
+        assert_eq!(opened(&mut model), vec!["Deliver message"]);
+        let queued = model.handle(Action::Composer(Act::Deliver(Timing::NextTurn)));
+        assert_eq!(queued[0]["type"], "queue_message");
+        assert_eq!(queued[0]["timing"], "next-turn");
+        let id = queued[0]["queueId"].as_str().unwrap().to_owned();
+        // Shown at once, confirmed by the daemon's queue.
+        let shown = model.queued_here();
+        assert_eq!(shown.len(), 1);
+        assert!(model.composer.optimistic(&id));
+        assert_eq!(model.queued_caption(shown[0]), "queued: next turn");
+        apply(
+            &mut model,
+            &format!(
+                r#"{{"type":"queue_updated","messages":[{{"id":"{id}","convId":"c","text":"steer","timing":"next-turn","source":"daemon"}}],"settledQueueIds":["{id}"]}}"#
+            ),
+        );
+        assert!(!model.composer.optimistic(&id));
+        assert_eq!(model.queued_here().len(), 1);
+        // Message end.
+        type_text(&mut model, "later");
+        model.handle(Action::Composer(Act::Send));
+        let queued = model.handle(Action::Composer(Act::Deliver(Timing::MessageEnd)));
+        assert_eq!(queued[0]["timing"], "message-end");
+        // One message of a draft at a time: the next waits for the ack.
+        type_text(&mut model, "more");
+        assert!(
+            model
+                .handle(Action::Composer(Act::Deliver(Timing::MessageEnd)))
+                .is_empty()
+        );
+        let request = queued[0]["reqId"].as_str().unwrap();
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"ack","reqId":"{request}"}}"#),
+        );
+        model.composer.text.clear();
+        // The turn ends while the choice is open: sent at once (PAR-257).
+        type_text(&mut model, "after");
+        model.handle(Action::Composer(Act::Send));
+        apply(&mut model, &summary("c", false));
+        let sent = model.handle(Action::Composer(Act::Deliver(Timing::NextTurn)));
+        assert_eq!(sent[0]["type"], "send_message");
+    }
+
+    #[test]
+    fn a_refused_queue_entry_goes_back_into_the_draft() {
+        let mut model = ready(true);
+        type_text(&mut model, "later");
+        model.handle(Action::Composer(Act::Send));
+        let queued = model.handle(Action::Composer(Act::Deliver(Timing::MessageEnd)));
+        let request = queued[0]["reqId"].as_str().unwrap().to_owned();
+        apply(
+            &mut model,
+            &format!(
+                r#"{{"type":"error","reqId":"{request}","convId":"c","message":"Invalid queue timing"}}"#
+            ),
+        );
+        assert!(model.queued_here().is_empty());
+        assert_eq!(model.composer.text, "later");
+        assert_eq!(
+            model.composer_error_label().map(|e| e.text.as_str()),
+            Some("Not queued: Invalid queue timing")
+        );
+    }
+
+    #[test]
+    fn a_removed_queue_entry_stays_until_the_daemon_says_so() {
+        let mut model = ready(true);
+        let entry = r#"{"id":"q1","convId":"c","text":"queued text","timing":"message-end","source":"daemon"}"#;
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"queue_updated","messages":[{entry}]}}"#),
+        );
+        model.handle(Action::Composer(Act::Queued("q1".into())));
+        assert_eq!(opened(&mut model), vec!["Queued message"]);
+        let remove = model.handle(Action::Composer(Act::Unqueue("q1".into())));
+        assert_eq!(remove[0]["type"], "unqueue_message");
+        assert_eq!(remove[0]["queueId"], "q1");
+        assert_eq!(model.queued_caption(model.queued_here()[0]), "Removing…");
+        assert!(
+            model
+                .handle(Action::Composer(Act::Unqueue("q1".into())))
+                .is_empty(),
+            "once"
+        );
+        apply(
+            &mut model,
+            r#"{"type":"queue_updated","messages":[],"settledQueueIds":["q1"]}"#,
+        );
+        assert!(model.queued_here().is_empty());
+        // Refused: it stays, saying why.
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"queue_updated","messages":[{entry}]}}"#),
+        );
+        let remove = model.handle(Action::Composer(Act::Unqueue("q1".into())));
+        let request = remove[0]["reqId"].as_str().unwrap().to_owned();
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"error","reqId":"{request}","message":"Queue locked"}}"#),
+        );
+        assert_eq!(model.queued_caption(model.queued_here()[0]), "Queue locked");
+        // Pulled back: the text returns to the conversation's draft.
+        let pull = model.handle(Action::Composer(Act::PullBack("q1".into())));
+        let request = pull[0]["reqId"].as_str().unwrap().to_owned();
+        apply(
+            &mut model,
+            &format!(r#"{{"type":"ack","reqId":"{request}"}}"#),
+        );
+        assert!(model.queued_here().is_empty());
+        assert_eq!(model.composer.text, "queued text");
+    }
+
+    #[test]
+    fn stop_goes_once_and_works_before_the_daemon_is_ready() {
+        let mut model = ready(true);
+        let stop = model.handle(Action::Composer(Act::Abort));
+        assert_eq!(stop[0]["type"], "abort");
+        assert!(model.stopping());
+        opened(&mut model);
+        assert!(model.handle(Action::Composer(Act::Abort)).is_empty());
+        assert_eq!(
+            opened(&mut model),
+            vec!["Exocortex is already stopping this response."]
+        );
+        apply(&mut model, r#"{"type":"streaming_stopped","convId":"c"}"#);
+        assert!(!model.stopping());
+        model.ready = false;
+        assert_eq!(
+            model.handle(Action::Composer(Act::Abort))[0]["type"],
+            "abort"
+        );
+    }
+
+    #[test]
+    fn drafts_follow_their_conversations_and_are_kept() {
+        let mut model = ready(false);
+        type_text(&mut model, "for c");
+        open(&mut model, "d");
+        assert!(model.composer.text.is_empty());
+        type_text(&mut model, "for d");
+        model.handle(Action::Nav(Nav::Back));
+        model.handle(Action::Nav(Nav::NewConversation));
+        assert!(model.composer.text.is_empty(), "a new chat's own draft");
+        open(&mut model, "c");
+        assert_eq!(model.composer.text, "for c");
+        open(&mut model, "d");
+        assert_eq!(model.composer.text, "for d");
+        // Written into drafts.json once typing pauses.
+        type_text(&mut model, "!");
+        let due = model.answer_deadline().unwrap();
+        model.tick(due);
+        let kept: serde_json::Map<String, Value> = model.persist.section(DRAFTS, "drafts");
+        assert_eq!(kept["c"]["text"], "for c");
+        assert_eq!(kept["d"]["text"], "for d!");
+        // Sent: gone from the kept drafts.
+        model.handle(Action::Composer(Act::Send));
+        let kept: serde_json::Map<String, Value> = model.persist.section(DRAFTS, "drafts");
+        assert!(!kept.contains_key("d"));
+    }
+
+    #[test]
+    fn a_message_over_the_budget_is_not_sent() {
+        let mut model = ready(false);
+        model.composer.text = "x".repeat(BUDGET + 1);
+        assert!(model.handle(Action::Composer(Act::Send)).is_empty());
+        assert!(model.composer_error_label().unwrap().text.contains("12 MB"));
+        assert_eq!(model.composer.text.len(), BUDGET + 1, "nothing lost");
     }
 }

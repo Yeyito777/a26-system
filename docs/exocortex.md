@@ -38,9 +38,10 @@ lands), and scrolling up asks for the older page again.
 | --- | --- |
 | The list | `conversations_list` (first page, then the rest), kept current by `conversation_updated`, `conversation_deleted`, `sidebar_items_reordered`, `sidebar_state_patched`, `conversation_moved` |
 | A conversation | `load_conversation` with `turns`, the `viewport` and an `initialBackfill` (which subscribes and marks it read): a window of about two screens, then the older page behind it from the same snapshot; older pages (15 turns) with `load_conversation_history` as the user scrolls up, joined where a page ends inside an entry; the stream (`streaming_started`, `block_start`, `text_chunk`, `thinking_chunk`, `streaming_sync`, `tool_call`, `tool_result`, `message_complete`, `streaming_stopped`, `user_message`, `system_message`, `history_updated`, whose `pendingAI: null` ends the live reply); after each stop the newest page again, so the history settles on the daemon's copy. Leaving it `unsubscribe`s. |
-| Sending | `send_message` (shown at once, matched to the daemon's `user_message` by `startedAt`); while it works, `queue_message` with `message-end` (shown as Queued until delivered); a new conversation is `new_conversation` with its first message and the chosen provider, model and effort (in the folder the list showed) |
-| Stop | `abort` with the stream's `expectedStartedAt` |
-| Model sheet | `tools_available`'s signed-in providers and their models and efforts; `set_model`, `set_effort` |
+| Sending | `send_message` (shown at once, confirmed by the daemon's `user_message` or `streaming_started` with the same `startedAt`); while it works, Send asks "Deliver message": **Next turn** (Steer now on other providers) or **Message end**, `queue_message` with that `timing` (shown as queued until delivered; sent directly if the turn ended meanwhile); a new conversation is `new_conversation` with its first message and only the draft's explicit model choices (in the folder the list showed). Refused or unconfirmed in 20 s: the text goes back into the draft it came from, with the error above the composer |
+| The queue | a queued bubble tapped: Edit in composer, Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it) |
+| Stop | `abort` with the stream's `expectedStartedAt`; a spinner until `ack`, `streaming_stopped` or `message_complete`; a second press says it is already stopping |
+| The model inspector | `tools_available`'s providers, models, efforts and speeds, and `conversationDefaults` (or `conversation_defaults`); Apply sends `set_model`, `set_effort`, `set_fast_mode` for what changed; a draft changes nothing on the wire until its first message |
 | A tool row opened | `load_tool_outputs` for that call (history leaves outputs out) |
 
 The app has three pages, left to right as on the iPhone: Settings, the
@@ -57,6 +58,17 @@ $, Read"). Thinking shows as a folded row. Replies are markdown
 break), bullet, numbered and task lists, quotes, rules, fenced code and
 tables, with bold, italic, code and link spans. Automated prompts (subagent
 reports, notifications) are one gray line.
+
+The composer is a text area on Moon's `keyboard show multiline` (Return is
+a line break; only the Send button sends). Its editor (`editor.rs`) keeps a
+caret and a selection by cluster (an emoji sequence is one step) and wraps
+the text exactly as it draws it, so a tap places the caret at the glyph
+under the finger; a long press selects a word (moving the finger extends
+it), the handles and the caret can be dragged, and a tap at the caret or on
+the selection opens the edit menu (Cut, Copy, Paste, Select, Select all over
+Moon's clipboard). Six lines show; more scroll inside, the caret's line kept
+in view. Drafts are kept per conversation and per new chat in a folder, in
+`drafts.json`, across restarts.
 
 Sending `turns` matters: without it the daemon does not page at all. It
 sends the whole history on every open (790 KB for a long conversation) and
@@ -142,7 +154,7 @@ the interfaces below. Every file's header says whose it is.
 | `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs` | B | the list, folders, search |
 | `view/markdown_layout.rs`, `markdown.rs`, `reader.rs` | C1 | markdown as pieces, code, tables; the reader (A's is minimal) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
-| `view/composer.rs`, `model/composer.rs`, `proto/composer.rs` | D | the composer, sending, the queue |
+| `view/composer.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
 
 A package adds its new files (`list/*.rs`, `commands/*.rs`, `sheets/*.rs`
@@ -190,9 +202,11 @@ additions are the only shared edits.
   toasted at start). `settings.json` is `persist.settings()` /
   `persist.update_settings(|s| …)` (`store::Settings`: theme, text scale,
   thinking and tool disclosure, haptics; unknown keys kept); `ui.json`
-  sections `list` (B) and `chat` (C2) through `persist.section(UI, key)` /
-  `set_section`; `drafts.json` (D, drafts are in memory so far) through
-  `get(DRAFTS)` / `set`. After changing
+  sections `list` (B), `chat` (C2) and `generation` (E: each folder draft's
+  explicit model overrides) through `persist.section(UI, key)` /
+  `set_section`; `drafts.json` (D: `{"drafts": {key: {text, updatedAt}}}`,
+  keyed by conversation id or `draft:<folder>`, written 300 ms after typing
+  pauses, `drafts.rs`) through `persist.section(DRAFTS, "drafts")`. After changing
   the theme or text size call `theme::set_current(theme::by_id(id))` /
   `theme::set_text_scale(s)`: the generation changes, every layout cache is
   dropped and the next frame is drawn whole.
@@ -262,8 +276,21 @@ additions are the only shared edits.
   over 30% of the width, or a flick) and `Cancel`; a move past 32 px makes
   it a drag and cancels the press, and the axis is chosen once. The top
   overlay gets gestures first.
-- **Other interfaces.** `chat_header::subtitle(model)` (the model label
-  now; E adds activity), `ui::haptic(Haptic)`, `ui::open_url(url)` (Moon's
+- **What runs where** (E, `model/ops.rs`). `model.resolve()` is what the
+  open conversation (its list summary, else its window) or the draft runs
+  with: provider, model, effort, speed, and whether a draft only inherits
+  the daemon's defaults; `model.selection()` is the same as a `Selection`,
+  `model.generation_label(&r, effort)` its label ("Opus 5.5 · high ·
+  fast", "Daemon default"). A draft (one per folder, `model.draft_key()`)
+  keeps only explicit overrides, so `new_conversation` gets
+  `model.new_conversation_fields(&mut command)`: nothing for a blank draft
+  (the daemon's defaults apply), else what was chosen. `ops::Act::{PickModel,
+  PickEffort, PickSpeed}` change the conversation now (`set_model`,
+  `set_effort`, `set_fast_mode`) or the draft locally, for `/model` and
+  the like.
+- **Other interfaces.** `chat_header::subtitle(model)` (PAR-009: the
+  connection, a failed load, a retry, a wait, Working, Syncing, else the
+  model label; " · 1.0k ctx" after it), `ui::haptic(Haptic)`, `ui::open_url(url)` (Moon's
   Browser, http and https only), `clipboard::copy(text)`,
   `clipboard::paste()`.
 
@@ -280,8 +307,9 @@ additions are the only shared edits.
   subset (`scripts/subset-fonts.sh`): a character
   outside the subset falls back to Moon's fonts.
 - Moon draws its status bar in the colour the app asks for
-  (`ui::status_bar(theme::STATUS_BAR)`, at start and whenever the window is
-  mapped): a theme switch (E) should ask again with the theme's colour.
+  (`ui::status_bar(&theme::status_bar())`, the theme's background, at start
+  and whenever the window is mapped); a theme switch asks again
+  (`Effect::StatusBar`).
 - Where the iPhone screenshots and the spec's numbers disagree, the
   screenshots won: the search field spans x 44 to 692, the chat title's
   baseline is at 47, the ⋯ dots are 6.5 px, 15 px apart.

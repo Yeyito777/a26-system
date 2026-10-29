@@ -734,9 +734,15 @@ mod tests {
             effort: "low".into(),
             ..Selection::default()
         };
-        let created = new_conversation("r", "c", &selection, "Hi", 9);
+        let created = new_conversation("r", "c", Some(&selection), Some("f1"), "Hi", 9);
         assert_eq!(created["initialMessage"]["text"], "Hi");
         assert_eq!(created["effort"], "low");
+        assert_eq!(created["folderId"], "f1");
+        // A blank draft sends no model choices: the daemon's defaults apply.
+        let blank = new_conversation("r", "c", None, None, "Hi", 9);
+        for key in ["provider", "model", "effort", "fastMode", "folderId"] {
+            assert!(blank.get(key).is_none(), "{key}");
+        }
         assert_eq!(abort("r", "c", Some(12.0))["expectedStartedAt"], 12);
         assert!(abort("r", "c", None).get("expectedStartedAt").is_none());
         let load = load_conversation("r", "c", "b");

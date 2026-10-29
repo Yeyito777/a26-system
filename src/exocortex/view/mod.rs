@@ -221,7 +221,7 @@ pub fn animate(model: &Model, view: &mut ViewState, now: Instant) {
             composer::animate(model, view.keyboard, now, &mut view.animator);
         }
         Page::List => list::animate(model, now, &mut view.animator),
-        Page::Settings => {}
+        Page::Settings => settings::animate(model, now, &mut view.animator),
     }
 }
 
@@ -583,13 +583,7 @@ fn new_chat_state(
 }
 
 fn new_chat_label(model: &Model) -> String {
-    let selection = model.selection();
-    let label = model.model_label(&selection);
-    if selection.effort.is_empty() {
-        label
-    } else {
-        format!("{label} · {}", selection.effort)
-    }
+    model.new_chat_label()
 }
 
 /// The new-chat state's model box.
@@ -700,6 +694,22 @@ pub fn long_press(
 ) -> Option<Action> {
     match model.page {
         Page::List => list::long_press(model, view, height, x, y, now),
+        Page::Chat => composer::long_press(model, height, view.keyboard, x, y),
+        Page::Settings => None,
+    }
+}
+
+/// After a long press, the finger moving to (`x`, `y`): what that does
+/// (the composer's selection follows it), if anything.
+pub fn long_press_move(
+    model: &Model,
+    view: &ViewState,
+    height: f32,
+    x: f32,
+    y: f32,
+) -> Option<Action> {
+    match model.page {
+        Page::Chat => composer::long_press_move(model, height, view.keyboard, x, y),
         _ => None,
     }
 }
@@ -968,7 +978,10 @@ mod tests {
                 (geometry.island.y + 20.0) as i16,
                 now
             ),
-            Some(Hit::Composer)
+            Some(Hit::Action(Action::Composer(composer_act::Act::Place {
+                index: 0,
+                focused: false
+            })))
         );
         model.composer.text = "x".into();
         assert_eq!(
