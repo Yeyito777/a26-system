@@ -18,6 +18,7 @@ pub mod link;
 pub mod links;
 pub mod list;
 pub mod markdown;
+pub mod math;
 pub mod model;
 pub mod proto;
 pub mod reader;
