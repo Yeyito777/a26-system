@@ -366,6 +366,43 @@ impl Presenter {
         Ok(bounds)
     }
 
+    /// Uploads areas (`x0, y0, x1, y1`) as the canvas has them and copies
+    /// them to the window, whether their rows are stale or not, leaving
+    /// those rows' state as it was: the caller drew only these columns anew
+    /// in rows that otherwise hold what the server has (moved there by
+    /// `scroll`), so a floating thing redrawn over moved rows costs its own
+    /// columns, not whole rows. Call after `present_rows`. An added fast
+    /// path, not in Moon's copy.
+    pub fn present_areas<C: Connection>(
+        &mut self,
+        conn: &C,
+        canvas: &Canvas,
+        window_y: i32,
+        areas: &[(i32, i32, i32, i32)],
+    ) -> Result<(), Box<dyn Error>> {
+        if !self.valid || areas.is_empty() {
+            return Ok(());
+        }
+        let clamped: Vec<Damage> = areas
+            .iter()
+            .map(|&(x0, y0, x1, y1)| Damage {
+                x0: x0.clamp(0, self.width),
+                y0: y0.clamp(0, self.height),
+                x1: x1.clamp(0, self.width),
+                y1: y1.clamp(0, self.height),
+            })
+            .filter(|d| d.x1 > d.x0 && d.y1 > d.y0)
+            .collect();
+        for d in &clamped {
+            self.puts.push((d.x0, d.y0, d.x1, d.y1));
+        }
+        self.upload(conn, canvas)?;
+        for d in clamped {
+            self.copy_to_window(conn, d, window_y)?;
+        }
+        Ok(())
+    }
+
     /// Repaints the window from the pixmap after an Expose, without upload.
     pub fn expose<C: Connection>(&self, conn: &C, window_y: i32) -> Result<(), Box<dyn Error>> {
         if self.valid {

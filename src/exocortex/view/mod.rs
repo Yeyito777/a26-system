@@ -496,6 +496,7 @@ pub fn draw_chat_update(
         transcript::jump_damage(&old.transcript, &new.transcript, shift, (top, bottom))
     {
         let rest = transcript::subtract_rows((y0, y1), &damage.rows);
+        let x0 = transcript::jump_columns();
         for &rows in &rest {
             transcript::draw_band(
                 canvas,
@@ -503,12 +504,13 @@ pub fn draw_chat_update(
                 view,
                 new.pressed.as_ref(),
                 rows,
-                transcript::jump_columns(),
+                x0,
                 new.offset,
                 now,
             );
+            // Its columns only: the rest of these rows is what moved.
+            damage.areas.push((x0, rows.0, canvas.width, rows.1));
         }
-        damage.rows = frame::merge(damage.rows.iter().copied().chain(rest).collect());
     }
     if old.header != new.header || header_pressed {
         chat_header::draw(canvas, model, new.pressed.as_ref(), now);
@@ -1262,16 +1264,7 @@ mod tests {
                 (dst * width) as usize,
             );
         }
-        for y in 0..height as i32 {
-            if damage.rows.iter().any(|(y0, y1)| (*y0..*y1).contains(&y)) {
-                continue;
-            }
-            let row = (y * width) as usize..((y + 1) * width) as usize;
-            assert!(
-                shadow[row.clone()] == canvas.pixels[row],
-                "row {y} changed outside the damage"
-            );
-        }
+        frame::assert_unchanged_outside(&shadow, &canvas.pixels, width as usize, &damage);
         damage
     }
 
