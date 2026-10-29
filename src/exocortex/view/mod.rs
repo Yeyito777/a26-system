@@ -357,10 +357,56 @@ fn first_change(old: &Laid, new: &Laid) -> Option<f32> {
     Some(top)
 }
 
+/// A glyph never reaches further than this beyond its piece (what a frame
+/// looks at above and below the screen).
+const REACH: f32 = 400.0;
+
+/// The items of `frame` that may draw on its screen (`screen` rows high).
+fn on_screen(frame: &ChatFrame, screen: f32) -> std::ops::Range<usize> {
+    let (lo, hi) = (frame.offset - REACH, frame.offset + screen + REACH);
+    let from = frame.items.partition_point(|(y, laid)| y + laid.h < lo);
+    let to = frame.items.partition_point(|(y, _)| *y <= hi);
+    from..to.max(from)
+}
+
+/// How the two frames' pieces line up: how far the content moved down in
+/// the transcript (`delta`: a page of older history loaded above, or a
+/// piece above changed) and how many items came before (`k`: new item `i`
+/// is old item `i - k`), found from the first piece on screen now that was
+/// on screen then, by identity. Of several places one piece had (the same
+/// piece twice), the one that moved least on screen. None when nothing on
+/// screen is in both.
+fn line_up(old: &ChatFrame, new: &ChatFrame, screen: f32) -> Option<(f32, isize)> {
+    let (was, now) = (on_screen(old, screen), on_screen(new, screen));
+    // Usually: the same pieces where they were.
+    if let (Some((new_y, new_laid)), Some((old_y, old_laid))) =
+        (new.items.get(now.start), old.items.get(now.start))
+        && Rc::ptr_eq(new_laid, old_laid)
+        && new_y == old_y
+    {
+        return Some((0.0, 0));
+    }
+    let scrolled = new.offset - old.offset;
+    for index in now {
+        let (new_y, new_laid) = &new.items[index];
+        let best = was
+            .clone()
+            .filter(|&at| Rc::ptr_eq(&old.items[at].1, new_laid))
+            .map(|at| (new_y - old.items[at].0, index as isize - at as isize))
+            .min_by(|a, b| (a.0 - scrolled).abs().total_cmp(&(b.0 - scrolled).abs()));
+        if best.is_some() {
+            return best;
+        }
+    }
+    None
+}
+
 /// Turns the frame on `canvas` (drawn for `old`) into the one for `new` by
-/// moving the transcript's rows as far as it scrolled and drawing only what
-/// changed: the uncovered strip, the transcript from the first change down,
-/// the dots, the bar or the composer. None when a full redraw is needed.
+/// moving the transcript's rows as far as they moved on screen and drawing
+/// only what changed: the uncovered strip, the transcript from the first
+/// change down, the marks, the bar or the composer. Pieces are lined up by
+/// identity and place (`line_up`), so a page loading above the reader, who
+/// stays put, costs only what moved. None when a full redraw is needed.
 /// The result is pixel-identical to a full redraw (tested).
 pub fn draw_chat_update(
     canvas: &mut Canvas,
@@ -374,18 +420,41 @@ pub fn draw_chat_update(
         return None;
     }
     let (top, bottom) = new.bounds;
-    let shift = (new.offset - old.offset) as i32;
+    let screen = (bottom - top) as f32;
+    // How far the content moved in the transcript; then on screen (rows
+    // move only by whole pixels, else all of it is drawn again).
+    let (delta, k) = line_up(old, new, screen)
+        .filter(|(delta, _)| delta.fract() == 0.0)
+        .unwrap_or((0.0, 0));
+    let shift = (new.offset - old.offset - delta) as i32;
     if shift.abs() > (bottom - top) / 2 {
         return None;
     }
-    // Content (in transcript coordinates) from which the frames differ;
-    // a piece that changed in place (same top, same height) is only its
-    // own rows.
+    let translated;
+    let old_transcript = if delta == 0.0 {
+        &old.transcript
+    } else {
+        translated = old.transcript.translated(delta as i32);
+        &translated
+    };
+    // Content (in the new transcript's coordinates) from which the frames
+    // differ on screen; a piece that changed in place (same top, same
+    // height) is only its own rows. Pieces above the screen are only
+    // where they lead to (`line_up`).
     let mut change = f32::INFINITY;
     let mut pieces: Vec<(f32, f32)> = Vec::new();
-    for index in 0..old.items.len().max(new.items.len()) {
-        match (old.items.get(index), new.items.get(index)) {
-            (Some((old_y, old_laid)), Some((new_y, new_laid))) if old_y == new_y => {
+    let hi = new.offset + screen + REACH;
+    let start = on_screen(new, screen).start;
+    for index in start.. {
+        let new_item = new.items.get(index).filter(|(y, _)| *y <= hi);
+        let old_item = usize::try_from(index as isize - k)
+            .ok()
+            .and_then(|at| old.items.get(at))
+            .map(|(y, laid)| (y + delta, laid))
+            .filter(|(y, _)| *y <= hi);
+        match (old_item, new_item) {
+            (None, None) => break,
+            (Some((old_y, old_laid)), Some((new_y, new_laid))) if old_y == *new_y => {
                 if Rc::ptr_eq(old_laid, new_laid) {
                     continue;
                 }
@@ -401,7 +470,7 @@ pub fn draw_chat_update(
             }
             (old_item, new_item) => {
                 change = old_item
-                    .map(|(y, _)| *y)
+                    .map(|(y, _)| y)
                     .into_iter()
                     .chain(new_item.map(|(y, _)| *y))
                     .fold(f32::INFINITY, f32::min);
@@ -419,7 +488,7 @@ pub fn draw_chat_update(
         }
     }
     redraw.extend(transcript::mark_damage(
-        &old.transcript,
+        old_transcript,
         &new.transcript,
         new.offset,
         (top, bottom),
@@ -442,7 +511,10 @@ pub fn draw_chat_update(
     // Scrollers moved: their pieces' rows.
     if old.scrolls != new.scrolls {
         for (index, (y, laid)) in new.items.iter().enumerate() {
-            if laid.xkeys.is_empty() || old.scrolls.get(index) == new.scrolls.get(index) {
+            let was = usize::try_from(index as isize - k)
+                .ok()
+                .and_then(|at| old.scrolls.get(at));
+            if laid.xkeys.is_empty() || was == new.scrolls.get(index) {
                 continue;
             }
             let y0 = (chat_top() + y + laid.ink.0 - new.offset).floor() as i32;
@@ -488,7 +560,7 @@ pub fn draw_chat_update(
     damage.rows = merged;
     // Spinners and shimmers that turned: their own columns.
     for (x0, y0, x1, y1) in
-        transcript::mark_areas(&old.transcript, &new.transcript, new.offset, (top, bottom))
+        transcript::mark_areas(old_transcript, &new.transcript, new.offset, (top, bottom))
     {
         for rows in transcript::subtract_rows((y0, y1), &damage.rows) {
             let outer = canvas.clip();
@@ -511,7 +583,7 @@ pub fn draw_chat_update(
     }
     // Fold marks that changed in place: their column.
     let marks =
-        transcript::gutter_damage(&old.transcript, &new.transcript, new.offset, (top, bottom));
+        transcript::gutter_damage(old_transcript, &new.transcript, new.offset, (top, bottom));
     for rows in frame::merge(marks) {
         for rows in transcript::subtract_rows(rows, &damage.rows) {
             let x1 = transcript::gutter_columns();
@@ -533,7 +605,7 @@ pub fn draw_chat_update(
     }
     // The jump button floats: the rows under it in its columns.
     if let Some((y0, y1)) =
-        transcript::jump_damage(&old.transcript, &new.transcript, shift, (top, bottom))
+        transcript::jump_damage(old_transcript, &new.transcript, shift, (top, bottom))
     {
         let rest = transcript::subtract_rows((y0, y1), &damage.rows);
         let x0 = transcript::jump_columns();

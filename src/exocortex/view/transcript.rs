@@ -1447,7 +1447,9 @@ impl ViewState {
                 }),
                 ..Shown::default()
             };
-            let top = y + gap;
+            // Whole pixels: an entry keeps its pixels when a page loads
+            // above it (it moves by whole rows).
+            let top = (y + gap).round();
             let first = layout.items.len();
             let placed = self.place(
                 layout,
@@ -2264,6 +2266,27 @@ pub struct TranscriptFrame {
     /// The jump button's opacity in 32nds (0: not drawn).
     jump: u32,
     jump_rows: (i32, i32),
+}
+
+impl TranscriptFrame {
+    /// The same frame with its content `delta` rows further down (what was
+    /// there, in the next frame's coordinates: a page loaded above).
+    pub(crate) fn translated(&self, delta: i32) -> TranscriptFrame {
+        TranscriptFrame {
+            marks: self
+                .marks
+                .iter()
+                .map(|(y0, y1, key, columns)| (y0 + delta, y1 + delta, *key, *columns))
+                .collect(),
+            gutters: self
+                .gutters
+                .iter()
+                .map(|(y0, y1, state)| (y0 + delta, y1 + delta, *state))
+                .collect(),
+            range: (self.range.0 + delta, self.range.1 + delta),
+            ..self.clone()
+        }
+    }
 }
 
 /// A mark as a frame shows it: its rows, what it shows, the columns it
@@ -3825,6 +3848,65 @@ mod tests {
             "{}",
             footer(&model)
         );
+    }
+
+    #[test]
+    fn an_older_page_loading_above_the_reader_costs_only_what_moved() {
+        let now = Instant::now();
+        for show_all in [false, true] {
+            let mut model = Model::new();
+            model.on_connected();
+            model
+                .persist
+                .update_settings(|s| s.show_all_work = show_all);
+            let commands = model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+            let request = commands[0]["reqId"].as_str().unwrap().to_owned();
+            let page = |kind: &str, request: &str, from: u64, to: u64| {
+                let entries: Vec<String> = (from..to)
+                    .map(|i| format!(r#"{{"type":"user","text":"Message number {i}","metadata":{{"startedAt":{},"model":"m","tokens":0}}}},{{"type":"ai","blocks":[{{"type":"tool_call","toolCallId":"t{i}","toolName":"bash","input":{{}},"summary":"ls {i}"}},{{"type":"tool_result","toolCallId":"t{i}","toolName":"bash","output":"","isError":false}},{{"type":"text","text":"Reply {i}, long enough to wrap onto a second line of the transcript."}}],"metadata":{{"startedAt":{},"endedAt":{},"model":"claude-opus-5-5","tokens":9}}}}"#, 1000 + i * 10, 1001 + i * 10, 1005 + i * 10))
+                    .collect();
+                format!(
+                    r#"{{"type":"{kind}","reqId":"{request}","convId":"c","entries":[{}],"historyStartIndex":{},"historyEndIndex":{},"hasOlderHistory":{}}}"#,
+                    entries.join(","),
+                    from * 2,
+                    to * 2,
+                    from > 0
+                )
+            };
+            model.apply(
+                parse_event(&page("conversation_loaded", &request, 10, 22)),
+                now,
+            );
+            let older = model.load_older();
+            let request = older[0]["reqId"].as_str().unwrap().to_owned();
+            let mut view = ViewState::new();
+            view.transcript.positioned = model.chat.id.clone();
+            let max = view.chat_max(&model, HEIGHT);
+            view.follow = false;
+            view.chat_scroll.offset = (max / 2.0).round();
+            // The page lands: the reader stays put, and the frame draws
+            // nothing again (the edge is off screen).
+            let damage = update(&mut model, &mut view, (now, now), |model, view| {
+                let before = view.before(model, now);
+                model.apply(
+                    parse_event(&page("conversation_history_loaded", &request, 0, 10)),
+                    now,
+                );
+                view.settle(model, before, HEIGHT, now);
+            });
+            assert!(model.chat.start == 0);
+            assert!(damage.moved.is_none(), "{show_all}: {damage:?}");
+            assert!(rows(&damage) == 0, "{show_all}: {damage:?}");
+            // A finger moving meanwhile: the rows move with it, the strip
+            // it uncovers is drawn.
+            let older = model.load_older();
+            assert!(older.is_empty(), "the beginning");
+            let damage = update(&mut model, &mut view, (now, now), |_, view| {
+                view.chat_scroll.offset -= 30.0;
+            });
+            assert_eq!(damage.moved.map(|m| m.2), Some(30), "{damage:?}");
+            assert!(rows(&damage) <= 32, "{damage:?}");
+        }
     }
 
     #[test]
