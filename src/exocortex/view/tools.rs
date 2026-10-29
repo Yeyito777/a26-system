@@ -219,17 +219,40 @@ fn rows_shown(display: &CallDisplay, total: usize, open: bool) -> usize {
     }
 }
 
-/// The conversation an `exo` call started (its result's
-/// `{"conversation_id": …}`).
-pub(crate) fn subagent_child(tool_name: &str, output: &Output) -> Option<String> {
-    let Output::Text(text) = output else {
-        return None;
-    };
-    if tool_name != "exo" || !text.contains("conversation_id") {
-        return None;
+/// The conversation an `exo` call started (PAR-147), as its row shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Child {
+    /// Not a subagent's start.
+    None,
+    /// A subagent's start whose result (`{"conversation_id": …}`) is not
+    /// here yet, or names a conversation the list does not have: its row
+    /// keeps the space (so the row's height never changes), dimmed.
+    Unknown,
+    Known(String),
+}
+
+/// Which conversation an `exo` call started, if the list has it.
+pub(crate) fn subagent_child(
+    tool_name: &str,
+    input: &serde_json::Value,
+    output: &Output,
+    known: impl Fn(&str) -> bool,
+) -> Child {
+    if tool_name != "exo" || input.get("subagent").is_none() {
+        return Child::None;
     }
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    value.get("conversation_id")?.as_str().map(str::to_owned)
+    let id = match output {
+        Output::Text(text) if text.contains("conversation_id") => {
+            serde_json::from_str::<serde_json::Value>(text)
+                .ok()
+                .and_then(|v| v.get("conversation_id")?.as_str().map(str::to_owned))
+        }
+        _ => None,
+    };
+    match id {
+        Some(id) if known(&id) => Child::Known(id),
+        _ => Child::Unknown,
+    }
 }
 
 /// The bytes of `output` a row previews (on a character boundary).
@@ -255,13 +278,13 @@ pub(crate) fn expandable(output: &Output) -> bool {
 }
 
 /// One tool call's row (and, opened, its output), from its top. `child`:
-/// the subagent conversation it started, when the list knows it.
+/// the subagent conversation it started.
 pub(crate) fn lay_tool(
     blocks: &[Block],
     tool: &ToolRef,
     open: bool,
     output: &Output,
-    child: Option<&str>,
+    child: &Child,
     context: &Context,
 ) -> Piece {
     let mut piece = Piece::default();
@@ -400,20 +423,30 @@ pub(crate) fn lay_tool(
     }
     let mut head = head;
     // A subagent it started: its conversation (PAR-147).
-    if let Some(child) = child {
+    if *child != Child::None {
         let label = "Open subagent conversation";
         let w = super::super::ui::widgets::measure(label, T_SMALL);
+        let known = match child {
+            Child::Known(id) => Some(id),
+            _ => None,
+        };
         ops.push(text_op(
             tx,
             T_SMALL.baseline(head - 22.0 + (TARGET - T_SMALL.line()) / 2.0),
             label,
             T_SMALL,
-            p.secondary_accent,
+            if known.is_some() {
+                p.secondary_accent
+            } else {
+                mix(p.muted, 60, mix(color, 5, app))
+            },
         ));
-        piece.laid.hits.push((
-            RectF::new(tx - 17.0, head - 22.0, w + 34.0, TARGET),
-            Action::Nav(Nav::OpenConversation(child.to_owned())),
-        ));
+        if let Some(id) = known {
+            piece.laid.hits.push((
+                RectF::new(tx - 17.0, head - 22.0, w + 34.0, TARGET),
+                Action::Nav(Nav::OpenConversation(id.clone())),
+            ));
+        }
         head += TARGET - 22.0;
     }
     let mut h = head;

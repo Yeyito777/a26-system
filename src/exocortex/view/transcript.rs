@@ -43,7 +43,9 @@ use super::blocks::{
 use super::markdown_layout::{md_gap, state_key};
 use super::media::{Strip, lay_strip};
 use super::ops::{Laid, draw_ops, px, quantized};
-use super::tools::{Output, expandable, lay_tool, output_state, subagent_child, tool_run};
+use super::tools::{
+    Child, Output, expandable, lay_tool, output_state, subagent_child, tool_run,
+};
 use super::{CHAT_TOP, ViewState, hash_of, transcript_bounds};
 
 /// What a placed piece belongs to (what a long press on it opens).
@@ -891,9 +893,12 @@ impl ViewState {
                             at.layout.tools.push((at.y + at.h, id));
                         }
                         let child = match &blocks[tool.call] {
-                            Block::ToolCall { tool_name, .. } => subagent_child(tool_name, &output)
-                                .filter(|id| model.sidebar.conversations.contains_key(id)),
-                            _ => None,
+                            Block::ToolCall {
+                                tool_name, input, ..
+                            } => subagent_child(tool_name, input, &output, |id| {
+                                model.sidebar.conversations.contains_key(id)
+                            }),
+                            _ => Child::None,
                         };
                         let key = hash_of((
                             tool.hash,
@@ -905,7 +910,7 @@ impl ViewState {
                             &child,
                         ));
                         let piece = self.piece(key, || {
-                            lay_tool(blocks, tool, open, &output, child.as_deref(), context)
+                            lay_tool(blocks, tool, open, &output, &child, context)
                         });
                         at.put(piece);
                     }
@@ -3485,7 +3490,8 @@ mod tests {
         // A shell script folds to three rows.
         let bash = texts(&view.layout.items[4].laid);
         assert!(bash.iter().any(|t| t == "… +3 more lines"), "{bash:?}");
-        // Not in the list: no way to open it.
+        // Not in the list: no way to open it, the same height.
+        let height = exo.h;
         let model = model_with(false);
         let mut view = ViewState::new();
         view.layout(&model);
@@ -3496,6 +3502,7 @@ mod tests {
                 .iter()
                 .any(|(_, a)| matches!(a, Action::Nav(_)))
         );
+        assert_eq!(view.layout.items[2].laid.h, height);
     }
 
     #[test]
@@ -3725,5 +3732,139 @@ mod tests {
         view.settle(&model, before, HEIGHT, now);
         draw(&mut canvas, &mut model, &mut view, None, now);
         save(&canvas, "c2-status.png");
+    }
+
+    /// The P1 rows as PNGs: `WP_C2_SHOTS=dir cargo test render_p1_shots -- --ignored`.
+    #[test]
+    #[ignore]
+    fn render_p1_shots() {
+        let Some(dir) = std::env::var_os("WP_C2_SHOTS") else {
+            return;
+        };
+        let save = |canvas: &Canvas, name: &str| {
+            let path = std::path::Path::new(&dir).join(name);
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = png::Encoder::new(file, canvas.width as u32, canvas.height as u32);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            let bytes: Vec<u8> = canvas
+                .pixels
+                .iter()
+                .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8])
+                .collect();
+            writer.write_image_data(&bytes).unwrap();
+        };
+        let meta = |start: u64, end: u64| {
+            format!(
+                r#""metadata":{{"startedAt":{start},"endedAt":{end},"model":"claude-opus-5-5","tokens":900,"generationThroughput":{{"provider":"anthropic","model":"claude-opus-5-5","rates":[76.2]}}}}"#
+            )
+        };
+        let user = |text: &str, at: u64| {
+            format!(r#"{{"type":"user","text":"{text}","metadata":{{"startedAt":{at},"model":"m","tokens":0}}}}"#)
+        };
+        let wake = |text: &str, at: u64, kind: &str| {
+            format!(r#"{{"type":"user","text":"{text}","metadata":{{"startedAt":{at},"model":"m","tokens":0,"automation":{{"kind":"{kind}","sourceId":"kid"}}}}}}"#)
+        };
+        let calls = |prefix: &str, n: usize| -> String {
+            (0..n)
+                .map(|i| format!(r#"{{"type":"tool_call","toolCallId":"{prefix}{i}","toolName":"bash","input":{{"command":"ls"}},"summary":"gmail search newer_than:1d && ls -la /tmp/{i}"}},{{"type":"tool_result","toolCallId":"{prefix}{i}","toolName":"bash","output":"ok","isError":false}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let envelope = r#"Here is the spec.\n\n<exocortex_file name_base64=\"c3BlYy1kcmFmdC12My5tZA==\" size_bytes=\"493568\" truncated=\"true\">\n[Attached file: spec-draft-v3.md]\n# Spec\n</exocortex_file>"#;
+        let relay = r#"[notification] Discord/paramount · DM\nYeyito [ch:1]\n\n→ Yeyito <@3> [owner]:\ncan you check the deploy?\n[msg:5]"#;
+        let entries = [
+            r#"{"type":"system_instructions","text":"You are the timeline feature agent. Keep replies short.\nRun the tests before you hand over."}"#.to_owned(),
+            user("Can you summarise the report and check the build?", 1_000),
+            format!(
+                r#"{{"type":"ai","blocks":[{{"type":"thinking","text":"Tests first."}},{},{{"type":"text","text":"The build is **green** and the report says revenue is up."}}],{}}}"#,
+                calls("a", 3),
+                meta(1_001, 60_000)
+            ),
+            wake("[notification] Subagent completed: exo:kid\\nTask: build the timeline", 61_000, "subagent_completion"),
+            format!(
+                r#"{{"type":"ai","blocks":[{},{{"type":"text","text":"The timeline agent finished; I merged its branch."}}],{}}}"#,
+                calls("b", 2),
+                meta(61_001, 62_000)
+            ),
+            format!(r#"{{"type":"user","text":"{envelope}","metadata":{{"startedAt":63000,"model":"m","tokens":0}}}}"#),
+            format!(
+                r#"{{"type":"ai","blocks":[{{"type":"text","text":"Read it: three sections, two open questions."}}],{}}}"#,
+                meta(63_001, 64_000)
+            ),
+            format!(r#"{{"type":"user","text":"{relay}","metadata":{{"startedAt":65000,"model":"m","tokens":0,"automation":{{"kind":"external_notification"}}}}}}"#),
+            format!(
+                r#"{{"type":"ai","blocks":[{},{{"type":"text","text":"Deploy is green."}}],{}}}"#,
+                calls("c", 1),
+                meta(65_001, 66_000)
+            ),
+            wake("[chrono wake: chrono:1] Check the backups", 67_000, "chrono_wake"),
+            format!(
+                r#"{{"type":"ai","blocks":[{}],{}}}"#,
+                calls("d", 2),
+                meta(67_001, 68_000)
+            ),
+        ]
+        .join(",");
+        let mut model = open_folded(&entries);
+        assert!(model.chat.loaded && !model.chat.entries.is_empty(), "{:?}", serde_json::from_str::<serde_json::Value>(&format!("[{entries}]")).err());
+        feed(&mut model, &[r#"{"type":"conversation_updated","summary":{"id":"kid","provider":"anthropic","model":"m","effort":"low","title":"Timeline agent","pinned":false,"sortOrder":1,"streaming":false,"unread":false,"parentConversationId":"c"}}"#]);
+        model.ops.external_styles = vec![crate::exocortex::proto::ExternalToolStyle {
+            cmd: "gmail".into(),
+            label: "Gmail".into(),
+            color: "#ea4335".into(),
+        }];
+        model.ops.styles_version += 1;
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let mut canvas = Canvas::new(1080, HEIGHT as i32);
+        view.follow = false;
+        view.chat_scroll.offset = 0.0;
+        draw(&mut canvas, &mut model, &mut view, None, now);
+        save(&canvas, "p1-folded.png");
+        // Opened: the instructions, the notification's group, the chrono line.
+        for key in ["instructions", "group:u:61000", "group:u:67000"] {
+            model.handle(Action::Chat(chat::Act::ToggleExpanded(key.into())));
+        }
+        draw(&mut canvas, &mut model, &mut view, None, now);
+        save(&canvas, "p1-opened.png");
+        // All work shown: bash segments in their tools' colours, the subagent.
+        model.persist.update_settings(|s| s.show_all_work = true);
+        feed(&mut model, &[r#"{"type":"history_updated","convId":"c","entries":[],"historyStartIndex":11}"#]);
+        let long = (0..20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\\n");
+        let more = format!(
+            r#"{},{{"type":"ai","blocks":[{{"type":"tool_call","toolCallId":"x","toolName":"exo","input":{{"subagent":"Build the timeline view and its tests","args":{{"model":"opus","effort":"xhigh"}}}},"summary":"subagent"}},{{"type":"tool_result","toolCallId":"x","toolName":"exo","output":"{{\"conversation_id\":\"kid\"}}","isError":false}},{{"type":"tool_call","toolCallId":"r","toolName":"Read","input":{{}},"summary":"{long}"}},{{"type":"tool_result","toolCallId":"r","toolName":"Read","output":"","isError":false}},{{"type":"tool_call","toolCallId":"g","toolName":"bash","input":{{"command":"x"}},"summary":"cd ~/mail && gmail search newer_than:1d | head -5 && echo done"}},{{"type":"tool_result","toolCallId":"g","toolName":"bash","output":"","isError":false}}],{}}}"#,
+            user("Delegate the timeline", 70_000),
+            meta(70_001, 71_000)
+        );
+        let mut model2 = open_with(&more);
+        feed(&mut model2, &[r#"{"type":"conversation_updated","summary":{"id":"kid","provider":"anthropic","model":"m","effort":"low","title":"Timeline agent","pinned":false,"sortOrder":1,"streaming":false,"unread":false,"parentConversationId":"c"}}"#]);
+        model2.ops.external_styles = model.ops.external_styles.clone();
+        model2.ops.styles_version += 1;
+        let mut view = ViewState::new();
+        view.follow = false;
+        view.chat_scroll.offset = 0.0;
+        draw(&mut canvas, &mut model2, &mut view, None, now);
+        save(&canvas, "p1-tools.png");
+        // The live turn, folded: WORKING, what folded, its newest step; a
+        // notice waiting after it.
+        let mut model3 = open_folded(&user("Run the checks", 80_000));
+        feed(
+            &mut model3,
+            &[
+                r#"{"type":"streaming_started","convId":"c","provider":"anthropic","model":"claude-opus-5-5","startedAt":80001,"snapshotKind":"start","workTimerStartedAt":80001}"#,
+                r#"{"type":"text_chunk","convId":"c","text":"Checking the machine."}"#,
+                r#"{"type":"tool_call","convId":"c","toolCallId":"u","toolName":"bash","input":{"command":"uptime"},"summary":"uptime"}"#,
+                r#"{"type":"tool_result","convId":"c","toolCallId":"u","toolName":"bash","output":"up 3 days","isError":false}"#,
+                r#"{"type":"tool_call","convId":"c","toolCallId":"v","toolName":"bash","input":{"command":"df -h"},"summary":"df -h /data"}"#,
+                r#"{"type":"system_message","convId":"c","text":"Claude account switched from main to max2","color":"warning"}"#,
+            ],
+        );
+        let mut view = ViewState::new();
+        let before = view.before(&model3, now);
+        view.settle(&model3, before, HEIGHT, now);
+        draw(&mut canvas, &mut model3, &mut view, None, now);
+        save(&canvas, "p1-working.png");
     }
 }
