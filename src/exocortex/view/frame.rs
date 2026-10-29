@@ -26,6 +26,9 @@ use super::{ChatFrame, Hit, ListFrame, ViewState, chat_frame, draw_chat_update, 
 pub struct FrameDamage {
     pub moved: Option<(i32, i32, i32)>,
     pub rows: Vec<(i32, i32)>,
+    /// Rectangles drawn anew (`x0, y0, x1, y1`) in rows that otherwise only
+    /// moved: uploaded as they are (`Presenter::present_rows_and_boxes`).
+    pub boxes: Vec<(i32, i32, i32, i32)>,
 }
 
 /// The page's part of a frame's record.
@@ -261,6 +264,8 @@ pub fn update(
     }
     let mut damage = FrameDamage::default();
     let mut bands: Vec<(i32, i32)> = Vec::new();
+    // Floating overlays redrawn in their own columns only (x0, y0, x1, y1).
+    let mut boxes: Vec<(i32, i32, i32, i32)> = Vec::new();
     if new.modal.is_empty() {
         // The page's own path.
         let page = match (&old.page_frame, &new.page_frame) {
@@ -285,9 +290,25 @@ pub fn update(
                     .iter()
                     .any(|(y0, y1)| rows.1 > *y0 && rows.0 < *y1)
         };
-        for (_, body) in &new.floating {
+        // Overlays that say which columns they draw in are redrawn there
+        // only: the page drew the rest of their rows right.
+        let mut redraw = |id: u64, rows: (i32, i32)| match view.overlays.columns(id) {
+            Some((x0, x1)) => boxes.push((x0, rows.0, x1, rows.1)),
+            None => bands.push(rows),
+        };
+        for (id, body) in &new.floating {
             if under(body.rows) {
-                bands.push(body.rows);
+                redraw(*id, body.rows);
+            }
+        }
+        // A move carried floating overlays' pixels with the page: drawn
+        // again where they landed.
+        if let Some((y0, y1, dy)) = page.moved {
+            for (id, body) in &old.floating {
+                let (a, b) = body.rows;
+                if b > a && b > y0 && a < y1 {
+                    redraw(*id, ((a + dy).max(y0), (b + dy).min(y1)));
+                }
             }
         }
         damage = page;
@@ -360,6 +381,16 @@ pub fn update(
     );
     for &band in &bands {
         redraw_band(canvas, model, view, pressed, now, band);
+    }
+    for (x0, y0, x1, y1) in boxes {
+        let (y0, y1) = (y0.clamp(0, height), y1.clamp(0, height));
+        let (x0, x1) = (x0.clamp(0, canvas.width), x1.clamp(0, canvas.width));
+        if y1 > y0 && x1 > x0 {
+            canvas.set_clip(x0, y0, x1, y1);
+            draw_full(canvas, model, view, pressed, now);
+            canvas.reset_clip();
+            damage.boxes.push((x0, y0, x1, y1));
+        }
     }
     damage.rows = merge(damage.rows.into_iter().chain(bands).collect());
     Some(damage)

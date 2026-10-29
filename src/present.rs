@@ -264,6 +264,20 @@ impl Presenter {
         window_y: i32,
         rows: &[(i32, i32)],
     ) -> Result<Option<Damage>, Box<dyn Error>> {
+        self.present_rows_and_boxes(conn, canvas, window_y, rows, &[])
+    }
+
+    /// `present_rows`, and rectangles (`x0, y0, x1, y1`) the caller drew
+    /// anew in rows that otherwise only moved (`scroll`): uploaded as they
+    /// are, without comparing or uploading the rest of their rows.
+    pub fn present_rows_and_boxes<C: Connection>(
+        &mut self,
+        conn: &C,
+        canvas: &Canvas,
+        window_y: i32,
+        rows: &[(i32, i32)],
+        boxes: &[(i32, i32, i32, i32)],
+    ) -> Result<Option<Damage>, Box<dyn Error>> {
         if canvas.width != self.width || canvas.height != self.height {
             return Err("canvas size does not match presenter".into());
         }
@@ -347,6 +361,16 @@ impl Presenter {
             }
         }
         closed.append(&mut open);
+        if self.valid {
+            for &(x0, y0, x1, y1) in boxes {
+                let (x0, x1) = (x0.clamp(0, self.width), x1.clamp(0, self.width));
+                let (y0, y1) = (y0.clamp(0, self.height), y1.clamp(0, self.height));
+                if x1 > x0 && y1 > y0 {
+                    self.puts.push((x0, y0, x1, y1));
+                    closed.push(Damage { x0, y0, x1, y1 });
+                }
+            }
+        }
         closed.append(&mut self.moved);
         self.upload(conn, canvas)?;
         self.valid = true;
