@@ -213,6 +213,43 @@ impl Canvas {
         self.pixels.fill(color);
     }
 
+    /// Moves rows `y0..y1` by `dy` (what was at y lands at y + dy), in
+    /// blocks of `dy` rows that never overlap their source, 64 bytes a
+    /// step (`copy_pixels`): `copy_within` is musl's `memmove`, which copies
+    /// eight bytes a step. A scroll frame moves the transcript's ~7 MB.
+    pub fn move_rows(&mut self, y0: i32, y1: i32, dy: i32) {
+        let width = self.width as usize;
+        let (y0, y1) = (y0.max(0), y1.min(self.height));
+        let rows = y1 - y0 - dy.abs();
+        if rows <= 0 || dy == 0 {
+            return;
+        }
+        let step = dy.unsigned_abs() as usize;
+        if dy < 0 {
+            // Up: from the top, each block from the one `step` below it.
+            let (mut dst, end) = (y0 as usize, (y0 + rows) as usize);
+            while dst < end {
+                let n = step.min(end - dst);
+                let (to, from) = self.pixels.split_at_mut((dst + step) * width);
+                copy_pixels(&mut to[dst * width..(dst + n) * width], &from[..n * width]);
+                dst += n;
+            }
+        } else {
+            // Down: from the bottom, each block from the one `step` above.
+            let (start, mut end) = ((y0 + dy) as usize, (y0 + dy + rows) as usize);
+            while end > start {
+                let n = step.min(end - start);
+                let dst = end - n;
+                let (from, to) = self.pixels.split_at_mut(dst * width);
+                copy_pixels(
+                    &mut to[..n * width],
+                    &from[(dst - step) * width..(dst - step + n) * width],
+                );
+                end = dst;
+            }
+        }
+    }
+
     pub fn copy_from(&mut self, other: &Canvas) {
         if other.pixels.len() == self.pixels.len() {
             self.pixels.copy_from_slice(&other.pixels);
@@ -523,23 +560,24 @@ impl Canvas {
         alpha: f32,
     ) {
         let a = alpha_256(alpha);
-        for my in 0..height {
-            let ty = y + my;
-            if ty < self.clip.1 || ty >= self.clip.3 {
-                continue;
-            }
-            let row = (ty * self.width) as usize;
-            for mx in 0..width {
-                let tx = x + mx;
-                if tx < self.clip.0 || tx >= self.clip.2 {
-                    continue;
-                }
-                let m = u32::from(mask[(my * width + mx) as usize]);
+        // Only what the clip shows (a glyph outside it costs nothing: a
+        // strip or a column drawn again visits only its own pixels).
+        let (y0, y1) = ((self.clip.1 - y).max(0), (self.clip.3 - y).min(height));
+        let (x0, x1) = ((self.clip.0 - x).max(0), (self.clip.2 - x).min(width));
+        if y0 >= y1 || x0 >= x1 {
+            return;
+        }
+        for my in y0..y1 {
+            // (x may be left of the canvas: whole i32 until the clip adds.)
+            let row = (y + my) * self.width + x;
+            let line = (my * width) as usize;
+            for mx in x0..x1 {
+                let m = u32::from(mask[line + mx as usize]);
                 if m == 0 {
                     continue;
                 }
                 let coverage = ((m + (m >> 7)) * a) >> 8;
-                let index = row + tx as usize;
+                let index = (row + mx) as usize;
                 self.pixels[index] = blend(self.pixels[index], color, coverage);
             }
         }
@@ -808,9 +846,83 @@ pub fn ease_spring(t: f32) -> f32 {
     1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
 }
 
+/// `to.copy_from_slice(from)`, 16 pixels a step in vector registers (a
+/// slice copy is musl's `memcpy`, 16 bytes a step).
+fn copy_pixels(to: &mut [u32], from: &[u32]) {
+    let mut to = to.chunks_exact_mut(16);
+    let mut from = from.chunks_exact(16);
+    for (a, b) in (&mut to).zip(&mut from) {
+        let a: &mut [u32; 16] = a.try_into().unwrap_or_else(|_| unreachable!());
+        let b: &[u32; 16] = b.try_into().unwrap_or_else(|_| unreachable!());
+        *a = *b;
+    }
+    to.into_remainder().copy_from_slice(from.remainder());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rows moved in blocks are what `copy_within` makes of them.
+    #[test]
+    fn rows_move_like_copy_within() {
+        for (y0, y1, dy) in [
+            (10, 90, -1i32),
+            (10, 90, -7),
+            (0, 100, 33),
+            (5, 60, 1),
+            (5, 60, -54),
+            (20, 30, 200),
+        ] {
+            let mut canvas = Canvas::new(7, 100);
+            for (index, pixel) in canvas.pixels.iter_mut().enumerate() {
+                *pixel = index as u32;
+            }
+            let mut expected = canvas.pixels.clone();
+            let rows = y1 - y0 - dy.abs();
+            if rows > 0 {
+                let (src, dst) = if dy > 0 { (y0, y0 + dy) } else { (y0 - dy, y0) };
+                expected.copy_within(
+                    src as usize * 7..(src + rows) as usize * 7,
+                    dst as usize * 7,
+                );
+            }
+            canvas.move_rows(y0, y1, dy);
+            assert!(canvas.pixels == expected, "{y0} {y1} {dy}");
+        }
+    }
+
+    /// A mask drawn across the canvas's edges and clip draws what the clip
+    /// shows, the same pixels as one pixel at a time would.
+    #[test]
+    fn masks_draw_only_inside_the_clip() {
+        let mask: Vec<u8> = (0..100).map(|i| (i * 2 + 50) as u8).collect();
+        for (x, y, clip) in [
+            (-4, -3, (0, 0, 20, 20)),
+            (15, 15, (0, 0, 20, 20)),
+            (5, 5, (8, 6, 12, 9)),
+            (30, 30, (0, 0, 20, 20)),
+        ] {
+            let mut canvas = Canvas::new(20, 20);
+            canvas.clear(0x102030);
+            canvas.set_clip(clip.0, clip.1, clip.2, clip.3);
+            canvas.draw_mask(x, y, 10, 10, &mask, 0xff8000, 1.0);
+            let mut expected = Canvas::new(20, 20);
+            expected.clear(0x102030);
+            for my in 0..10 {
+                for mx in 0..10 {
+                    let (tx, ty) = (x + mx, y + my);
+                    if tx >= clip.0 && tx < clip.2 && ty >= clip.1 && ty < clip.3 {
+                        let m = u32::from(mask[(my * 10 + mx) as usize]);
+                        let coverage = ((m + (m >> 7)) * alpha_256(1.0)) >> 8;
+                        let index = (ty * 20 + tx) as usize;
+                        expected.pixels[index] = blend(expected.pixels[index], 0xff8000, coverage);
+                    }
+                }
+            }
+            assert!(canvas.pixels == expected.pixels, "{x} {y} {clip:?}");
+        }
+    }
 
     /// A stroke is solid all along: its round caps add to its body rather
     /// than cancelling it where they overlap (a hole at each end and joint).

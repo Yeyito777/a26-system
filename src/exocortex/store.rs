@@ -55,6 +55,8 @@ pub struct Settings {
     pub expand_tool_calls: bool,
     pub show_all_work: bool,
     pub fold_markers: bool,
+    /// "| N tokens" in replies' footers.
+    pub show_token_counts: bool,
     pub haptics: bool,
     #[serde(flatten)]
     pub other: Map<String, Value>,
@@ -69,6 +71,7 @@ impl Default for Settings {
             expand_tool_calls: false,
             show_all_work: false,
             fold_markers: true,
+            show_token_counts: false,
             haptics: true,
             other: Map::new(),
         }

@@ -327,7 +327,12 @@ impl<'a> Ctx<'a> {
         Ctx {
             aggregates: model.sidebar.aggregates(&model.composer.queued),
             now_ms: model.sidebar.wall_ms(now),
-            pulse: anim::pulse_percent(now, 1600),
+            // Steady once the list is left alone.
+            pulse: if model.sidebar.pulsing_now(now) {
+                anim::pulse_percent(now, 1600)
+            } else {
+                100
+            },
             pressed,
             lifted,
             selected,
@@ -1551,7 +1556,10 @@ fn lift_reach((y, h): (i32, i32)) -> (i32, i32) {
 /// Asks for the frames the list needs: pulsing dots and spinners at 30 Hz,
 /// the next minute (relative times), the search's debounce.
 pub fn animate(model: &Model, now: Instant, animator: &mut Animator) {
-    if model.offline || !model.sidebar.loaded || model.sidebar.pulsing {
+    // Pulsing dots only while the list is in use: the frame after it ends
+    // draws them steady, and then nothing is drawn.
+    let pulsing = model.sidebar.pulsing && model.sidebar.pulsing_now(now);
+    if model.offline || !model.sidebar.loaded || pulsing {
         animator.slow_frame(now);
     }
     let into_minute = model.sidebar.clock.map_or(model::now_ms(), |(at, ms)| {
@@ -1600,18 +1608,10 @@ pub fn draw_list_update(
         if shift.abs() > (bottom - top) / 2 {
             return None;
         }
-        let width = canvas.width as usize;
+        canvas.move_rows(top, bottom, -shift);
         if shift > 0 {
-            canvas.pixels.copy_within(
-                (top + shift) as usize * width..bottom as usize * width,
-                top as usize * width,
-            );
             redraw.push((bottom - shift, bottom));
         } else {
-            canvas.pixels.copy_within(
-                top as usize * width..(bottom + shift) as usize * width,
-                (top - shift) as usize * width,
-            );
             redraw.push((top, top - shift));
         }
         damage.moved = Some((top, bottom, -shift));
@@ -1830,6 +1830,8 @@ pub fn hit(
     y: f32,
     now: Instant,
 ) -> Option<Hit> {
+    // A touch: the list is in use.
+    model.sidebar.touch_list(now);
     if y < theme::top_bar() {
         return header_hit(model, x, y).map(Hit::Action);
     }
@@ -2178,7 +2180,17 @@ pub fn settle(
 fn settle_scroll(model: &mut Model, view: &mut ViewState, height: f32, now: Instant) -> bool {
     let mut changed = model.list_tick(now);
     if model.page != Page::List {
+        model.sidebar.seen = None;
         return changed;
+    }
+    // Shown, or scrolled (dragged, flung): the list is in use.
+    let offset = view.list_scroll.value(now).round();
+    if model.sidebar.seen != Some(offset) || view.list_scroll.dragging() {
+        if !model.sidebar.pulsing_now(now) {
+            changed = true;
+        }
+        model.sidebar.touch_list(now);
+        model.sidebar.seen = Some(offset);
     }
     changed |= auto_scroll(model, view, height, now);
     let max = list_max(model, height);
@@ -2435,6 +2447,7 @@ mod tests {
         let mut model = model();
         let mut view = ViewState::new();
         let t0 = Instant::now();
+        model.sidebar.touch_list(t0);
         let mut redrawn = 0;
         for step in 1..=12u64 {
             let at = t0 + Duration::from_millis(step * 34);
@@ -2454,6 +2467,8 @@ mod tests {
         let mut model = model();
         let mut view = ViewState::new();
         let now = Instant::now();
+        // In use (as touches make it): the dots pulse in every frame.
+        model.sidebar.touch_list(now);
         let press = act(Act::Open("c4".into()));
         for (before, after) in [(None, Some(&press)), (Some(&press), None)] {
             let damage = update_matches(
@@ -2510,6 +2525,88 @@ mod tests {
             },
         );
         assert!(damage.moved.is_none() && !damage.rows.is_empty());
+    }
+
+    /// What the next frame is asked for after a frame at `now`, the clock
+    /// half a minute into its minute (so the relative-time tick is 30 s off).
+    fn next_frame(model: &mut Model, view: &mut ViewState, now: Instant) -> Option<Instant> {
+        model.sidebar.clock = Some((now, 30_000));
+        super::super::frame::record(model, view, None, (1080, H as i32), now);
+        view.animator.take()
+    }
+
+    /// A list left alone draws nothing (the user keeps Auto-Lock off): its
+    /// streaming dots pulse for a while after it is shown or used, then stay
+    /// steady, and no frame is asked for but the minute's tick.
+    #[test]
+    fn an_idle_list_schedules_no_frames() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let t0 = Instant::now();
+        // Shown: in use, its streaming dots pulse.
+        let _ = settle(&mut model, &mut view, H, t0);
+        assert!(model.sidebar.conversations["c0"].streaming);
+        let next = next_frame(&mut model, &mut view, t0).expect("a pulse frame");
+        assert!(next <= t0 + Duration::from_millis(40));
+        // Left alone: the frame after the window draws the dots steady...
+        let idle = t0 + crate::exocortex::model::sidebar::IN_USE + Duration::from_millis(20);
+        let _ = settle(&mut model, &mut view, H, idle);
+        let next = next_frame(&mut model, &mut view, idle);
+        // ...and then nothing is asked for but the minute's turn.
+        assert!(
+            next.is_none_or(|at| at >= idle + Duration::from_secs(29)),
+            "idle, a frame asked for in {:?}",
+            next.map(|at| at - idle)
+        );
+        let later = idle + Duration::from_secs(5);
+        let _ = settle(&mut model, &mut view, H, later);
+        let next = next_frame(&mut model, &mut view, later);
+        assert!(next.is_none_or(|at| at >= later + Duration::from_secs(29)));
+        // Steady: two idle frames draw the same pixels (nothing to draw).
+        let damage = update_matches(
+            &mut model,
+            &mut view,
+            (None, None),
+            (idle, later),
+            |_, _| {},
+        );
+        assert_eq!(damage, FrameDamage::default());
+        // A touch: in use again, pulsing.
+        let _ = hit(&mut model, &mut view, H, 300.0, 600.0, later);
+        let next = next_frame(&mut model, &mut view, later).expect("a pulse frame");
+        assert!(next <= later + Duration::from_millis(40));
+        // A scroll too.
+        let much_later = later + Duration::from_secs(60);
+        let _ = settle(&mut model, &mut view, H, much_later);
+        assert!(
+            next_frame(&mut model, &mut view, much_later)
+                .is_none_or(|at| at >= much_later + Duration::from_secs(29))
+        );
+        view.list_scroll.offset = 160.0;
+        let _ = settle(&mut model, &mut view, H, much_later);
+        let next = next_frame(&mut model, &mut view, much_later).expect("a pulse frame");
+        assert!(next <= much_later + Duration::from_millis(40));
+    }
+
+    /// Nothing streaming, nothing moving: no frame but the minute's, in use
+    /// or not.
+    #[test]
+    fn a_still_list_schedules_only_the_minute() {
+        let mut model = Model::new();
+        model.on_connected();
+        let now = Instant::now();
+        model.apply(
+            parse_event(r#"{"type":"conversations_list","conversations":[{"id":"a","title":"A","unread":true}],"folders":[]}"#),
+            now,
+        );
+        let mut view = ViewState::new();
+        let _ = settle(&mut model, &mut view, H, now);
+        let next = next_frame(&mut model, &mut view, now);
+        assert!(
+            next.is_none_or(|at| at >= now + Duration::from_secs(29)),
+            "{:?}",
+            next.map(|at| at - now)
+        );
     }
 
     #[test]
@@ -2666,6 +2763,8 @@ mod tests {
         let mut model = model();
         let mut view = ViewState::new();
         let now = Instant::now();
+        // In use (as touches make it): the dots pulse in every frame.
+        model.sidebar.touch_list(now);
         model.handle(Action::List(Act::Toggle("f".into())));
         let text = theme::p().text;
         for offset in [0.0, 37.0, 311.0, 1500.0] {
