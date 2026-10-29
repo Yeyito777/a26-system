@@ -176,18 +176,8 @@ pub fn page_drawn(synced: impl FnOnce()) {
 }
 
 /// Sends one command to Moon and returns its `result` when Moon accepted it
-/// (`clipboard get`).
-pub fn query(command: &str) -> Option<serde_json::Value> {
-    let response = request(&socket(), format!("{command}\n").as_bytes())?;
-    let mut document: serde_json::Value = serde_json::from_str(&response).ok()?;
-    if !document.get("ok")?.as_bool()? {
-        return None;
-    }
-    Some(document.get_mut("result")?.take())
-}
-
-/// `query` for a long answer (`clipboard get image`: megabytes of base64 on
-/// one line): up to `limit` bytes, each read and write within `timeout`.
+/// (`clipboard get`; `clipboard get image`, megabytes of base64 on one
+/// line): up to `limit` bytes, each read and write within `timeout`.
 pub fn query_long(command: &str, timeout: Duration, limit: u64) -> Option<serde_json::Value> {
     let response = request_limited(&socket(), format!("{command}\n").as_bytes(), timeout, limit)?;
     let mut document: serde_json::Value = serde_json::from_str(&response).ok()?;
