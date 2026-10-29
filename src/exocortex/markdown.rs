@@ -743,7 +743,11 @@ mod tests {
     fn a_streaming_prefix_only_changes_its_last_block() {
         let full = "## Summary\n\nRevenue **grew 12%**; see [it](https://x.y).\n\n- [x] Tests pass\n- [ ] Gmail\n  - nested\n\n> Costs are seasonal.\n\n```ts\nexport function grow() {\n  return 1;\n}\n```\n\n| Metric | Q2 |\n|:--|--:|\n| Revenue | 100 |\n\n~~~\nt\n~~~\n\n    indented\n\n---\n\nDone.";
         let done = parse(full);
-        let cuts: Vec<usize> = full.char_indices().map(|(at, _)| at).chain([full.len()]).collect();
+        let cuts: Vec<usize> = full
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain([full.len()])
+            .collect();
         for cut in cuts {
             let blocks = parse(&full[..cut]);
             let settled = blocks.len().saturating_sub(1);
