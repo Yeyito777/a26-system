@@ -344,8 +344,10 @@ are discarded.
   shadow: the iPhone's barely shows on the dark themes, and every pixel it
   reaches is blended again in every frame of a scroll. Measured on EXO's
   scroll (the exo-bench scenario in sandbox 6, UI-thread instructions per
-  frame, p50): 4.91 M without chips (ce234bd, and main without them), 7.46
-  M with them drawn as a floating overlay, 4.99-5.01 M as a layer.
+  frame, p50): ce234bd 4.91 M; with the chips drawn as a floating overlay
+  7.46 M; as a layer 4.99-5.01 M (main without chips then: 4.91 M). After
+  C2's 64-byte row moves (5112ab0): 1.19 M, without chips 1.12 M; EXO's
+  open 30.1 M, without chips 28.8 M (the chips' first sprite).
 - **The list's rows.** The rows (`sidebar::Layout`) are rebuilt only when
   rows may come, go or move (a pin, a sort order, a folder opened, the
   search), and folder activity is added up once per change
