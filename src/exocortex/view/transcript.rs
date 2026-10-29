@@ -2334,4 +2334,97 @@ mod tests {
             "Discord/main · dm → Ana said hi"
         );
     }
+
+    /// Renders the transcript kinds into PNGs for side-by-side checks with
+    /// the iPhone's reference shots: `WP_C2_SHOTS=dir cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn render_reference_shots() {
+        let Some(dir) = std::env::var_os("WP_C2_SHOTS") else {
+            return;
+        };
+        let save = |canvas: &Canvas, name: &str| {
+            let path = std::path::Path::new(&dir).join(name);
+            let file = std::fs::File::create(&path).unwrap();
+            let mut encoder = png::Encoder::new(file, canvas.width as u32, canvas.height as u32);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            let bytes: Vec<u8> = canvas
+                .pixels
+                .iter()
+                .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8])
+                .collect();
+            writer.write_image_data(&bytes).unwrap();
+        };
+        let meta = |start: u64, end: u64| {
+            format!(r#""metadata":{{"startedAt":{start},"endedAt":{end},"model":"claude-opus-5-5","tokens":900,"generationThroughput":{{"provider":"anthropic","model":"claude-opus-5-5","rates":[76.2]}}}}"#)
+        };
+        let entries = [
+            r#"{"type":"user","text":"Can you summarise this report and check the build?"}"#.to_owned(),
+            format!(
+                r#"{{"type":"ai","blocks":[{{"type":"thinking","text":"The user wants a summary and a build check.\n\nI'll run the tests first."}},{{"type":"tool_call","toolCallId":"t1","toolName":"Bash","input":{{"command":"cd web && timeout 120 bun test 2>&1 | tail -3"}},"summary":"cd web && timeout 120 bun test 2>&1 | tail -3"}},{{"type":"tool_result","toolCallId":"t1","toolName":"Bash","output":"","isError":false}},{{"type":"tool_call","toolCallId":"t2","toolName":"mcp__gmail__search","input":{{}},"summary":"search newer_than:1d --timeout_seconds 60"}},{{"type":"tool_result","toolCallId":"t2","toolName":"","output":"","isError":true}},{{"type":"text","text":"The build is **green**. Summary:\n\n- revenue up\n- costs flat\n\nDone."}}],{}}}"#,
+                meta(1_000, 60_000)
+            ),
+            r#"{"type":"system","text":"Claude account switched from \"main\" to \"max2\": the main account hit its usage limit. The conversation continues on max2 until the limit resets.","color":"warning","metadata":{"startedAt":61000,"model":"","tokens":0,"kind":"provider_notice"}}"#.to_owned(),
+            r#"{"type":"system","text":"--- Compaction finished ---","metadata":{"startedAt":62000,"model":"","tokens":0,"kind":"context_compaction_finished","system":true}}"#.to_owned(),
+            r#"{"type":"user","text":"[chrono wake: deploy] Chrono wake: check the deploy.","metadata":{"startedAt":63000,"model":"","tokens":0,"automation":{"kind":"chrono_wake"}}}"#.to_owned(),
+            format!(
+                r#"{{"type":"ai","blocks":[{{"type":"text","text":"[Context: deploy is green]"}},{{"type":"text","text":"Deploy is **green**. Nothing to do."}}],{}}}"#,
+                meta(63_000, 64_000)
+            ),
+            r#"{"type":"system","text":"✗ Request aborted by the user.","color":"error"}"#.to_owned(),
+        ]
+        .join(",");
+        let mut model = open_with(&entries);
+        assert!(
+            model.chat.loaded && !model.chat.entries.is_empty(),
+            "{:?}",
+            (serde_json::from_str::<serde_json::Value>(&format!("[{entries}]")).err(), &entries[990..1040])
+        );
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("think:start:0".into())));
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let mut canvas = Canvas::new(1080, HEIGHT as i32);
+        view.follow = false;
+        view.chat_scroll.offset = 0.0;
+        draw(&mut canvas, &mut model, &mut view, None, now);
+        save(&canvas, "c2-rich-top.png");
+        view.follow = true;
+        let before = view.before(&model, now);
+        view.settle(&model, before, HEIGHT, now);
+        draw(&mut canvas, &mut model, &mut view, None, now);
+        save(&canvas, "c2-rich-bottom.png");
+        // Streaming: a running tool, a retry, the ticking footer, a queued
+        // message.
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"user_message","convId":"c","text":"Now run the full test suite and fix anything that fails.","startedAt":70000}"#,
+                r#"{"type":"streaming_started","convId":"c","provider":"anthropic","model":"claude-opus-5-5","startedAt":70000,"snapshotKind":"start","workTimerStartedAt":70000}"#,
+                r#"{"type":"block_start","convId":"c","blockType":"thinking"}"#,
+                r#"{"type":"thinking_chunk","convId":"c","text":"Let me run them."}"#,
+                r#"{"type":"tool_call","convId":"c","toolCallId":"t9","toolName":"Bash","input":{"command":"cd web && bun test 2>&1 | tail -20"},"summary":"cd web && bun test 2>&1 | tail -20"}"#,
+                r#"{"type":"tool_result","convId":"c","toolCallId":"t9","toolName":"Bash","output":"2 fail","isError":false}"#,
+                r#"{"type":"text_chunk","convId":"c","text":"Two tests fail in `sidebar.test.ts`. The first one is a **stale sort order** after a pin; the fix is to"}"#,
+                r#"{"type":"queue_updated","messages":[{"id":"q1","convId":"c","text":"also bump the version when you're done","timing":"next-turn","source":"daemon","createdAt":1}]}"#,
+            ],
+        );
+        let before = view.before(&model, now);
+        view.settle(&model, before, HEIGHT, now);
+        draw(&mut canvas, &mut model, &mut view, None, now);
+        save(&canvas, "c2-streaming.png");
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"tool_call","convId":"c","toolCallId":"t10","toolName":"Bash","input":{"command":"sleep 30"},"summary":"sleep 30"}"#,
+                r#"{"type":"stream_retry","convId":"c","attempt":2,"maxAttempts":5,"errorMessage":"Overloaded","delaySec":12}"#,
+                r#"{"type":"context_compaction_status","convId":"c","active":true,"startedAt":1}"#,
+            ],
+        );
+        let before = view.before(&model, now);
+        view.settle(&model, before, HEIGHT, now);
+        draw(&mut canvas, &mut model, &mut view, None, now);
+        save(&canvas, "c2-status.png");
+    }
 }

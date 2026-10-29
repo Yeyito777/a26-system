@@ -1005,7 +1005,7 @@ fn status_text(kind: StatusKind, model: &Model, now: Instant) -> Option<(String,
             };
             Some((
                 format!(
-                    "⟳ {} — {when} ({}/{})…",
+                    "{} — {when} ({}/{})…",
                     retry.message.lines().next().unwrap_or_default(),
                     retry.attempt,
                     retry.max_attempts
@@ -1119,7 +1119,11 @@ pub(crate) fn draw_mark(canvas: &mut Canvas, mark: &Mark, dy: f32, model: &Model
             };
             let cy = dy + mark.y + STATUS_H / 2.0;
             let mut x = MARGIN;
-            if spins {
+            if kind == &StatusKind::Retry {
+                // ⟳, drawn (the type has no such glyph).
+                icons::draw(canvas, Icon::Refresh, x + STATUS_SPINNER / 2.0, cy, 34.0, color, 1.0);
+                x += STATUS_SPINNER + 22.0;
+            } else if spins {
                 let at = (anim::phase(now, 700) * 21.0).floor() / 21.0;
                 spinner_at(
                     canvas,
@@ -1165,10 +1169,4 @@ fn spinner_at(
     canvas.ring_arc(cx, cy, radius, stroke, 0.0, tau, track, 1.0);
     let start = at * tau;
     canvas.ring_arc(cx, cy, radius, stroke, start, start + tau / 4.0, color, 1.0);
-}
-
-/// Icons a mark-less piece may draw (kept here so the set is known).
-#[allow(dead_code)]
-pub(crate) fn icon_rows(cy: f32, size: f32) -> (f32, f32) {
-    icons::rows(cy, size)
 }

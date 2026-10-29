@@ -289,7 +289,7 @@ pub(crate) fn lay_tool(
     if failed && let Some(last) = lines.last() {
         let end = tx + super::markdown_layout::line_width(last);
         ops.push(text_op(
-            end + 6.0,
+            end + super::super::ui::widgets::measure(" ", ty),
             ty.baseline(top + (lines.len() - 1) as f32 * line_h),
             "✗",
             ty,
