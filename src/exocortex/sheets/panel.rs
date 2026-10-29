@@ -138,6 +138,52 @@ pub enum Row {
         style: Style,
         color: Rgb,
     },
+    /// A bold title with a muted note right after it ("ANTHROPIC  2
+    /// accounts", `real-08-settings-top`).
+    Lead {
+        left: String,
+        right: String,
+        style: Style,
+        color: Rgb,
+    },
+    /// A rule between blocks (between providers' usage, `real-08`).
+    Rule,
+    /// The connection card (`real-09-settings-2`): a rail and a dot in the
+    /// state's colour, the state and its details, a note on the right (the
+    /// round trip).
+    Status {
+        color: Rgb,
+        lines: Vec<(String, Style, Rgb)>,
+        right: Option<String>,
+    },
+    /// A muted eyebrow over its value (Settings' "SSH SESSION / up since …").
+    Field {
+        label: String,
+        value: String,
+    },
+    /// A plain action: its label in the accent, the row its target
+    /// (Settings' "Clear cached chats").
+    Action {
+        label: String,
+        tap: Tap,
+    },
+    /// The token statistics' daily heatmap (`real-10-sheet-tokens`): a
+    /// column per week, oldest first, Sunday to Saturday, each day's level
+    /// 0-4 (-1: still to come).
+    Heat(Vec<[i8; 7]>),
+    /// The accounts grid's head (`real-10-sheet-accounts`): the provider,
+    /// then "5-HOUR" and "WEEKLY" over their columns.
+    GridHead(String),
+    /// An account in the grid: its dot, name and note, and a bar with its
+    /// share and reset per window.
+    Account {
+        dot: Rgb,
+        name: String,
+        name_color: Rgb,
+        bold: bool,
+        note: Option<String>,
+        windows: [Option<Meter>; 2],
+    },
     /// A 3 pt bar filled to `permille`.
     Bar {
         permille: u16,
@@ -155,8 +201,62 @@ pub enum Row {
     },
 }
 
+/// A window's meter in the accounts grid: the bar's fill, the share
+/// ("13%") and the time to its reset ("1h15m").
+#[derive(Debug, Clone, PartialEq)]
+pub struct Meter {
+    pub permille: u16,
+    pub share: String,
+    pub reset: String,
+    pub color: Rgb,
+}
+
+/// The accounts grid's columns: where the two windows start and how wide
+/// they are, for a content `width`.
+fn grid_columns(width: f32) -> [(f32, f32); 2] {
+    let w = (width * 0.235).round();
+    let gap = 22.0;
+    [(width - 2.0 * w - gap, w), (width - w, w)]
+}
+
+/// The heatmap's padding above and below, and the gap between its cells
+/// (10, 4 and 2 pt).
+const HEAT_PAD: (f32, f32) = (28.0, 11.0);
+const HEAT_GAP: f32 = 6.0;
+
+/// A heatmap cell's side for `columns` weeks in `width`, and the gap.
+fn heat_cell(columns: usize, width: f32) -> (f32, f32) {
+    let n = columns.max(1) as f32;
+    (((width - (n - 1.0) * HEAT_GAP) / n).floor(), HEAT_GAP)
+}
+
 /// A hit's preview shows at most this many lines.
 const HIT_LINES: usize = 4;
+
+/// A rule row: room above its hairline, and in all (`real-08`).
+const RULE_AT: f32 = 44.0;
+const RULE_ROW: f32 = 76.0;
+/// Between a lead's title and its note.
+const LEAD_GAP: f32 = 24.0;
+/// The connection card's dot centre and its text, from the card's left.
+const STATUS_DOT_X: f32 = 79.0;
+const STATUS_X: f32 = 142.0;
+/// A field's padding above and below.
+const FIELD_PAD: f32 = 18.0;
+
+/// The room a status card's right note takes.
+fn status_note_w(right: Option<&str>) -> f32 {
+    right.map_or(0.0, |note| {
+        widgets::measure(note, Style::Caption.ty()) + 34.0
+    })
+}
+
+/// Whether a pair's two texts fit on one line.
+fn pair_fits(left: &str, right: &str, style: Style, width: f32) -> bool {
+    let ty = style.ty();
+    widgets::measure(left, ty) + 34.0 + widgets::measure(right, ty.weight(Weight::MonoBold))
+        <= width
+}
 
 /// `text` wrapped at spaces to `width` in `ty`, as char ranges (the space a
 /// line breaks at belongs to neither line; a word longer than a line
@@ -203,11 +303,29 @@ pub fn wrap_ranges(text: &str, ty: Type, width: f32) -> Vec<(usize, usize)> {
     lines
 }
 
-const SECTION: f32 = 110.0;
-const SECTION_LINE: f32 = 108.0;
-const SUB: f32 = 90.0;
+const SECTION_BASE: f32 = 110.0;
+const SECTION_LINE_BASE: f32 = 108.0;
+const SUB_BASE: f32 = 90.0;
 const NAV_MIN: f32 = 144.0;
-const TASK: f32 = 133.0;
+const TASK_BASE: f32 = 133.0;
+
+// What holds text grows with the text size (`theme::grown`): a section's
+// title line (40), a sub-title's (40), a task's line (56).
+fn section_h() -> f32 {
+    theme::grown(SECTION_BASE, 40.0)
+}
+
+fn section_line() -> f32 {
+    theme::grown(SECTION_LINE_BASE, 40.0)
+}
+
+fn sub_h() -> f32 {
+    theme::grown(SUB_BASE, 40.0)
+}
+
+fn task_h() -> f32 {
+    theme::grown(TASK_BASE, 56.0)
+}
 const BUTTON_GAP: f32 = 22.0;
 const PAD_Y: f32 = 20.0;
 const RAIL_PAD: (f32, f32) = (28.0, 34.0);
@@ -260,8 +378,8 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
     let mut keys = Vec::new();
     let mut parts = Vec::new();
     let height = match &row {
-        Row::Section { .. } => SECTION,
-        Row::Sub(_) => SUB,
+        Row::Section { .. } => section_h(),
+        Row::Sub(_) => sub_h(),
         Row::Text { text, style, .. } => {
             lines = wrap(text, style.ty(), width);
             11.0 + lines.len() as f32 * style.ty().line() + 11.0
@@ -300,8 +418,51 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
                 .sum();
             2.0 * RAIL_PAD.0 + text_h
         }
-        Row::Task { .. } => TASK,
-        Row::Pair { style, .. } => style.ty().line() + 8.0,
+        Row::Task { .. } => task_h(),
+        Row::Pair {
+            left, right, style, ..
+        } => {
+            let lines = if pair_fits(left, right, *style, width) {
+                1.0
+            } else {
+                2.0
+            };
+            lines * style.ty().line() + 8.0
+        }
+        Row::Lead { style, .. } => style.ty().line() + 8.0,
+        Row::Rule => RULE_ROW,
+        Row::Status {
+            lines: items,
+            right,
+            ..
+        } => {
+            let inner = width - STATUS_X - RAIL_PAD.1 - status_note_w(right.as_deref());
+            parts = items
+                .iter()
+                .map(|(text, style, _)| wrap(text, style.ty(), inner))
+                .collect();
+            let text_h: f32 = parts
+                .iter()
+                .zip(items)
+                .map(|(p, (_, style, _))| p.len() as f32 * style.ty().line())
+                .sum();
+            2.0 * RAIL_PAD.0 + text_h
+        }
+        Row::Field { value, .. } => {
+            lines = wrap(value, Style::Body.ty(), width);
+            FIELD_PAD
+                + theme::T_EYEBROW.line()
+                + 6.0
+                + lines.len() as f32 * Style::Body.ty().line()
+                + FIELD_PAD
+        }
+        Row::Action { .. } => theme::grown(TARGET, 60.0),
+        Row::GridHead(_) => section_h(),
+        Row::Heat(weeks) => {
+            let (cell, gap) = heat_cell(weeks.len(), width);
+            HEAT_PAD.0 + 7.0 * cell + 6.0 * gap + HEAT_PAD.1
+        }
+        Row::Account { .. } => theme::grown(144.0, 100.0),
         Row::Bar { .. } => BAR + 14.0,
         Row::Gap(px) => *px as f32,
         Row::Hit { preview, .. } => {
@@ -446,7 +607,10 @@ pub fn targets(laid: &Laid, width: f32) -> Vec<(RectF, Tap)> {
                     ..
                 } => {
                     let w = (widgets::measure(label, Style::Caption.ty()) + 56.0).max(TARGET);
-                    targets.push((RectF::new(width - w + 28.0, top, w, SECTION), tap.clone()));
+                    targets.push((
+                        RectF::new(width - w + 28.0, top, w, section_h()),
+                        tap.clone(),
+                    ));
                 }
                 Row::Nav { tap, .. } => {
                     targets.push((RectF::new(0.0, top, width, laid.height), tap.clone()));
@@ -458,17 +622,17 @@ pub fn targets(laid: &Laid, width: f32) -> Vec<(RectF, Tap)> {
                         }
                     }
                 }
-                Row::Hit { tap, .. } => {
+                Row::Hit { tap, .. } | Row::Action { tap, .. } => {
                     targets.push((RectF::new(0.0, top, width, laid.height), tap.clone()));
                 }
                 Row::Task { tap, more, .. } => {
                     let more_w = if more.is_some() { TARGET } else { 0.0 };
                     if let Some(tap) = tap {
-                        targets.push((RectF::new(0.0, top, width - more_w, TASK), tap.clone()));
+                        targets.push((RectF::new(0.0, top, width - more_w, task_h()), tap.clone()));
                     }
                     if let Some(more) = more {
                         targets.push((
-                            RectF::new(width - more_w + 34.0, top, more_w, TASK),
+                            RectF::new(width - more_w + 34.0, top, more_w, task_h()),
                             more.clone(),
                         ));
                     }
@@ -577,7 +741,7 @@ pub fn draw_row(
     match &laid.row {
         Row::Section { title, button } => {
             let ty = theme::T_SECTION;
-            let baseline = ty.baseline(y + 24.0 + (SECTION_LINE - 24.0 - ty.line()) / 2.0);
+            let baseline = ty.baseline(y + 24.0 + (section_line() - 24.0 - ty.line()) / 2.0);
             widgets::text(canvas, title, x, baseline, ty, p.accent, 1.0);
             if let Some((label, tap)) = button {
                 let ty = Style::Caption.ty();
@@ -586,13 +750,13 @@ pub fn draw_row(
                     canvas,
                     label,
                     right,
-                    ty.baseline(y + 24.0 + (SECTION_LINE - 24.0 - ty.line()) / 2.0),
+                    ty.baseline(y + 24.0 + (section_line() - 24.0 - ty.line()) / 2.0),
                     ty,
                     p.secondary_accent,
                     alpha,
                 );
             }
-            widgets::hairline(canvas, x, right, y + SECTION_LINE, c.rule_sheet_row);
+            widgets::hairline(canvas, x, right, y + section_line(), c.rule_sheet_row);
         }
         Row::Sub(text) => {
             let ty = theme::T_EYEBROW;
@@ -736,13 +900,18 @@ pub fn draw_row(
             if tap.as_ref().is_some_and(down) {
                 widgets::fill(
                     canvas,
-                    RectF::new(0.0, y, W - if more.is_some() { TARGET } else { 0.0 }, TASK),
+                    RectF::new(
+                        0.0,
+                        y,
+                        W - if more.is_some() { TARGET } else { 0.0 },
+                        task_h(),
+                    ),
                     p.selection_background,
                 );
             }
             let ty = Style::Caption.ty();
             let bold = Style::CaptionBold.ty();
-            let baseline = ty.baseline(y + (TASK - ty.line()) / 2.0);
+            let baseline = ty.baseline(y + (task_h() - ty.line()) / 2.0);
             let label_w = widgets::text(canvas, label, x, baseline, bold, *color, 1.0);
             let time_right = right - if more.is_some() { TARGET - 34.0 } else { 0.0 };
             let time_w = widgets::text_right(
@@ -759,9 +928,9 @@ pub fn draw_row(
             widgets::text(canvas, &title, title_x, baseline, ty, p.text, 1.0);
             if let Some(more) = more {
                 let alpha = if down(more) { 0.5 } else { 1.0 };
-                widgets::ellipsis(canvas, right - 30.0, y + TASK / 2.0, p.muted, alpha);
+                widgets::ellipsis(canvas, right - 30.0, y + task_h() / 2.0, p.muted, alpha);
             }
-            widgets::hairline(canvas, x, right, y + TASK - HAIRLINE, row_rule);
+            widgets::hairline(canvas, x, right, y + task_h() - HAIRLINE, row_rule);
         }
         Row::Pair {
             left,
@@ -773,7 +942,198 @@ pub fn draw_row(
             let baseline = ty.baseline(y + 4.0);
             widgets::text(canvas, left, x, baseline, ty, p.text, 1.0);
             let bold = ty.weight(Weight::MonoBold);
-            widgets::text_right(canvas, value, right, baseline, bold, *color, 1.0);
+            // On the next line when both do not fit (large text).
+            let value_baseline = if pair_fits(left, value, *style, width) {
+                baseline
+            } else {
+                baseline + ty.line()
+            };
+            widgets::text_right(canvas, value, right, value_baseline, bold, *color, 1.0);
+        }
+        Row::Lead {
+            left,
+            right: note,
+            style,
+            color,
+        } => {
+            let ty = style.ty();
+            let baseline = ty.baseline(y + 4.0);
+            let w = widgets::text(canvas, left, x, baseline, ty, p.text, 1.0);
+            if !note.is_empty() {
+                let note_ty = ty.weight(Weight::Mono);
+                let room = (right - x - w - LEAD_GAP).max(0.0);
+                let note = widgets::fit(note, note_ty, room);
+                widgets::text(
+                    canvas,
+                    &note,
+                    x + w + LEAD_GAP,
+                    baseline,
+                    note_ty,
+                    *color,
+                    1.0,
+                );
+            }
+        }
+        Row::Rule => {
+            widgets::hairline(canvas, x, right, y + RULE_AT, c.rule_settings);
+        }
+        Row::Status {
+            color,
+            lines,
+            right: note,
+        } => {
+            let rect = RectF::new(x, y, width, laid.height);
+            widgets::fill(canvas, rect, theme::mix(*color, 4, background));
+            widgets::fill(canvas, RectF::new(x, y, RAIL, laid.height), *color);
+            let cy = y + laid.height / 2.0;
+            canvas.fill_circle(x + STATUS_DOT_X, cy, 8.0, *color, 1.0);
+            let mut ty_top = y + RAIL_PAD.0;
+            for ((_, style, color), parts) in lines.iter().zip(&laid.parts) {
+                let ty = style.ty();
+                for part in parts {
+                    widgets::text(
+                        canvas,
+                        part,
+                        x + STATUS_X,
+                        ty.baseline(ty_top),
+                        ty,
+                        *color,
+                        1.0,
+                    );
+                    ty_top += ty.line();
+                }
+            }
+            if let Some(note) = note {
+                let ty = Style::Caption.ty();
+                let baseline = ty.baseline(cy - ty.line() / 2.0);
+                widgets::text_right(canvas, note, right - RAIL_PAD.1, baseline, ty, p.muted, 1.0);
+            }
+        }
+        Row::Field { label, .. } => {
+            let eyebrow = theme::T_EYEBROW;
+            widgets::eyebrow(canvas, label, x, eyebrow.baseline(y + FIELD_PAD), p.muted);
+            let body = Style::Body.ty();
+            let top = y + FIELD_PAD + eyebrow.line() + 6.0;
+            for (index, line) in laid.lines.iter().enumerate() {
+                let baseline = body.baseline(top + index as f32 * body.line());
+                widgets::text(canvas, line, x, baseline, body, p.text, 1.0);
+            }
+        }
+        Row::Heat(weeks) => {
+            let (cell, gap) = heat_cell(weeks.len(), width);
+            let empty = theme::mix(p.border, 22, background);
+            for (column, days) in weeks.iter().enumerate() {
+                for (row, level) in days.iter().enumerate() {
+                    let color = match level {
+                        1 => theme::mix(p.accent, 30, background),
+                        2 => theme::mix(p.accent, 52, background),
+                        3 => theme::mix(p.accent, 76, background),
+                        4 => p.accent,
+                        0 => empty,
+                        _ => continue,
+                    };
+                    let rect = RectF::new(
+                        x + column as f32 * (cell + gap),
+                        y + HEAT_PAD.0 + row as f32 * (cell + gap),
+                        cell,
+                        cell,
+                    );
+                    widgets::fill(canvas, rect, color);
+                }
+            }
+        }
+        Row::GridHead(title) => {
+            let ty = Style::CaptionBold.ty();
+            let baseline = ty.baseline(y + laid.height - 34.0 - ty.line());
+            let title_room = grid_columns(width)[0].0 - 22.0;
+            let title = widgets::fit(&title.to_uppercase(), ty, title_room);
+            widgets::text(canvas, &title, x, baseline, ty, p.text, 1.0);
+            let head = theme::T_EYEBROW;
+            for ((cx, _), label) in grid_columns(width).into_iter().zip(["5-hour", "Weekly"]) {
+                widgets::text(canvas, label, x + cx, baseline, head, p.muted, 1.0);
+            }
+            widgets::hairline(
+                canvas,
+                x,
+                right,
+                y + laid.height - HAIRLINE,
+                c.rule_settings,
+            );
+        }
+        Row::Account {
+            dot,
+            name,
+            name_color,
+            bold,
+            note,
+            windows,
+        } => {
+            let columns = grid_columns(width);
+            let body = if *bold {
+                Style::Body.ty().weight(Weight::MonoBold)
+            } else {
+                Style::Body.ty()
+            };
+            let meta = Style::Meta.ty();
+            let text_h = body.line() + if note.is_some() { meta.line() } else { 0.0 };
+            let top = y + ((laid.height - text_h) / 2.0).round();
+            canvas.fill_circle(x + 20.0, top + body.line() / 2.0, 11.0, *dot, 1.0);
+            let name_x = x + 62.0;
+            let room = columns[0].0 - 62.0 - 22.0;
+            let name = widgets::fit(name, body, room);
+            widgets::text(
+                canvas,
+                &name,
+                name_x,
+                body.baseline(top),
+                body,
+                *name_color,
+                1.0,
+            );
+            if let Some(note) = note {
+                let note = widgets::fit(note, meta, room);
+                let baseline = meta.baseline(top + body.line());
+                widgets::text(canvas, &note, name_x, baseline, meta, p.muted, 1.0);
+            }
+            let caption = Style::Caption.ty();
+            let bar_y = y + ((laid.height - (BAR + 12.0 + caption.line())) / 2.0).round();
+            for ((cx, w), meter) in columns.into_iter().zip(windows) {
+                let Some(meter) = meter else { continue };
+                let track = RectF::new(x + cx, bar_y, w, BAR);
+                widgets::fill(canvas, track, c.switch_off);
+                let fill = (w * f32::from(meter.permille.min(1000)) / 1000.0).round();
+                if fill > 0.0 {
+                    widgets::fill(canvas, RectF::new(track.x, bar_y, fill, BAR), meter.color);
+                }
+                let baseline = caption.baseline(bar_y + BAR + 12.0);
+                widgets::text(
+                    canvas,
+                    &meter.share,
+                    track.x,
+                    baseline,
+                    caption,
+                    meter.color,
+                    1.0,
+                );
+                let reset_room = w - widgets::measure(&meter.share, caption) - 11.0;
+                let reset = widgets::fit(&meter.reset, caption, reset_room.max(0.0));
+                widgets::text_right(canvas, &reset, track.x + w, baseline, caption, p.muted, 1.0);
+            }
+            widgets::hairline(canvas, x, right, y + laid.height - HAIRLINE, row_rule);
+        }
+        Row::Action { label, tap } => {
+            if down(tap) {
+                widgets::fill(
+                    canvas,
+                    RectF::new(0.0, y, W, laid.height - HAIRLINE),
+                    p.selection_background,
+                );
+            }
+            let body = Style::Body.ty();
+            let baseline = body.baseline(y + (laid.height - body.line()) / 2.0);
+            let label = widgets::fit(label, body, width);
+            widgets::text(canvas, &label, x, baseline, body, p.accent, 1.0);
+            widgets::hairline(canvas, x, right, y + laid.height - HAIRLINE, row_rule);
         }
         Row::Bar { permille, color } => {
             let track = RectF::new(x, y + 14.0, width, BAR);

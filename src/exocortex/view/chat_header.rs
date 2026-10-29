@@ -17,7 +17,7 @@ use crate::gfx::{Canvas, Rgb};
 use super::super::anim::{self, Animator};
 use super::super::model::{Action, Model, Nav, UiAct, chat, composer, ops};
 use super::super::sheets;
-use super::super::theme::{self, T_SUBTITLE, T_TITLE, TOP_BAR};
+use super::super::theme::{self, T_SUBTITLE, T_TITLE};
 use super::super::ui::icons::{self, Icon, Style};
 use super::super::ui::sheet::{ActionItem, ActionList, Sheet, Tone, action_sheet};
 use super::super::ui::widgets::{self, RAIL_CHAT};
@@ -26,9 +26,11 @@ use super::super::ui::widgets::{self, RAIL_CHAT};
 const CENTRE: (f32, f32) = (140.0, 940.0);
 const BACK_X: f32 = 72.0;
 const MORE_X: f32 = 1008.0;
+/// The controls' centre and the title's and subtitle's baselines in the
+/// 122 px bar (`real-04-new-chat`: the roadmap's 64 for the title sits
+/// lower than the iPhone's); a taller bar (large text) keeps their
+/// proportions (`theme::in_bar`).
 const ROW_Y: f32 = 61.0;
-/// The title's and subtitle's baselines (`real-04-new-chat`: the
-/// roadmap's 64 for the title sits lower than the iPhone's).
 const TITLE_BASELINE: f32 = 47.0;
 const SUBTITLE_BASELINE: f32 = 104.0;
 /// The status dot (5 pt) and the gap after it.
@@ -65,17 +67,7 @@ pub fn subtitle(model: &Model) -> Subtitle {
     let connected = model.ready || (!model.connected && !model.offline);
     let link = &model.ops.usage.link;
     let (mut text, dot) = if !model.connected && model.offline {
-        // A restart the daemon announced (PAR-029).
-        let text = if link.shutdown.as_deref() == Some("restart") {
-            "Daemon restarting…"
-        } else if link.shutdown.is_some() {
-            "Daemon stopped"
-        } else if model.was_connected {
-            "Reconnecting…"
-        } else {
-            "Connecting…"
-        };
-        (text.to_owned(), Some(Dot::Waiting))
+        (model.link_status().to_owned(), Some(Dot::Waiting))
     } else if !connected {
         ("Syncing…".to_owned(), Some(Dot::Waiting))
     } else if model.chat.error.is_some() {
@@ -154,7 +146,7 @@ pub fn animate(model: &Model, now: Instant, animator: &mut Animator) {
 
 /// The bar's target at (`x`, `y`).
 pub fn hit(_model: &Model, x: f32, y: f32) -> Option<Action> {
-    if y >= TOP_BAR {
+    if y >= theme::top_bar() {
         return None;
     }
     if x < CENTRE.0 {
@@ -167,7 +159,7 @@ pub fn hit(_model: &Model, x: f32, y: f32) -> Option<Action> {
 }
 
 pub fn draw(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>, now: Instant) {
-    if !widgets::shows(canvas, 0.0, TOP_BAR + theme::HAIRLINE) {
+    if !widgets::shows(canvas, 0.0, theme::below_bar()) {
         return;
     }
     let p = theme::p();
@@ -178,19 +170,21 @@ pub fn draw(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>, now: I
         canvas,
         Icon::ChevronLeft,
         BACK_X,
-        ROW_Y,
+        theme::in_bar(ROW_Y),
         Style::new(60.0, p.text)
             .stroke(5.0)
             .alpha(if back { 0.5 } else { 1.0 }),
     );
     let more = pressed == Some(&Action::Ops(ops::Act::ChatMenu));
-    widgets::ellipsis(canvas, MORE_X, ROW_Y, p.text, if more { 0.5 } else { 1.0 });
+    let more_alpha = if more { 0.5 } else { 1.0 };
+    widgets::ellipsis(canvas, MORE_X, theme::in_bar(ROW_Y), p.text, more_alpha);
     let centre = pressed == Some(&Action::Ops(ops::Act::OpenInspector));
     let alpha = if centre { 0.6 } else { 1.0 };
     let width = CENTRE.1 - CENTRE.0;
     let cx = (CENTRE.0 + CENTRE.1) / 2.0;
     let title = widgets::fit(&title(model), T_TITLE, width);
-    widgets::text_centered(canvas, &title, cx, TITLE_BASELINE, T_TITLE, p.text, alpha);
+    let baseline = theme::in_bar(TITLE_BASELINE);
+    widgets::text_centered(canvas, &title, cx, baseline, T_TITLE, p.text, alpha);
     draw_subtitle(canvas, &subtitle(model), cx, width, alpha, now);
 }
 
@@ -215,6 +209,7 @@ fn draw_subtitle(
     let main = widgets::fit(&subtitle.text, T_SUBTITLE, width - dot_w - detail_w);
     let main_w = widgets::measure(&main, T_SUBTITLE);
     let left = (cx - (dot_w + main_w + detail_w) / 2.0).round();
+    let baseline = theme::in_bar(SUBTITLE_BASELINE);
     if let Some(dot) = subtitle.dot {
         let (color, shade): (Rgb, f32) = match dot {
             Dot::Live => (p.accent, anim::pulse(now, 1400)),
@@ -224,28 +219,20 @@ fn draw_subtitle(
         let color = theme::mix(color, (shade * 100.0).round() as u32, p.app_background);
         canvas.fill_circle(
             left + DOT / 2.0,
-            SUBTITLE_BASELINE - 10.0,
+            baseline - (T_SUBTITLE.px() / 3.0).round(),
             DOT / 2.0,
             color,
             alpha,
         );
     }
     let x = left + dot_w;
-    widgets::text(
-        canvas,
-        &main,
-        x,
-        SUBTITLE_BASELINE,
-        T_SUBTITLE,
-        c.text_dim,
-        alpha,
-    );
+    widgets::text(canvas, &main, x, baseline, T_SUBTITLE, c.text_dim, alpha);
     if !detail.is_empty() {
         widgets::text(
             canvas,
             &detail,
             x + main_w,
-            SUBTITLE_BASELINE,
+            baseline,
             T_SUBTITLE,
             p.muted,
             alpha,

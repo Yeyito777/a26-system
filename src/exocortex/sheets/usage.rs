@@ -4,7 +4,7 @@
 //! providers' windows, the accounts it routes between, the link to it, and
 //! the tokens it counted. The usage rows also go into Settings.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -38,6 +38,8 @@ pub struct Link {
     /// When the current connection came up, and its last pong (ms).
     pub since: Option<u64>,
     pub last_pong: Option<u64>,
+    /// The last ping's round trip (ms).
+    pub rtt_ms: Option<u64>,
     /// `daemon_shutdown`'s mode, until the connection drops.
     pub shutdown: Option<String>,
     /// The daemon's network monitor: online, offline since (ms).
@@ -264,6 +266,7 @@ impl Model {
             link.drops += 1;
         }
         link.last_pong = None;
+        link.rtt_ms = None;
         self.ops.usage.watching = false;
         self.ops.usage.accounts_request = None;
         self.ops.usage.tokens_request = None;
@@ -318,7 +321,7 @@ pub fn usage_rows(model: &Model, with_links: bool, now: Instant) -> Vec<Row> {
     for (index, (provider, (usage, at))) in entries.iter().enumerate() {
         let Some(usage) = usage else { continue };
         if index > 0 {
-            rows.push(Row::Gap(22));
+            rows.push(Row::Rule);
         }
         let capacity = usage.capacity.filter(|c| *c > 0.0).unwrap_or(100.0);
         let badge = if !model.ready {
@@ -333,7 +336,7 @@ pub fn usage_rows(model: &Model, with_links: bool, now: Instant) -> Vec<Row> {
         } else {
             String::new()
         };
-        rows.push(Row::Pair {
+        rows.push(Row::Lead {
             left: format!("{}{badge}", provider_name(provider).to_uppercase()),
             right: accounts,
             style: Style::CaptionBold,
@@ -367,6 +370,9 @@ pub fn usage_rows(model: &Model, with_links: bool, now: Instant) -> Vec<Row> {
         }
     }
     if with_links {
+        if !entries.is_empty() {
+            rows.push(Row::Rule);
+        }
         if model.accounts_likely() {
             rows.push(panel::nav(
                 "Accounts",
@@ -466,6 +472,8 @@ pub fn tokens(model: &Model) -> Built {
                 "Active days",
                 stats["days"].as_array().map_or(0, Vec::len).to_string(),
             ));
+            rows.push(panel::section("Daily · last 26 weeks"));
+            rows.push(Row::Heat(heatmap(stats, now_ms() as f64)));
             for (title, key) in [
                 ("Models", "byModel"),
                 ("Providers", "byProvider"),
@@ -516,27 +524,85 @@ pub fn tokens(model: &Model) -> Built {
     }
 }
 
-fn account_usage(usage: Option<&Usage>, now: f64) -> String {
-    let cell = |label: &str, w: &Option<UsageWindow>| {
+/// The daily heatmap's weeks (the iPhone's `heatmapCells`): 26 weeks and
+/// this one, Sunday to Saturday, each day's tokens as a level 0-4 by the
+/// quartiles of the active days (-1: after today).
+fn heatmap(stats: &Value, now: f64) -> Vec<[i8; 7]> {
+    const WEEKS: i64 = 26;
+    const DAY: f64 = 86_400_000.0;
+    let by_day: HashMap<&str, f64> = stats["days"]
+        .as_array()
+        .map(|days| {
+            days.iter()
+                .filter_map(|d| Some((d["day"].as_str()?, d["totalTokens"].as_f64()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut values: Vec<f64> = by_day.values().copied().filter(|v| *v > 0.0).collect();
+    values.sort_by(f64::total_cmp);
+    let q = |p: f64| {
+        values
+            .get(((p * values.len() as f64) as usize).min(values.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let cuts = [q(0.25), q(0.5), q(0.75)];
+    let today = clock::local(now);
+    let end = clock::from_local(today.year, today.month as i32, today.day as i32, 0, 0, 0);
+    // This week's Sunday, 26 weeks back (the iPhone's `end - (26 × 7 - 1)
+    // days - weekday` lands on a Monday: its rows would not start on
+    // Sundays as it says they do).
+    let start = end - f64::from(today.weekday) * DAY - (WEEKS * 7) as f64 * DAY;
+    let day_of = |ms: f64| {
+        let d = clock::local(ms + 12.0 * 3_600_000.0);
+        format!("{:04}-{:02}-{:02}", d.year, d.month, d.day)
+    };
+    let mut weeks = Vec::new();
+    let mut t = start;
+    while t <= end {
+        let mut column = [0i8; 7];
+        for (i, cell) in column.iter_mut().enumerate() {
+            let ts = t + i as f64 * DAY;
+            *cell = if ts > end {
+                -1
+            } else {
+                let tokens = by_day.get(day_of(ts).as_str()).copied().unwrap_or(0.0);
+                if tokens <= 0.0 {
+                    0
+                } else {
+                    1 + cuts.iter().filter(|cut| tokens > **cut).count() as i8
+                }
+            };
+        }
+        weeks.push(column);
+        t += 7.0 * DAY;
+    }
+    weeks
+}
+
+/// An account's 5-hour and weekly meters (`real-10-sheet-accounts`): the
+/// share used, a bar, the time to the reset.
+fn meters(usage: Option<&Usage>, now: f64) -> [Option<panel::Meter>; 2] {
+    let meter = |w: &Option<UsageWindow>| {
         w.as_ref().map(|w| {
             let pct = match w.resets_at {
-                Some(at) if at <= now => 0,
-                _ => w.utilization.round() as i64,
+                Some(at) if at <= now => 0.0,
+                _ => w.utilization.round().clamp(0.0, 100.0),
             };
-            let reset = w
-                .resets_at
-                .filter(|at| *at > now)
-                .map(|at| format!(" {}", clock::format_account_duration(at - now)))
-                .unwrap_or_default();
-            format!("{label} {pct}%{reset}")
+            panel::Meter {
+                permille: (pct * 10.0) as u16,
+                share: format!("{pct}%"),
+                reset: w
+                    .resets_at
+                    .filter(|at| *at > now)
+                    .map(|at| clock::format_account_duration(at - now))
+                    .unwrap_or_default(),
+                color: usage_color(100.0 - pct),
+            }
         })
     };
     let usage = usage.cloned().unwrap_or_default();
-    [cell("5h", &usage.five_hour), cell("wk", &usage.seven_day)]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
+    [meter(&usage.five_hour), meter(&usage.seven_day)]
 }
 
 fn near_limit(account: &ClaudeAccount, floors: (f64, f64), now: f64) -> Option<&'static str> {
@@ -578,7 +644,7 @@ pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
         rows.push(panel::section("Claude"));
         rows.push(panel::note("The remote daemon's login (/proxy)"));
     } else if !claude.accounts.is_empty() {
-        rows.push(panel::section("Claude"));
+        rows.push(Row::GridHead("Claude".into()));
         let floors = (claude.routing.five_hour_floor, claude.routing.weekly_floor);
         let mut notes = Vec::new();
         for account in &claude.accounts {
@@ -632,18 +698,18 @@ pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
             {
                 tags.push("new work".into());
             }
-            let usage = if matches!(account.state.as_str(), "ready" | "limited") {
-                account_usage(account.usage.as_ref(), now)
+            let windows = if matches!(account.state.as_str(), "ready" | "limited") {
+                meters(account.usage.as_ref(), now)
             } else {
-                String::new()
+                [None, None]
             };
-            rows.push(Row::Task {
-                label: format!("● {}", account.id),
-                color: if current { p.accent } else { dot },
-                title: tags.join(" · "),
-                time: usage,
-                tap: None,
-                more: None,
+            rows.push(Row::Account {
+                dot,
+                name: account.id.clone(),
+                name_color: if current { p.accent } else { p.text },
+                bold: current,
+                note: (!tags.is_empty()).then(|| tags.join(" · ")),
+                windows,
             });
             if let Some(command) = &account.login_command {
                 notes.push(format!("sign in {}: {command}", account.id));
@@ -704,7 +770,7 @@ pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
     }
     let openai = &snapshot.openai;
     if !openai.accounts.is_empty() {
-        rows.push(panel::section("OpenAI"));
+        rows.push(Row::GridHead("OpenAI".into()));
         if openai.proxied {
             rows.push(panel::note("The remote daemon's login (/proxy)"));
         }
@@ -714,17 +780,17 @@ pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
                 .clone()
                 .or_else(|| account.display_name.clone())
                 .unwrap_or_else(|| format!("account {}", account.index));
-            rows.push(Row::Task {
-                label: format!("● {name}"),
-                color: if account.current { p.accent } else { p.muted },
-                title: account.plan.clone().unwrap_or_default(),
-                time: if account.current {
-                    account_usage(model.usage_of("openai"), now)
+            rows.push(Row::Account {
+                dot: if account.current { p.success } else { p.muted },
+                name,
+                name_color: if account.current { p.accent } else { p.text },
+                bold: account.current,
+                note: account.plan.clone(),
+                windows: if account.current {
+                    meters(model.usage_of("openai"), now)
                 } else {
-                    String::new()
+                    [None, None]
                 },
-                tap: None,
-                more: None,
             });
         }
     }
@@ -749,10 +815,8 @@ pub fn connection_state(model: &Model) -> (&'static str, u32) {
         ("Connected", p.success)
     } else if model.connected {
         ("Syncing…", p.warning)
-    } else if model.was_connected {
-        ("Reconnecting…", p.warning)
     } else {
-        ("Connecting…", p.warning)
+        (model.link_status(), p.warning)
     }
 }
 
@@ -774,20 +838,30 @@ pub fn connection_rows(model: &Model, detailed: bool) -> Vec<Row> {
             p.warning,
         ));
     }
-    let mut rows = vec![Row::Rail { color, lines: card }];
+    let mut rows = vec![Row::Status {
+        color,
+        lines: card,
+        right: link
+            .rtt_ms
+            .filter(|_| model.ready)
+            .map(|ms| format!("{ms} ms")),
+    }];
     if let Some(since) = link.since {
         let at = clock::format_due_time(since as f64, now_ms() as f64);
-        rows.push(panel::kv(
-            "Up since",
-            if detailed {
+        rows.push(if detailed {
+            panel::kv(
+                "Up since",
                 format!(
                     "{at} ({})",
                     clock::format_task_elapsed(since as f64, now_ms() as f64)
-                )
-            } else {
-                at
-            },
-        ));
+                ),
+            )
+        } else {
+            Row::Field {
+                label: "Daemon session".into(),
+                value: format!("up since {at}"),
+            }
+        });
     }
     if detailed {
         rows.push(panel::kv("Socket", socket));
@@ -849,6 +923,30 @@ mod tests {
     use super::*;
     use crate::exocortex::proto::parse_event;
 
+    /// The heatmap is 26 weeks and this one, Sunday to Saturday: today's
+    /// level by the quartiles, the days after it left out.
+    #[test]
+    fn the_daily_heatmap_has_26_weeks_and_this_one() {
+        let now = clock::from_local(2026, 10, 29, 15, 0, 0);
+        let stats = serde_json::json!({"days": [
+            {"day": "2026-10-29", "totalTokens": 900.0},
+            {"day": "2026-10-28", "totalTokens": 100.0},
+            {"day": "2026-10-20", "totalTokens": 300.0},
+            {"day": "2026-10-01", "totalTokens": 600.0},
+        ]});
+        let weeks = heatmap(&stats, now);
+        assert_eq!(weeks.len(), 27);
+        let today = clock::local(now).weekday as usize;
+        let last = weeks.last().unwrap();
+        // The cuts are the values at 1/4, 1/2 and 3/4 of the sorted days (as
+        // the iPhone indexes them): the busiest is the top cut, level 3.
+        assert_eq!(last[today], 3, "the busiest day");
+        assert_eq!(last[today - 1], 1, "the quietest");
+        assert!(last[today + 1..].iter().all(|level| *level == -1));
+        let levels: Vec<i8> = weeks.iter().flatten().copied().filter(|l| *l > 0).collect();
+        assert_eq!(levels.len(), 4);
+    }
+
     #[test]
     fn windows_read_and_colour_as_on_the_iphone() {
         let now = 1_000_000.0;
@@ -894,7 +992,7 @@ mod tests {
         );
         let built = accounts(&model, None, Instant::now());
         assert!(built.rows.iter().any(
-            |r| matches!(r, Row::Task { label, time, .. } if label == "● main" && time == "5h 12%")
+            |r| matches!(r, Row::Account { name, windows: [Some(five), _], .. } if name == "main" && five.share == "12%")
         ));
         let stop = model.unwatch_accounts();
         assert_eq!(stop[0]["watch"], false);

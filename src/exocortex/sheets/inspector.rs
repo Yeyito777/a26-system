@@ -25,13 +25,31 @@ use super::super::ui::widgets::{self, Button};
 use super::panel;
 
 /// A section title: 44 above, its line, 17 below.
-const SECTION: f32 = 101.0;
+const SECTION_BASE: f32 = 101.0;
 /// A picker or value row.
-const ROW: f32 = 133.0;
+const ROW_BASE: f32 = 133.0;
 /// The speed row: the segmented control and 19 above and below.
-const SPEED_ROW: f32 = 160.0;
+const SPEED_ROW_BASE: f32 = 160.0;
 /// Space above the buttons and between them.
 const BUTTON_GAP: f32 = 34.0;
+
+/// The rows at the current text size: their text grows, their padding
+/// does not (`theme::grown`).
+fn section_h() -> f32 {
+    theme::grown(SECTION_BASE, 40.0)
+}
+
+fn row_h() -> f32 {
+    theme::grown(ROW_BASE, 60.0)
+}
+
+fn speed_row_h() -> f32 {
+    theme::grown(SPEED_ROW_BASE, 60.0)
+}
+
+fn button_h() -> f32 {
+    theme::grown(TARGET, 54.0)
+}
 /// A segment's padding around its label.
 const SEGMENT_PAD: f32 = 32.0;
 
@@ -76,10 +94,10 @@ enum Item {
 impl Item {
     fn height(&self) -> f32 {
         match self {
-            Item::Section(_) => SECTION,
-            Item::Pick { .. } | Item::Value(..) => ROW,
-            Item::Speed { .. } => SPEED_ROW,
-            Item::Button { .. } => TARGET,
+            Item::Section(_) => section_h(),
+            Item::Pick { .. } | Item::Value(..) => row_h(),
+            Item::Speed { .. } => speed_row_h(),
+            Item::Button { .. } => button_h(),
             Item::Switch { detail, .. } => {
                 (2.0 * 22.0 + T_BODY.line() + detail.len() as f32 * theme::T_META.line())
                     .max(theme::TOGGLE_ROW)
@@ -283,7 +301,10 @@ impl Inspector {
                     field,
                     disabled: false,
                     ..
-                } => targets.push((RectF::new(0.0, *y, self.width, ROW), Target::Pick(*field))),
+                } => targets.push((
+                    RectF::new(0.0, *y, self.width, row_h()),
+                    Target::Pick(*field),
+                )),
                 Item::Speed { speeds, .. } => {
                     let rect = speed_rect(speeds, self.width, *y);
                     let w = rect.w / speeds.len() as f32;
@@ -327,7 +348,7 @@ fn speed_rect(speeds: &[Speed], width: f32, y: f32) -> RectF {
         .fold(0.0, f32::max)
         + 2.0 * SEGMENT_PAD;
     let w = (segment * speeds.len() as f32 + 2.0 * HAIRLINE).round();
-    RectF::new(width - w, y + (SPEED_ROW - TARGET) / 2.0, w, TARGET)
+    RectF::new(width - w, y + (speed_row_h() - TARGET) / 2.0, w, TARGET)
 }
 
 impl SheetContent for Inspector {
@@ -388,12 +409,12 @@ impl SheetContent for Inspector {
                     if pressed.as_ref() == Some(&Target::Pick(*field)) {
                         widgets::fill(
                             canvas,
-                            RectF::new(0.0, y, W, ROW - HAIRLINE),
+                            RectF::new(0.0, y, W, row_h() - HAIRLINE),
                             p.selection_background,
                         );
                     }
                     let alpha = if *disabled { 0.5 } else { 1.0 };
-                    let baseline = T_BODY.baseline(y + (ROW - T_BODY.line()) / 2.0);
+                    let baseline = T_BODY.baseline(y + (row_h() - T_BODY.line()) / 2.0);
                     let label_w = widgets::text(canvas, label, x, baseline, T_BODY, p.text, alpha);
                     let value_right = right - 73.0;
                     let value = widgets::fit(value, T_BODY, value_right - x - label_w - 34.0);
@@ -410,19 +431,19 @@ impl SheetContent for Inspector {
                         canvas,
                         Icon::ChevronDown,
                         right - 22.0,
-                        y + ROW / 2.0,
+                        y + row_h() / 2.0,
                         39.0,
                         p.muted,
                         alpha,
                     );
-                    widgets::hairline(canvas, x, right, y + ROW - HAIRLINE, c.rule_field_row);
+                    widgets::hairline(canvas, x, right, y + row_h() - HAIRLINE, c.rule_field_row);
                 }
                 Item::Speed { speeds, selected } => {
                     widgets::text(
                         canvas,
                         "Speed",
                         x,
-                        T_BODY.baseline(y + (SPEED_ROW - T_BODY.line()) / 2.0),
+                        T_BODY.baseline(y + (speed_row_h() - T_BODY.line()) / 2.0),
                         T_BODY,
                         p.text,
                         1.0,
@@ -436,7 +457,13 @@ impl SheetContent for Inspector {
                         _ => None,
                     };
                     widgets::segmented(canvas, rect, &labels, on, down);
-                    widgets::hairline(canvas, x, right, y + SPEED_ROW - HAIRLINE, c.rule_field_row);
+                    widgets::hairline(
+                        canvas,
+                        x,
+                        right,
+                        y + speed_row_h() - HAIRLINE,
+                        c.rule_field_row,
+                    );
                 }
                 Item::Button {
                     label,
@@ -447,7 +474,7 @@ impl SheetContent for Inspector {
                     let down = pressed.as_ref() == Some(&Target::Button(act.clone()));
                     widgets::button(
                         canvas,
-                        RectF::new(x, y, self.width, TARGET),
+                        RectF::new(x, y, self.width, button_h()),
                         &Button::new(label, kind.button())
                             .pressed(down)
                             .disabled(*disabled),
@@ -473,9 +500,11 @@ impl SheetContent for Inspector {
                     let meta = theme::T_META;
                     let text_h = T_BODY.line() + detail.len() as f32 * meta.line();
                     let top = y + ((h - text_h) / 2.0).round();
+                    let (sw, _) = theme::SWITCH;
+                    let room = right - sw - 34.0 - x;
                     widgets::text(
                         canvas,
-                        label,
+                        &widgets::fit(label, T_BODY, room),
                         x,
                         T_BODY.baseline(top),
                         T_BODY,
@@ -544,7 +573,7 @@ impl SheetContent for Inspector {
                     }
                 }
                 Item::Value(label, value) => {
-                    let baseline = T_BODY.baseline(y + (ROW - T_BODY.line()) / 2.0);
+                    let baseline = T_BODY.baseline(y + (row_h() - T_BODY.line()) / 2.0);
                     let label_w = widgets::text(canvas, label, x, baseline, T_BODY, p.text, 1.0);
                     let value = widgets::fit(value, T_BODY, self.width - label_w - 34.0);
                     widgets::text_right(
@@ -556,7 +585,7 @@ impl SheetContent for Inspector {
                         p.secondary_accent,
                         1.0,
                     );
-                    widgets::hairline(canvas, x, right, y + ROW - HAIRLINE, c.rule_field_row);
+                    widgets::hairline(canvas, x, right, y + row_h() - HAIRLINE, c.rule_field_row);
                 }
                 Item::Gap(_) => {}
             }
@@ -673,7 +702,7 @@ mod tests {
         };
         assert_eq!(speeds, &[Speed::Standard, Speed::Fast]);
         assert_eq!(
-            tap(&mut content, &model, 980.0, speed_y + SPEED_ROW / 2.0),
+            tap(&mut content, &model, 980.0, speed_y + speed_row_h() / 2.0),
             Reply::Action(Action::Ops(ops::Act::FormSpeed(Speed::Fast)))
         );
         // Unchanged: Use for this draft is disabled (no target).

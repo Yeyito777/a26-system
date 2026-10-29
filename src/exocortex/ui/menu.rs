@@ -29,9 +29,20 @@ use super::icons::{self, Icon};
 use super::overlay::{Body, Cx, Overlay, Response};
 use super::widgets::{self, Button, ButtonKind};
 
+/// A menu row and the quick row at the current text size.
+fn menu_item() -> f32 {
+    theme::grown(MENU_ITEM, 44.0)
+}
+
+fn menu_quick() -> f32 {
+    theme::grown(MENU_QUICK, 44.0)
+}
+
 pub use super::sheet::Tone;
 
 const IN_FOR: Duration = Duration::from_millis(170);
+/// Where an item's label (and the rule above it) starts.
+const LABEL_X: f32 = 141.0;
 const OUT_FOR: Duration = Duration::from_millis(160);
 const SHADOW: f32 = 78.0;
 const SHADOW_DY: f32 = 19.0;
@@ -123,9 +134,9 @@ impl AnchoredMenu {
         let quick = if self.quick.is_empty() {
             0.0
         } else {
-            MENU_QUICK
+            menu_quick()
         };
-        quick + self.items.len() as f32 * MENU_ITEM
+        quick + self.items.len() as f32 * menu_item()
     }
 
     /// Where the menu goes for an anchor in a window `width` × `bottom`.
@@ -135,21 +146,39 @@ impl AnchoredMenu {
 
     /// `place` for a menu `h` tall.
     pub fn place_height(anchor: RectF, h: f32, width: f32, bottom: f32) -> RectF {
+        Self::place_box(anchor, MENU_W, h, width, bottom)
+    }
+
+    /// `place` for a menu `w` × `h`.
+    fn place_box(anchor: RectF, w: f32, h: f32, width: f32, bottom: f32) -> RectF {
         // Under a wide anchor (a row) from its content's left; under a
         // button, its right edges with the button's.
-        let x = if anchor.w > MENU_W {
+        let x = if anchor.w > w {
             anchor.x + theme::LIST_PAD
         } else {
-            anchor.x + anchor.w - MENU_W
+            anchor.x + anchor.w - w
         };
-        let x = x.clamp(MENU_CLAMP, width - MENU_CLAMP - MENU_W);
+        let x = x.clamp(MENU_CLAMP, width - MENU_CLAMP - w);
         let below = anchor.y + anchor.h + MENU_OFFSET;
         let y = if below + h <= bottom - MENU_CLAMP {
             below
         } else {
             (anchor.y - MENU_OFFSET - h).max(MENU_CLAMP)
         };
-        RectF::new(x.round(), y.round(), MENU_W, h)
+        RectF::new(x.round(), y.round(), w, h)
+    }
+
+    /// The menu's width: 676, wider when large text needs it for its
+    /// labels (up to the window less its margins).
+    fn width(&self, window: f32) -> f32 {
+        let longest = self
+            .items
+            .iter()
+            .map(|item| widgets::measure(&item.label, T_MENU))
+            .fold(0.0, f32::max);
+        (longest + LABEL_X + 34.0)
+            .ceil()
+            .clamp(MENU_W, (window - 2.0 * MENU_CLAMP).max(MENU_W))
     }
 
     fn shown(&self, now: Instant) -> f32 {
@@ -176,16 +205,16 @@ impl AnchoredMenu {
         let quick = self.quick.len();
         let mut top = self.rect.y;
         if quick > 0 {
-            if y < top + MENU_QUICK {
+            if y < top + menu_quick() {
                 let cell = self.rect.w / quick as f32;
                 return Some((((x - self.rect.x) / cell).floor() as usize).min(quick - 1));
             }
-            top += MENU_QUICK;
+            top += menu_quick();
         }
         if self.items.is_empty() {
             return None;
         }
-        Some(quick + (((y - top) / MENU_ITEM).floor() as usize).min(self.items.len() - 1))
+        Some(quick + (((y - top) / menu_item()).floor() as usize).min(self.items.len() - 1))
     }
 
     fn item(&self, index: usize) -> &MenuItem {
@@ -215,7 +244,8 @@ impl Overlay for AnchoredMenu {
         if self.opened.is_none() {
             self.opened = Some(cx.now);
         }
-        self.rect = Self::place_height(self.anchor, self.height(), cx.width, cx.bottom());
+        let w = self.width(cx.width);
+        self.rect = Self::place_box(self.anchor, w, self.height(), cx.width, cx.bottom());
     }
 
     fn draw_backdrop(&self, canvas: &mut Canvas, cx: &Cx) {
@@ -286,14 +316,14 @@ impl Overlay for AnchoredMenu {
                     if self.pressed == Some(index) {
                         fill(
                             canvas,
-                            RectF::new(x, top, w, MENU_QUICK),
+                            RectF::new(x, top, w, menu_quick()),
                             c.menu_item_pressed,
                         );
                     }
                     if index > 0 {
                         fill(
                             canvas,
-                            RectF::new(x, top, HAIRLINE, MENU_QUICK),
+                            RectF::new(x, top, HAIRLINE, menu_quick()),
                             c.menu_border,
                         );
                     }
@@ -312,15 +342,15 @@ impl Overlay for AnchoredMenu {
                         alpha,
                     );
                 }
-                top += MENU_QUICK;
+                top += menu_quick();
             }
             for (index, item) in self.items.iter().enumerate() {
-                let y = top + index as f32 * MENU_ITEM;
+                let y = top + index as f32 * menu_item();
                 let index = index + quick;
                 if self.pressed == Some(index) {
                     fill(
                         canvas,
-                        RectF::new(self.rect.x, y, self.rect.w, MENU_ITEM),
+                        RectF::new(self.rect.x, y, self.rect.w, menu_item()),
                         c.menu_item_pressed,
                     );
                 }
@@ -333,7 +363,7 @@ impl Overlay for AnchoredMenu {
                 } else if index > 0 {
                     fill(
                         canvas,
-                        RectF::new(self.rect.x + 141.0, y, self.rect.w - 141.0, HAIRLINE),
+                        RectF::new(self.rect.x + LABEL_X, y, self.rect.w - LABEL_X, HAIRLINE),
                         c.menu_border,
                     );
                 }
@@ -342,17 +372,17 @@ impl Overlay for AnchoredMenu {
                     canvas,
                     item.icon,
                     self.rect.x + 76.0,
-                    y + MENU_ITEM / 2.0,
+                    y + menu_item() / 2.0,
                     56.0,
                     icon_color,
                     alpha,
                 );
-                let label = widgets::fit(&item.label, T_MENU, self.rect.w - 141.0 - 34.0);
+                let label = widgets::fit(&item.label, T_MENU, self.rect.w - LABEL_X - 34.0);
                 widgets::text(
                     canvas,
                     &label,
-                    self.rect.x + 141.0,
-                    T_MENU.baseline(y + (MENU_ITEM - T_MENU.line()) / 2.0),
+                    self.rect.x + LABEL_X,
+                    T_MENU.baseline(y + (menu_item() - T_MENU.line()) / 2.0),
                     T_MENU,
                     label_color,
                     alpha,
