@@ -147,7 +147,7 @@ notifications, power-key voice.
 | Size caps and "Read full" (PAR-134) | none | Preview caps per PAR-134 → reader | C1 | P1 |
 | Full-text reader with Find i/N, Copy (PAR-332) | none | Reader overlay (A ships a minimal one; C1 completes it) | C1 | P0 |
 | Text selection (PAR-141) | none | In the reader: long-press selects a word, handles extend, Copy. In the transcript: whole-message copy via the menu. Free selection in the transcript P2 | C1 | P1 |
-| Images: user thumbnails, model-attached images via `get_image`, viewer (PAR-108, 113, 127, 252, 253, 255, 347, 400) | none | PNG previews (`get_image format:"png"`, the `png` crate is already a dependency), bounded cache, viewer page with double-tap zoom and pan (no multitouch from X core events) | C1 | P1 |
+| Images: user thumbnails, model-attached images via `get_image`, viewer (PAR-108, 113, 127, 252, 253, 255, 347, 400) | none | PNG previews (`get_image format:"png"`, the `png` crate is already a dependency), bounded cache, viewer page with double-tap zoom and pan (no multitouch from X core events) | C1 | P0 |
 | Subagent tool call "subagent: …", tap opens the child (PAR-147) | label only | | C2 | P1 |
 
 ### 2.5 Streaming states and history
@@ -977,8 +977,10 @@ block and a 200-row table scroll within budget; highlighting matches the
 TUI's token classes on its test inputs; side-by-side with
 `fake-rich-step-00/01`.
 
-**Order.** Markdown styling → code blocks → tables → reader + find + copy →
-links → highlighting → math → images.
+**Order.** Images first (model-attached images from the `attach` tool and
+user images: the user cannot see screenshots the agent shows today, and
+needs to) → markdown styling → code blocks → tables → reader + find + copy →
+links → highlighting → math.
 
 ### WP-C2: Transcript structure, streaming and scrolling
 
