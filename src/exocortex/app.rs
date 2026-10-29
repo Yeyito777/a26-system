@@ -256,6 +256,11 @@ impl Context<'_> {
             Action::Composer(composer::Act::Send) => self.view.follow = true,
             // The tapped row stays under the finger as it opens.
             Action::Chat(chat::Act::ToggleExpanded(_)) => self.view.follow = false,
+            // Back to the newest message at once, any fling stopped.
+            Action::Chat(chat::Act::JumpToLatest) => {
+                self.view.chat_scroll.reset();
+                self.view.follow = true;
+            }
             Action::Nav(_) if self.input.keyboard => self.hide_keyboard(),
             _ => {}
         }
@@ -914,10 +919,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
         // Keep the transcript where the user left it.
         view.settle(&model, before_view, height, now);
-        if model.page == Page::Chat && view.near_top(now) {
-            for command in model.load_older() {
-                link.send(command);
-            }
+        // Older history near the top, tool outputs near the screen (C2).
+        for command in view::transcript::requests(&mut model, &mut view, height, now) {
+            link.send(command);
         }
 
         let mut flinging = match model.page {

@@ -22,7 +22,9 @@ pub(crate) const BODY_LINE: f32 = 60.0;
 pub(crate) const CODE: f32 = 34.0;
 pub(crate) const CODE_LINE: f32 = 52.0;
 /// Tool lines, notices.
+#[allow(dead_code)]
 pub(crate) const SMALL: f32 = 34.0;
+#[allow(dead_code)]
 pub(crate) const SMALL_LINE: f32 = 48.0;
 pub(crate) const PARAGRAPH_GAP: f32 = MARKDOWN_GAP;
 

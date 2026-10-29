@@ -6,12 +6,14 @@
 pub mod anim;
 pub mod app;
 pub mod clipboard;
+pub mod footer;
 pub mod gesture;
 pub mod handoff;
 pub mod line;
 pub mod link;
 pub mod markdown;
 pub mod model;
+pub mod model_display;
 pub mod proto;
 pub mod reader;
 pub mod requests;
