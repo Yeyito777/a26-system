@@ -200,6 +200,9 @@ pub struct PendingAi {
 pub struct Window {
     pub entries: Vec<Entry>,
     pub history_start_index: Option<u64>,
+    /// User messages before the window's first entry (D: a rewind's
+    /// `userMessageIndex`).
+    pub history_start_user_index: Option<u64>,
     pub history_start_block_index: Option<u64>,
     pub history_end_index: Option<u64>,
     pub history_end_block_index: Option<u64>,
