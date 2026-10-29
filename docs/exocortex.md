@@ -305,6 +305,13 @@ are discarded.
   folding is made from its base as the blocks come (`fold::live_fold`). A
   test streams a long tool-heavy reply and checks every pass against a
   layout made whole. What a follow costs on screen is the scroll itself.
+- **Pixels, not musl's byte loops.** musl's `memcmp` and `memmove` go a
+  byte (or eight) at a time: the presenter compares rows 16 pixels a step
+  (`present::same`), scrolls move rows in non-overlapping blocks 64 bytes
+  a step (`Canvas::move_rows`, also the list's and Settings'), and a glyph
+  draws only the clip's pixels (`Canvas::draw_mask`), so a strip, a
+  spinner's or shimmer's own columns (`Mark::columns`) or the jump button's
+  costs only its pixels.
 - **Marks.** What changes with time inside a piece (a spinner, the WORKING
   shimmer, the live footer's clock and rate, a status line's clock) is a
   mark (`blocks::Mark`): placed with its piece, keyed per frame
