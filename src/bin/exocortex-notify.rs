@@ -16,9 +16,18 @@
 //! `transfer` lease for `exocortex`, renewed every minute, so turning the
 //! screen off does not deep-suspend the phone under a running turn.
 //!
+//! It keeps the Exocortex icon's badge on Moon's home screen (`badge
+//! exocortex N`): the unread conversations, as the list's green dots and
+//! the iPhone's badge count them (unread, not muted, no model work, neither
+//! streaming nor waiting). The bootstrap's first page holds every folder
+//! and every conversation showing activity, the broadcasts after it the
+//! changes, so the count is right without the whole list; it is set when it
+//! changes, and while the app is closed.
+//!
 //! Its peers come and go: the daemon restarts, moon-notifyd and Moon are
 //! absent in Android mode. Each is retried with backoff; posts wait (newest
-//! per conversation, at most 12 h) until moon-notifyd is there.
+//! per conversation, at most 12 h) until moon-notifyd is there, the badge
+//! until Moon is.
 
 #[path = "../exocortex/handoff.rs"]
 mod handoff;
@@ -28,6 +37,12 @@ mod line;
 mod markdown;
 #[path = "../exocortex/proto/mod.rs"]
 mod proto;
+/// The list's activity rules (B), for the badge.
+#[path = "../exocortex/list"]
+mod list {
+    #[allow(dead_code)]
+    pub mod activity;
+}
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -35,7 +50,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use line::LineSocket;
-use proto::{Block, Entry, Event, Summary};
+use list::activity::{self, Kind, QueueInfo};
+use proto::{Block, Entry, Event, Folder, Summary};
 
 /// Compact sidebar deltas, and an incremental bootstrap whose first page
 /// holds every conversation showing activity (which ones stream).
@@ -51,6 +67,8 @@ const LEASE_SECONDS: u64 = 120;
 const LEASE_RENEW: Duration = Duration::from_secs(60);
 /// Moon is absent (Android mode, a restart): ask again this much later.
 const LEASE_RETRY: Duration = Duration::from_secs(15);
+/// Moon is absent or refused the badge: set it again this much later (s).
+const BADGE_BACKOFF: [u64; 5] = [5, 15, 60, 300, 900];
 const DAEMON_BACKOFF: [u64; 7] = [500, 1000, 2000, 4000, 8000, 15000, 30000];
 const NOTIFY_BACKOFF: [u64; 6] = [1000, 2000, 5000, 10000, 30000, 60000];
 const POST_TTL: Duration = Duration::from_secs(12 * 3600);
@@ -93,6 +111,7 @@ struct Bridge<F: FnMut(&str) -> bool> {
     app_showing: F,
     /// When each conversation last notified: at most one per 5 s (PAR-315).
     notified: HashMap<String, Instant>,
+    unread: Unread,
 }
 
 /// A conversation notifies at most this often.
@@ -107,11 +126,14 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
             next_request: 0,
             app_showing,
             notified: HashMap::new(),
+            unread: Unread::default(),
         }
     }
 
     fn on_connected(&mut self) -> Vec<Effect> {
         self.fetches.clear();
+        // Unknown until the first page: the badge keeps what it shows.
+        self.unread = Unread::default();
         // A first page of no rows: just the conversations showing activity.
         vec![
             Effect::Daemon(proto::client_capabilities(&CAPABILITIES, Some(0))),
@@ -129,12 +151,21 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
         !self.streaming.is_empty()
     }
 
+    /// What the icon's badge should show, once known.
+    fn badge(&self) -> Option<u32> {
+        self.unread.count()
+    }
+
     fn on_line(&mut self, text: &str) -> Vec<Effect> {
         // Only a handful of event types matter; the rest are not parsed.
         match proto::event_type(text) {
             Some(
                 "conversation_updated"
                 | "conversation_deleted"
+                | "conversation_restored"
+                | "conversation_unwound"
+                | "sidebar_state_patched"
+                | "queue_updated"
                 | "conversation_history_loaded"
                 | "error",
             )
@@ -143,7 +174,9 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
             Some("conversations_list") if !text.contains("\"sidebarRest\":true") => {}
             Some(_) => return Vec::new(),
         }
-        match proto::parse_event(text) {
+        let event = proto::parse_event(text);
+        self.unread.apply(&event);
+        match event {
             Event::ConversationsList { conversations, .. } => {
                 self.streaming = conversations
                     .into_iter()
@@ -267,6 +300,117 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
             }
         }
         effects
+    }
+}
+
+/// The conversations the icon's badge counts.
+#[derive(Debug, Default)]
+struct Unread {
+    /// The unread ones: only they can count, and `unread` changes only with
+    /// a whole summary.
+    conversations: HashMap<String, Summary>,
+    folders: HashMap<String, Folder>,
+    /// Each conversation's queue entries (one in the global-idle queue makes
+    /// it wait).
+    queues: HashMap<String, QueueInfo>,
+    /// The bootstrap's first page has come.
+    known: bool,
+}
+
+impl Unread {
+    fn upsert(&mut self, summary: &Summary) {
+        if summary.unread {
+            self.conversations
+                .insert(summary.id.clone(), summary.clone());
+        } else {
+            self.conversations.remove(&summary.id);
+        }
+    }
+
+    fn apply(&mut self, event: &Event) {
+        match event {
+            Event::ConversationsList {
+                conversations,
+                folders,
+                sidebar_rest,
+                ..
+            } => {
+                if *sidebar_rest != Some(true) {
+                    self.conversations.clear();
+                    self.known = true;
+                }
+                for summary in conversations {
+                    self.upsert(summary);
+                }
+                if let Some(folders) = folders {
+                    self.folders = folders.iter().map(|f| (f.id.clone(), f.clone())).collect();
+                }
+            }
+            Event::ConversationUpdated { summary, .. }
+            | Event::ConversationRestored { summary, .. }
+            | Event::ConversationUnwound { summary, .. } => self.upsert(summary),
+            Event::ConversationDeleted { conv_id, .. } => {
+                self.conversations.remove(conv_id);
+            }
+            Event::SidebarStatePatched {
+                conversations,
+                folders,
+                removed_conversation_ids,
+                removed_folder_ids,
+            } => {
+                for summary in conversations {
+                    self.upsert(summary);
+                }
+                for folder in folders {
+                    self.folders.insert(folder.id.clone(), folder.clone());
+                }
+                for id in removed_conversation_ids {
+                    self.conversations.remove(id);
+                }
+                for id in removed_folder_ids {
+                    self.folders.remove(id);
+                }
+            }
+            Event::QueueUpdated { messages, .. } => {
+                self.queues.clear();
+                for entry in messages {
+                    let info = self.queues.entry(entry.conv_id.clone()).or_default();
+                    info.count += 1;
+                    info.idle |= entry.source == "global-idle";
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A folder muted itself or by a folder above.
+    fn folder_muted(&self, folder: Option<&str>) -> bool {
+        let mut seen = HashSet::new();
+        let mut at = folder;
+        while let Some(folder) = at.and_then(|id| self.folders.get(id)) {
+            if folder.muted {
+                return true;
+            }
+            if !seen.insert(folder.id.as_str()) {
+                return false;
+            }
+            at = folder.parent_id.as_deref();
+        }
+        false
+    }
+
+    /// The list's green dots (the iPhone's `totals.unread`), once known.
+    fn count(&self) -> Option<u32> {
+        self.known.then(|| {
+            self.conversations
+                .values()
+                .filter(|summary| {
+                    let queue = self.queues.get(&summary.id).copied().unwrap_or_default();
+                    let muted = self.folder_muted(summary.folder_id.as_deref());
+                    activity::conversation(summary, queue, false, muted).kind == Some(Kind::Unread)
+                })
+                .count() as u32
+        })
     }
 }
 
@@ -414,6 +558,48 @@ impl LeaseKeeper {
     }
 }
 
+/// Keeps the icon's badge at the unread count: set when it changes, again
+/// with backoff while Moon is absent (Android mode, a restart) or refuses.
+/// Moon keeps a badge across its restarts and reboots.
+struct BadgeKeeper {
+    shown: Option<u32>,
+    next: Instant,
+    failures: usize,
+}
+
+impl BadgeKeeper {
+    fn new(now: Instant) -> Self {
+        Self {
+            shown: None,
+            next: now,
+            failures: 0,
+        }
+    }
+
+    /// `moon` sends one control command and says whether Moon accepted it.
+    fn step(&mut self, want: Option<u32>, now: Instant, mut moon: impl FnMut(&str) -> bool) {
+        let Some(count) = want else {
+            return;
+        };
+        if self.shown == Some(count) || now < self.next {
+            return;
+        }
+        if moon(&format!("badge {} {count}", handoff::APP_ID)) {
+            self.shown = Some(count);
+            self.failures = 0;
+        } else {
+            let wait = BADGE_BACKOFF[self.failures.min(BADGE_BACKOFF.len() - 1)];
+            self.next = now + Duration::from_secs(wait);
+            self.failures += 1;
+        }
+    }
+
+    fn deadline(&self, want: Option<u32>) -> Option<Instant> {
+        want.filter(|count| self.shown != Some(*count))
+            .map(|_| self.next)
+    }
+}
+
 // ----- I/O ------------------------------------------------------------------
 
 /// A post or withdrawal waiting for moon-notifyd.
@@ -485,6 +671,7 @@ fn main() {
     let mut next_id: u64 = 0;
     let mut daemon_was_up = false;
     let mut lease = LeaseKeeper::new(Instant::now());
+    let mut badge = BadgeKeeper::new(Instant::now());
 
     loop {
         let now = Instant::now();
@@ -541,9 +728,17 @@ fn main() {
             }
         }
 
-        lease.step(bridge.wants_lease(), now, |command| {
+        let moon = |command: &str| {
             handoff::moon_request(command, Duration::from_millis(500))
                 .is_some_and(|reply| reply["ok"].as_bool() == Some(true))
+        };
+        lease.step(bridge.wants_lease(), now, moon);
+        badge.step(bridge.badge(), now, |command| {
+            let accepted = moon(command);
+            if accepted {
+                log(command);
+            }
+            accepted
         });
 
         // Sleep until a socket speaks or a retry is due.
@@ -561,7 +756,13 @@ fn main() {
         if notify.socket.is_none() && !outbox.is_empty() {
             deadline = Some(deadline.map_or(notify.retry_at, |d| d.min(notify.retry_at)));
         }
-        if let Some(at) = lease.deadline(bridge.wants_lease()) {
+        for at in [
+            lease.deadline(bridge.wants_lease()),
+            badge.deadline(bridge.badge()),
+        ]
+        .into_iter()
+        .flatten()
+        {
             deadline = Some(deadline.map_or(at, |d| d.min(at)));
         }
         let timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
@@ -862,6 +1063,90 @@ mod tests {
         );
         assert_eq!(sent.last().unwrap(), "lease release exocortex transfer");
         assert!(!keeper.held && keeper.deadline(false).is_none());
+    }
+
+    #[test]
+    fn the_badge_counts_unread_conversations_as_the_list_does() {
+        let mut bridge = Bridge::new(|_| false);
+        bridge.on_connected();
+        assert_eq!(bridge.badge(), None, "unknown before the first page");
+        // a and e count; b sits under a muted folder, c is muted itself, d
+        // still streams, z is read.
+        bridge.on_line(
+            r#"{"type":"conversations_list","conversations":[
+                {"id":"a","unread":true},
+                {"id":"b","unread":true,"folderId":"inner"},
+                {"id":"c","unread":true,"notificationsMuted":true},
+                {"id":"d","unread":true,"streaming":true},
+                {"id":"e","unread":true,"parentConversationId":"a"},
+                {"id":"z","unread":false}],
+              "folders":[{"id":"outer","muted":true},{"id":"inner","parentId":"outer"}],
+              "sidebarPartial":{"remaining":9,"folderConversationCounts":{}}}"#
+                .replace(['\n', ' '], "")
+                .as_str(),
+        );
+        assert_eq!(bridge.badge(), Some(2));
+        // Waiting in the global-idle queue is not unread.
+        bridge.on_line(r#"{"type":"queue_updated","messages":[{"id":"q","convId":"e","text":"x","timing":"next-turn","source":"global-idle"}]}"#);
+        assert_eq!(bridge.badge(), Some(1));
+        bridge.on_line(r#"{"type":"conversation_updated","summary":{"id":"a","streaming":false,"unread":false}}"#);
+        assert_eq!(bridge.badge(), Some(0));
+        // The folder unmuted (a patch), then its conversation deleted.
+        bridge.on_line(
+            r#"{"type":"sidebar_state_patched","folders":[{"id":"outer","muted":false}]}"#,
+        );
+        assert_eq!(bridge.badge(), Some(1));
+        bridge.on_line(r#"{"type":"sidebar_state_patched","removedConversationIds":["b"]}"#);
+        assert_eq!(bridge.badge(), Some(0));
+        bridge.on_line(&update("n", "", true));
+        assert_eq!(bridge.badge(), Some(1), "a finished turn");
+        bridge.on_line(r#"{"type":"conversation_deleted","convId":"n"}"#);
+        assert_eq!(bridge.badge(), Some(0));
+        bridge.on_disconnected();
+        assert_eq!(bridge.badge(), Some(0), "kept while away");
+        bridge.on_connected();
+        assert_eq!(bridge.badge(), None);
+    }
+
+    #[test]
+    fn the_badge_is_set_on_a_change_and_again_while_moon_is_away() {
+        let start = Instant::now();
+        let mut keeper = BadgeKeeper::new(start);
+        let mut sent = Vec::new();
+        let mut step = |keeper: &mut BadgeKeeper, want: Option<u32>, at: u64, up: bool| {
+            keeper.step(want, start + Duration::from_secs(at), |command| {
+                sent.push(command.to_owned());
+                up
+            });
+        };
+        step(&mut keeper, None, 0, true);
+        step(&mut keeper, Some(3), 0, true);
+        step(&mut keeper, Some(3), 1, true);
+        assert!(keeper.deadline(Some(3)).is_none());
+        // Moon away: again 5 s, then 15 s later.
+        step(&mut keeper, Some(0), 2, false);
+        step(&mut keeper, Some(1), 3, true);
+        assert_eq!(
+            keeper.deadline(Some(1)),
+            Some(start + Duration::from_secs(7))
+        );
+        step(&mut keeper, Some(1), 7, false);
+        assert_eq!(
+            keeper.deadline(Some(1)),
+            Some(start + Duration::from_secs(22))
+        );
+        step(&mut keeper, Some(1), 22, true);
+        step(&mut keeper, Some(1), 23, true);
+        assert_eq!(
+            sent,
+            [
+                "badge exocortex 3",
+                "badge exocortex 0",
+                "badge exocortex 1",
+                "badge exocortex 1"
+            ]
+        );
+        assert!(keeper.deadline(Some(1)).is_none());
     }
 
     #[test]
