@@ -1289,7 +1289,8 @@ fn shimmer_step(now: Instant) -> u32 {
 fn live_footer_text(base: Option<&Metadata>, model: &Model, now: Instant) -> Option<String> {
     let live = model.chat.live.as_ref()?;
     let meta = footer::combine_segment(base, Some(&live.meta))?;
-    Some(footer::text(&meta, wall_ms(now), true))
+    let tokens = chat::Disclosure::of(&model.persist).tokens;
+    Some(footer::text(&meta, wall_ms(now), true, tokens))
 }
 
 /// A status line's words now, its colour, and whether it spins.

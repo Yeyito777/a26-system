@@ -368,6 +368,8 @@ pub struct Disclosure {
     pub show_all: bool,
     /// Folded work leaves a mark at the left edge.
     pub marks: bool,
+    /// Footers end with "| N tokens".
+    pub tokens: bool,
 }
 
 impl Default for Disclosure {
@@ -377,6 +379,7 @@ impl Default for Disclosure {
             tools: false,
             show_all: false,
             marks: true,
+            tokens: false,
         }
     }
 }
@@ -392,6 +395,7 @@ impl Disclosure {
             marks: persist
                 .section::<Option<bool>>(SETTINGS, "foldMarkers")
                 .unwrap_or(true),
+            tokens: persist.section(SETTINGS, "showTokenCounts"),
         }
     }
 

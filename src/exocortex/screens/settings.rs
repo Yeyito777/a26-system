@@ -263,6 +263,10 @@ fn build_rows(model: &Model, now: Instant) -> Vec<(f32, Row)> {
         model.persist.settings().text_scale,
     )));
     list.push(Row::Sample);
+    for toggle in ops::Toggle::TEXT {
+        let detail = widgets::wrap_plain(toggle.detail(), T_META, detail_w);
+        list.push(Row::Switch(toggle, detail));
+    }
     list.push(Row::End);
     list.push(Row::Section("New chats"));
     let defaults = match &model.ops.defaults {
@@ -415,7 +419,7 @@ pub fn settings_frame(
     SettingsFrame {
         offset: view.settings_scroll.value(now).round() as i32,
         key: hasher.finish(),
-        knobs: ops::Toggle::APPEARANCE
+        knobs: ops::Toggle::ALL
             .iter()
             .map(|t| (knob(model, *t, now) * 32.0) as i32)
             .collect(),
@@ -471,7 +475,7 @@ pub fn draw_settings_update(
             )
         })
     };
-    for (index, toggle) in ops::Toggle::APPEARANCE.iter().enumerate() {
+    for (index, toggle) in ops::Toggle::ALL.iter().enumerate() {
         if old.knobs.get(index) != new.knobs.get(index)
             && let Some(rows) = band(&|row| matches!(row, Row::Switch(t, _) if t == toggle))
         {

@@ -1445,7 +1445,7 @@ impl ViewState {
             y = top + placed.h;
             gap = placed.tail_gap;
             if let Some(meta) = footer {
-                let line = footer::text(meta, now, false);
+                let line = footer::text(meta, now, false, disclosure.tokens);
                 let suspended = chat.suspended == Some(*stamp);
                 let key = hash_of(("footer", &line, *stamp, suspended));
                 let (laid, marks) = self.piece(key, || lay_footer(&line, *stamp, suspended));
@@ -3717,6 +3717,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn footers_show_token_counts_when_asked() {
+        let mut model = open_with(&long_entries(1));
+        let footer = |model: &Model| {
+            let mut view = ViewState::new();
+            view.layout(model);
+            let item = view
+                .layout
+                .items
+                .iter()
+                .find(|item| item.index == u32::MAX)
+                .expect("a footer");
+            match &item.laid.ops[0] {
+                crate::exocortex::view::ops::Op::Text { text, .. } => text.clone(),
+                op => panic!("{op:?}"),
+            }
+        };
+        assert!(!footer(&model).contains("TOKENS"));
+        model.handle(Action::Ops(super::super::super::model::ops::Act::Toggle(
+            super::super::super::model::ops::Toggle::ShowTokenCounts,
+        )));
+        assert!(
+            footer(&model).ends_with("| 10 TOKENS"),
+            "{}",
+            footer(&model)
+        );
     }
 
     #[test]
