@@ -406,7 +406,7 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
                 if text.trim_start_matches('\n').starts_with("[Context:") {
                     segments.push(Segment::Context { index, gap });
                 } else if !text.trim().is_empty() {
-                    let parsed = markdown::parse(text);
+                    let parsed = markdown::parse_capped(text);
                     for (at, block) in parsed.iter().enumerate() {
                         segments.push(Segment::Markdown {
                             block: block.clone(),
@@ -1776,6 +1776,12 @@ pub(crate) fn hit(
         for (rect, action) in &item.laid.hits {
             if x >= rect.x && x < rect.x + rect.w && y >= iy + rect.y && y < iy + rect.y + rect.h {
                 return Some(action.clone());
+            }
+        }
+        // Inside scrollers (links in tables, C1), where they are now.
+        for hit in &item.laid.scrolled_hits {
+            if hit.contains(x, y - iy, &view.xscroll) {
+                return Some(hit.action.clone());
             }
         }
     }
