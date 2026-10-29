@@ -4,7 +4,7 @@
 //! providers' windows, the accounts it routes between, the link to it, and
 //! the tokens it counted. The usage rows also go into Settings.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -472,6 +472,8 @@ pub fn tokens(model: &Model) -> Built {
                 "Active days",
                 stats["days"].as_array().map_or(0, Vec::len).to_string(),
             ));
+            rows.push(panel::section("Daily · last 26 weeks"));
+            rows.push(Row::Heat(heatmap(stats, now_ms() as f64)));
             for (title, key) in [
                 ("Models", "byModel"),
                 ("Providers", "byProvider"),
@@ -520,6 +522,62 @@ pub fn tokens(model: &Model) -> Built {
         rows,
         wake: None,
     }
+}
+
+/// The daily heatmap's weeks (the iPhone's `heatmapCells`): 26 weeks and
+/// this one, Sunday to Saturday, each day's tokens as a level 0-4 by the
+/// quartiles of the active days (-1: after today).
+fn heatmap(stats: &Value, now: f64) -> Vec<[i8; 7]> {
+    const WEEKS: i64 = 26;
+    const DAY: f64 = 86_400_000.0;
+    let by_day: HashMap<&str, f64> = stats["days"]
+        .as_array()
+        .map(|days| {
+            days.iter()
+                .filter_map(|d| Some((d["day"].as_str()?, d["totalTokens"].as_f64()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut values: Vec<f64> = by_day.values().copied().filter(|v| *v > 0.0).collect();
+    values.sort_by(f64::total_cmp);
+    let q = |p: f64| {
+        values
+            .get(((p * values.len() as f64) as usize).min(values.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let cuts = [q(0.25), q(0.5), q(0.75)];
+    let today = clock::local(now);
+    let end = clock::from_local(today.year, today.month as i32, today.day as i32, 0, 0, 0);
+    // This week's Sunday, 26 weeks back (the iPhone's `end - (26 × 7 - 1)
+    // days - weekday` lands on a Monday: its rows would not start on
+    // Sundays as it says they do).
+    let start = end - f64::from(today.weekday) * DAY - (WEEKS * 7) as f64 * DAY;
+    let day_of = |ms: f64| {
+        let d = clock::local(ms + 12.0 * 3_600_000.0);
+        format!("{:04}-{:02}-{:02}", d.year, d.month, d.day)
+    };
+    let mut weeks = Vec::new();
+    let mut t = start;
+    while t <= end {
+        let mut column = [0i8; 7];
+        for (i, cell) in column.iter_mut().enumerate() {
+            let ts = t + i as f64 * DAY;
+            *cell = if ts > end {
+                -1
+            } else {
+                let tokens = by_day.get(day_of(ts).as_str()).copied().unwrap_or(0.0);
+                if tokens <= 0.0 {
+                    0
+                } else {
+                    1 + cuts.iter().filter(|cut| tokens > **cut).count() as i8
+                }
+            };
+        }
+        weeks.push(column);
+        t += 7.0 * DAY;
+    }
+    weeks
 }
 
 /// An account's 5-hour and weekly meters (`real-10-sheet-accounts`): the
@@ -864,6 +922,30 @@ pub fn connection(model: &Model, now: Instant) -> Built {
 mod tests {
     use super::*;
     use crate::exocortex::proto::parse_event;
+
+    /// The heatmap is 26 weeks and this one, Sunday to Saturday: today's
+    /// level by the quartiles, the days after it left out.
+    #[test]
+    fn the_daily_heatmap_has_26_weeks_and_this_one() {
+        let now = clock::from_local(2026, 10, 29, 15, 0, 0);
+        let stats = serde_json::json!({"days": [
+            {"day": "2026-10-29", "totalTokens": 900.0},
+            {"day": "2026-10-28", "totalTokens": 100.0},
+            {"day": "2026-10-20", "totalTokens": 300.0},
+            {"day": "2026-10-01", "totalTokens": 600.0},
+        ]});
+        let weeks = heatmap(&stats, now);
+        assert_eq!(weeks.len(), 27);
+        let today = clock::local(now).weekday as usize;
+        let last = weeks.last().unwrap();
+        // The cuts are the values at 1/4, 1/2 and 3/4 of the sorted days (as
+        // the iPhone indexes them): the busiest is the top cut, level 3.
+        assert_eq!(last[today], 3, "the busiest day");
+        assert_eq!(last[today - 1], 1, "the quietest");
+        assert!(last[today + 1..].iter().all(|level| *level == -1));
+        let levels: Vec<i8> = weeks.iter().flatten().copied().filter(|l| *l > 0).collect();
+        assert_eq!(levels.len(), 4);
+    }
 
     #[test]
     fn windows_read_and_colour_as_on_the_iphone() {

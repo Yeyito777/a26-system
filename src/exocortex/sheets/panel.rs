@@ -167,6 +167,10 @@ pub enum Row {
         label: String,
         tap: Tap,
     },
+    /// The token statistics' daily heatmap (`real-10-sheet-tokens`): a
+    /// column per week, oldest first, Sunday to Saturday, each day's level
+    /// 0-4 (-1: still to come).
+    Heat(Vec<[i8; 7]>),
     /// The accounts grid's head (`real-10-sheet-accounts`): the provider,
     /// then "5-HOUR" and "WEEKLY" over their columns.
     GridHead(String),
@@ -213,6 +217,17 @@ fn grid_columns(width: f32) -> [(f32, f32); 2] {
     let w = (width * 0.235).round();
     let gap = 22.0;
     [(width - 2.0 * w - gap, w), (width - w, w)]
+}
+
+/// The heatmap's padding above and below, and the gap between its cells
+/// (10, 4 and 2 pt).
+const HEAT_PAD: (f32, f32) = (28.0, 11.0);
+const HEAT_GAP: f32 = 6.0;
+
+/// A heatmap cell's side for `columns` weeks in `width`, and the gap.
+fn heat_cell(columns: usize, width: f32) -> (f32, f32) {
+    let n = columns.max(1) as f32;
+    (((width - (n - 1.0) * HEAT_GAP) / n).floor(), HEAT_GAP)
 }
 
 /// A hit's preview shows at most this many lines.
@@ -425,6 +440,10 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
         }
         Row::Action { .. } => theme::grown(TARGET, 60.0),
         Row::GridHead(_) => theme::grown(SECTION, 40.0),
+        Row::Heat(weeks) => {
+            let (cell, gap) = heat_cell(weeks.len(), width);
+            HEAT_PAD.0 + 7.0 * cell + 6.0 * gap + HEAT_PAD.1
+        }
         Row::Account { .. } => theme::grown(144.0, 100.0),
         Row::Bar { .. } => BAR + 14.0,
         Row::Gap(px) => *px as f32,
@@ -972,6 +991,29 @@ pub fn draw_row(
             for (index, line) in laid.lines.iter().enumerate() {
                 let baseline = body.baseline(top + index as f32 * body.line());
                 widgets::text(canvas, line, x, baseline, body, p.text, 1.0);
+            }
+        }
+        Row::Heat(weeks) => {
+            let (cell, gap) = heat_cell(weeks.len(), width);
+            let empty = theme::mix(p.border, 22, background);
+            for (column, days) in weeks.iter().enumerate() {
+                for (row, level) in days.iter().enumerate() {
+                    let color = match level {
+                        1 => theme::mix(p.accent, 30, background),
+                        2 => theme::mix(p.accent, 52, background),
+                        3 => theme::mix(p.accent, 76, background),
+                        4 => p.accent,
+                        0 => empty,
+                        _ => continue,
+                    };
+                    let rect = RectF::new(
+                        x + column as f32 * (cell + gap),
+                        y + HEAT_PAD.0 + row as f32 * (cell + gap),
+                        cell,
+                        cell,
+                    );
+                    widgets::fill(canvas, rect, color);
+                }
             }
         }
         Row::GridHead(title) => {
