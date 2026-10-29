@@ -11,6 +11,7 @@ pub mod editor;
 pub mod find;
 pub mod gesture;
 pub mod handoff;
+pub mod highlight;
 pub mod images;
 pub mod line;
 pub mod link;
