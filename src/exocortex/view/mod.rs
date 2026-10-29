@@ -16,6 +16,7 @@ pub mod blocks;
 pub mod chat_header;
 pub mod code;
 pub mod composer;
+pub mod draft;
 pub mod frame;
 pub mod list;
 pub mod markdown_layout;
@@ -598,6 +599,7 @@ fn new_chat_state(
 ) {
     let p = theme::p();
     let c = theme::c();
+    draft::draw(canvas, model, top, pressed);
     let rect = new_chat_box(model, (top, bottom));
     let label_ty = T_EYEBROW.tracked(3.3);
     widgets::text_centered(
@@ -683,11 +685,14 @@ pub fn hit(
             if y < top || y >= bottom {
                 return None;
             }
-            if model.chat.id.is_none()
-                && model.chat.echoes.is_empty()
-                && new_chat_box(model, (top, bottom)).contains(x, y)
-            {
-                return Some(Hit::Action(Action::Ops(ops_model::Act::OpenInspector)));
+            if model.chat.id.is_none() && model.chat.echoes.is_empty() {
+                if new_chat_box(model, (top, bottom)).contains(x, y) {
+                    return Some(Hit::Action(Action::Ops(ops_model::Act::OpenInspector)));
+                }
+                // A folder's instructions the draft inherits (PAR-085).
+                if let Some(action) = draft::hit(model, top, x, y) {
+                    return Some(Hit::Action(action));
+                }
             }
             if transcript::stateful(model) {
                 return Some(
