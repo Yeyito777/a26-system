@@ -92,6 +92,8 @@ pub struct Scroll {
 
 /// iOS's normal deceleration rate, per millisecond.
 const DECELERATION: f32 = 0.998;
+/// A release's speed is measured over this much of the drag before it.
+const VELOCITY_WINDOW: Duration = Duration::from_millis(100);
 
 impl Scroll {
     pub fn begin(&mut self, y: f32, now: Instant) {
@@ -119,7 +121,7 @@ impl Scroll {
             };
             self.samples.push((now, y));
             self.samples
-                .retain(|(at, _)| now.saturating_duration_since(*at) < Duration::from_millis(100));
+                .retain(|(at, _)| now.saturating_duration_since(*at) < VELOCITY_WINDOW);
         }
     }
 
@@ -127,6 +129,14 @@ impl Scroll {
         if self.drag.take().is_none() {
             return;
         }
+        // The speed at the release: over the last 100 ms up to it, the
+        // finger resting where it last moved. Held still that long, a lift
+        // is no fling.
+        if let Some(&(_, y)) = self.samples.last() {
+            self.samples.push((now, y));
+        }
+        self.samples
+            .retain(|(at, _)| now.saturating_duration_since(*at) < VELOCITY_WINDOW);
         let velocity = match (self.samples.first(), self.samples.last()) {
             (Some((t0, y0)), Some((t1, y1))) if t1 > t0 => {
                 -(y1 - y0) / t1.duration_since(*t0).as_secs_f32()
@@ -734,5 +744,30 @@ mod tests {
             t += Duration::from_millis(16);
         }
         assert_eq!(scroll.offset, 0.0);
+    }
+
+    #[test]
+    fn a_lift_after_holding_still_does_not_fling() {
+        let start = Instant::now();
+        let ms = |n: u64| start + Duration::from_millis(n);
+        let mut scroll = Scroll::default();
+        scroll.begin(1000.0, start);
+        scroll.moved(900.0, 5000.0, ms(40));
+        scroll.moved(700.0, 5000.0, ms(80));
+        // Held still for 150 ms, then lifted: it stays where it is.
+        scroll.end(5000.0, ms(230));
+        assert!(!scroll.step(5000.0, ms(240)));
+        assert_eq!(scroll.value(ms(1000)), 300.0);
+        // Held 50 ms: a slower fling than one lifted while moving.
+        let fling_after = |still: u64| {
+            let mut scroll = Scroll::default();
+            scroll.begin(1000.0, start);
+            scroll.moved(900.0, 5000.0, ms(40));
+            scroll.moved(700.0, 5000.0, ms(80));
+            scroll.end(5000.0, ms(80 + still));
+            scroll.value(ms(3000))
+        };
+        assert!(fling_after(50) < fling_after(0));
+        assert!(fling_after(50) > 300.0);
     }
 }

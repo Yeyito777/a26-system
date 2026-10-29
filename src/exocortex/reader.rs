@@ -3,7 +3,9 @@
 //! anywhere), with its own top bar: Done, the title and how many
 //! characters, Find and Copy. Find opens a bar with a field (Moon's
 //! keyboard), "i/N" and ‹ ›: every match is marked, the current one in
-//! `search_background`, scrolled to a third of the way down.
+//! `search_background`, scrolled to a third of the way down. A long press
+//! selects a word (PAR-141); moving on, or dragging either handle, extends
+//! it; COPY over it copies it, a tap elsewhere lets it go.
 //!
 //! Open one with `reader::open(&mut model.ui, title, text)` or the
 //! `UiAct::Read` action.
@@ -48,7 +50,15 @@ enum Control {
     Field,
     Previous,
     Next,
+    /// COPY over a selection.
+    CopySelection,
+    /// A selection's start or end handle.
+    Handle(bool),
 }
+
+/// A handle's knob and how far from it a touch still takes it.
+const KNOB: f32 = 22.0;
+const HANDLE_REACH: f32 = 70.0;
 
 pub struct Reader {
     title: String,
@@ -63,6 +73,9 @@ pub struct Reader {
     find: Option<Find>,
     /// Widths of characters other than ASCII (fallback glyphs, wide ones).
     widths: RefCell<HashMap<char, f32>>,
+    /// Selected text (byte range), and which end a drag moves.
+    selection: Option<(usize, usize)>,
+    dragging: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -87,6 +100,8 @@ impl Reader {
             closed: false,
             find: None,
             widths: RefCell::new(HashMap::new()),
+            selection: None,
+            dragging: None,
         }
     }
 
@@ -189,6 +204,14 @@ impl Reader {
     }
 
     fn control_at(&self, cx: &Cx, x: f32, y: f32) -> Option<Control> {
+        if let Some(copy) = self.copy_rect(cx)
+            && copy.contains(x, y)
+        {
+            return Some(Control::CopySelection);
+        }
+        if let Some(handle) = self.handle_at(cx, x, y) {
+            return Some(Control::Handle(handle));
+        }
         if y < TOP_BAR {
             return if x < 240.0 {
                 Some(Control::Done)
@@ -254,6 +277,20 @@ impl Reader {
         }
     }
 
+    /// Moves the dragged end of the selection to (`x`, `y`) (whole words
+    /// while it grows from a long press, as text selection does).
+    fn extend(&mut self, cx: &Cx, x: f32, y: f32) {
+        let (Some(start_end), Some((a, b))) = (self.dragging, self.selection) else {
+            return;
+        };
+        let at = self.offset_at(cx, x, y);
+        self.selection = Some(if start_end {
+            (at.min(b.saturating_sub(1)), b)
+        } else {
+            (a, at.max(a + 1).min(self.text.len()))
+        });
+    }
+
     fn draw_text(&self, canvas: &mut Canvas, cx: &Cx) {
         let p = theme::p();
         let (y0, y1) = self.area(cx);
@@ -304,6 +341,22 @@ impl Reader {
                         },
                     );
                 }
+                if let Some((s0, s1)) = self.selection {
+                    let (a, b) = (s0.max(start), s1.min(end));
+                    let to_end = s1 > end && end < self.text.len();
+                    if a < b || (to_end && a <= b && s0 <= end) {
+                        let x = PAD.1 + self.width_between(start, a);
+                        let mut w = self.width_between(a, b);
+                        if to_end {
+                            w += self.width_of(' ');
+                        }
+                        widgets::fill(
+                            canvas,
+                            RectF::new(x.round(), y, w.round(), line_h),
+                            p.text_selection,
+                        );
+                    }
+                }
                 let segment = |canvas: &mut Canvas, a: usize, b: usize, color| {
                     if a < b {
                         text::draw_tracked(
@@ -327,6 +380,160 @@ impl Reader {
                     }
                     None => segment(canvas, start, end, p.text),
                 }
+            }
+        });
+    }
+
+    /// The text's top on screen (scrolled).
+    fn text_top(&self, cx: &Cx) -> f32 {
+        self.area(cx).0 + PAD.0 - self.scroll.value(cx.now).round()
+    }
+
+    /// The byte offset nearest (`x`, `y`) on screen.
+    fn offset_at(&self, cx: &Cx, x: f32, y: f32) -> usize {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let line = ((y - self.text_top(cx)) / Self::line_h()).floor();
+        let line = (line.max(0.0) as usize).min(self.lines.len() - 1);
+        let (start, end) = self.lines[line];
+        let mut at = start;
+        let mut left = PAD.1;
+        for (index, c) in self.text[start..end].char_indices() {
+            let w = self.width_of(c);
+            if x < left + w / 2.0 {
+                return start + index;
+            }
+            left += w;
+            at = start + index + c.len_utf8();
+        }
+        at
+    }
+
+    /// Where byte offset `at` is on screen: its x and its line's top.
+    fn point_of(&self, cx: &Cx, at: usize) -> (f32, f32) {
+        let line = self
+            .lines
+            .partition_point(|(_, end)| *end < at)
+            .min(self.lines.len().saturating_sub(1));
+        let start = self.lines.get(line).map_or(0, |l| l.0);
+        (
+            PAD.1 + self.width_between(start, at.max(start)),
+            self.text_top(cx) + line as f32 * Self::line_h(),
+        )
+    }
+
+    /// The word at byte offset `at` (letters, digits and `_`; else the
+    /// character itself).
+    fn word_at(&self, at: usize) -> (usize, usize) {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        // On a space just after a word: that word.
+        let at = match (
+            self.text[at..].chars().next(),
+            self.text[..at].chars().next_back(),
+        ) {
+            (Some(c), Some(before)) if c.is_whitespace() && word(before) => at - before.len_utf8(),
+            _ => at,
+        };
+        let Some(c) = self.text[at..].chars().next() else {
+            let before = self.text[..at].char_indices().next_back();
+            return before.map_or((at, at), |(i, _)| (i, at));
+        };
+        if !word(c) {
+            return (at, at + c.len_utf8());
+        }
+        let start = self.text[..at]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| word(*c))
+            .last()
+            .map_or(at, |(i, _)| i);
+        let end = self.text[at..]
+            .char_indices()
+            .find(|(_, c)| !word(*c))
+            .map_or(self.text.len(), |(i, _)| at + i);
+        (start, end)
+    }
+
+    /// Which handle (true: the start) is under (`x`, `y`).
+    fn handle_at(&self, cx: &Cx, x: f32, y: f32) -> Option<bool> {
+        let (start, end) = self.selection?;
+        let line_h = Self::line_h();
+        let (sx, sy) = self.point_of(cx, start);
+        let (ex, ey) = self.point_of(cx, end);
+        let near = |hx: f32, hy: f32| (x - hx).hypot(y - hy) < HANDLE_REACH;
+        if near(ex, ey + line_h + KNOB) {
+            Some(false)
+        } else if near(sx, sy - KNOB) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// The COPY pill over the selection.
+    fn copy_rect(&self, cx: &Cx) -> Option<RectF> {
+        let (start, end) = self.selection?;
+        let (sx, sy) = self.point_of(cx, start);
+        let w = 200.0;
+        let h = TARGET - 22.0;
+        // Above the selection, or under it when there is no room above.
+        let above = sy - KNOB - 22.0 - h;
+        let top = if above >= self.area(cx).0 + 8.0 {
+            above
+        } else {
+            self.point_of(cx, end).1 + Self::line_h() + KNOB + 22.0
+        };
+        let x = (sx - w / 2.0).clamp(22.0, cx.width - w - 22.0);
+        Some(RectF::new(x.round(), top.round(), w, h))
+    }
+
+    fn draw_selection(&self, canvas: &mut Canvas, cx: &Cx) {
+        let Some((start, end)) = self.selection else {
+            return;
+        };
+        let p = theme::p();
+        let c = theme::c();
+        let (y0, y1) = self.area(cx);
+        let line_h = Self::line_h();
+        widgets::clipped(canvas, RectF::new(0.0, y0, cx.width, y1 - y0), |canvas| {
+            let (sx, sy) = self.point_of(cx, start);
+            let (ex, ey) = self.point_of(cx, end);
+            // Knobs: a bar on each end, a dot above the start, below the end.
+            let bar = |canvas: &mut Canvas, x: f32, y: f32| {
+                widgets::fill(
+                    canvas,
+                    RectF::new(x.round() - 2.0, y, 4.0, line_h),
+                    p.accent,
+                );
+            };
+            bar(canvas, sx, sy);
+            bar(canvas, ex, ey);
+            canvas.fill_circle(sx.round(), sy - KNOB / 2.0, KNOB / 2.0, p.accent, 1.0);
+            canvas.fill_circle(
+                ex.round(),
+                ey + line_h + KNOB / 2.0,
+                KNOB / 2.0,
+                p.accent,
+                1.0,
+            );
+            if let Some(copy) = self.copy_rect(cx) {
+                widgets::fill(canvas, copy, p.surface_background);
+                widgets::border(canvas, copy, HAIRLINE, c.menu_border);
+                let ty = theme::T_MENU;
+                widgets::text_centered(
+                    canvas,
+                    "Copy",
+                    copy.x + copy.w / 2.0,
+                    ty.baseline(copy.y + (copy.h - ty.line()) / 2.0),
+                    ty,
+                    p.text,
+                    if self.pressed == Some(Control::CopySelection) {
+                        0.5
+                    } else {
+                        1.0
+                    },
+                );
             }
         });
     }
@@ -437,17 +644,23 @@ impl Overlay for Reader {
                 .map(|find| (&find.query, find.current, find.matches.len(), find.focused)),
             cx.width.to_bits(),
             cx.height.to_bits(),
+            self.selection,
         )
             .hash(&mut key);
         Body {
             rows: (0, cx.height as i32),
+            // A selection's knobs and COPY do not scroll with the text.
             solid: None,
-            scroller: Some(Scroller {
+            scroller: self.selection.is_none().then_some(Scroller {
                 y0: y0 as i32,
                 y1: y1 as i32,
                 offset: self.scroll.value(cx.now).round() as i32,
             }),
-            key: key.finish(),
+            key: if self.selection.is_some() {
+                key.finish() ^ self.scroll.value(cx.now).round().to_bits() as u64
+            } else {
+                key.finish()
+            },
         }
     }
 
@@ -521,12 +734,47 @@ impl Overlay for Reader {
         if let Some(find) = &self.find {
             self.draw_find_bar(canvas, cx, find);
         }
+        self.draw_selection(canvas, cx);
     }
 
     fn gesture(&mut self, gesture: &Gesture, cx: &Cx) -> Response {
         match *gesture {
             Gesture::Down { x, y } => {
                 self.pressed = self.control_at(cx, x, y);
+                Response::Handled
+            }
+            Gesture::DragStart { x, y, .. } if matches!(self.pressed, Some(Control::Handle(_))) => {
+                if let Some(Control::Handle(start)) = self.pressed.take() {
+                    self.dragging = Some(start);
+                    self.extend(cx, x, y);
+                }
+                Response::Handled
+            }
+            Gesture::Drag { x, y, .. } if self.dragging.is_some() => {
+                self.extend(cx, x, y);
+                Response::Handled
+            }
+            Gesture::DragEnd { .. } if self.dragging.is_some() => {
+                self.dragging = None;
+                Response::Handled
+            }
+            Gesture::LongPress { x, y } => {
+                self.pressed = None;
+                if y >= self.area(cx).0 {
+                    let at = self.offset_at(cx, x, y);
+                    self.selection = Some(self.word_at(at));
+                    self.dragging = Some(false);
+                }
+                Response::Handled
+            }
+            Gesture::LongPressMove { x, y } => {
+                if self.dragging.is_some() {
+                    self.extend(cx, x, y);
+                }
+                Response::Handled
+            }
+            Gesture::LongPressEnd { .. } => {
+                self.dragging = None;
                 Response::Handled
             }
             Gesture::DragStart {
@@ -580,8 +828,19 @@ impl Overlay for Reader {
                         self.step(cx, 1);
                         Response::Handled
                     }
+                    Some(Control::CopySelection) => {
+                        let copied = self
+                            .selection
+                            .take()
+                            .map(|(a, b)| self.text[a..b].to_owned())
+                            .unwrap_or_default();
+                        Response::Action(Action::Ui(UiAct::Copy(copied)))
+                    }
+                    Some(Control::Handle(_)) => Response::Handled,
                     None => {
-                        // A tap on the text puts the keyboard away.
+                        // A tap on the text lets a selection go and puts
+                        // the keyboard away.
+                        self.selection = None;
                         if let Some(find) = &mut self.find {
                             find.focused = false;
                         }
@@ -691,6 +950,75 @@ mod tests {
         let mut reader = Reader::new("T".into(), long.clone());
         reader.layout(&cx(&model));
         assert_eq!(reader.lines.len(), 100usize.div_ceil(per_line));
+    }
+
+    #[test]
+    fn a_long_press_selects_a_word_handles_extend_and_copy_copies() {
+        let model = Model::new();
+        let c = cx(&model);
+        let mut reader = Reader::new("T".into(), "alpha beta_gamma delta\nsecond line".into());
+        reader.layout(&c);
+        let advance = text::measure("M", Weight::Mono, Reader::size());
+        let top = reader.text_top(&c);
+        let at = |col: f32, line: f32| {
+            (
+                PAD.1 + col * advance + 2.0,
+                top + line * Reader::line_h() + 10.0,
+            )
+        };
+        let (x, y) = at(8.0, 0.0);
+        reader.gesture(&Gesture::LongPress { x, y }, &c);
+        assert_eq!(reader.selection, Some((6, 16)), "beta_gamma");
+        // Moving on extends it to where the finger is.
+        let (x, y) = at(4.0, 1.0);
+        reader.gesture(&Gesture::LongPressMove { x, y }, &c);
+        reader.gesture(&Gesture::LongPressEnd { x, y }, &c);
+        let (a, b) = reader.selection.unwrap();
+        assert_eq!(&reader.text[a..b], "beta_gamma delta\nseco");
+        // The start handle drags back to the start.
+        let (hx, hy) = reader.point_of(&c, a);
+        reader.gesture(
+            &Gesture::Down {
+                x: hx,
+                y: hy - KNOB,
+            },
+            &c,
+        );
+        let (x, y) = at(0.0, 0.0);
+        reader.gesture(
+            &Gesture::DragStart {
+                axis: Axis::Horizontal,
+                x,
+                y,
+                start_x: hx,
+                start_y: hy - KNOB,
+                edge: false,
+            },
+            &c,
+        );
+        reader.gesture(
+            &Gesture::DragEnd {
+                axis: Axis::Horizontal,
+                x,
+                y,
+                vx: 0.0,
+                vy: 0.0,
+            },
+            &c,
+        );
+        let (a, b) = reader.selection.unwrap();
+        assert_eq!(&reader.text[a..b], "alpha beta_gamma delta\nseco");
+        // COPY copies it and lets it go.
+        let copy = reader.copy_rect(&c).unwrap();
+        let (x, y) = (copy.x + 10.0, copy.y + 10.0);
+        reader.gesture(&Gesture::Down { x, y }, &c);
+        assert_eq!(
+            reader.gesture(&Gesture::Tap { x, y }, &c),
+            Response::Action(Action::Ui(UiAct::Copy(
+                "alpha beta_gamma delta\nseco".into()
+            )))
+        );
+        assert_eq!(reader.selection, None);
     }
 
     #[test]

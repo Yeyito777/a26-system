@@ -174,8 +174,51 @@ pub fn redo_delete(req_id: &str) -> Value {
     json!({ "type": "redo_delete", "reqId": req_id })
 }
 
-pub fn create_folder(req_id: &str, name: &str, parent_id: Option<&str>) -> Value {
-    json!({ "type": "create_folder", "reqId": req_id, "name": name, "parentId": parent_id })
+/// A folder, with `items` (`SidebarItemRef`s) moved into it.
+pub fn create_folder(
+    req_id: &str,
+    name: &str,
+    parent_id: Option<&str>,
+    items: Vec<Value>,
+) -> Value {
+    json!({
+        "type": "create_folder",
+        "reqId": req_id,
+        "name": name,
+        "parentId": parent_id,
+        "items": items,
+    })
+}
+
+pub fn delete_conversations(req_id: &str, conv_ids: &[String]) -> Value {
+    json!({ "type": "delete_conversations", "reqId": req_id, "convIds": conv_ids })
+}
+
+pub fn clone_conversation(req_id: &str, conv_id: &str) -> Value {
+    json!({ "type": "clone_conversation", "reqId": req_id, "convId": conv_id })
+}
+
+/// Items (`SidebarItemRef`s) to the top of `parent_id`'s unpinned section.
+pub fn move_sidebar_items(req_id: &str, items: Vec<Value>, parent_id: Option<&str>) -> Value {
+    json!({ "type": "move_sidebar_items", "reqId": req_id, "items": items, "parentId": parent_id })
+}
+
+/// `pins`: (`SidebarItemRef`, pinned).
+pub fn pin_sidebar_items(req_id: &str, pins: Vec<(Value, bool)>) -> Value {
+    let pins: Vec<Value> = pins
+        .into_iter()
+        .map(|(item, pinned)| json!({ "item": item, "pinned": pinned }))
+        .collect();
+    json!({ "type": "pin_sidebar_items", "reqId": req_id, "pins": pins })
+}
+
+pub fn load_folder_instructions(req_id: &str, folder_id: &str) -> Value {
+    json!({ "type": "load_folder_instructions", "reqId": req_id, "folderId": folder_id })
+}
+
+/// Empty `text` clears the folder's own document (inherited ones remain).
+pub fn set_folder_instructions(req_id: &str, folder_id: &str, text: &str) -> Value {
+    json!({ "type": "set_folder_instructions", "reqId": req_id, "folderId": folder_id, "text": text })
 }
 
 pub fn rename_folder(req_id: &str, folder_id: &str, name: &str) -> Value {
