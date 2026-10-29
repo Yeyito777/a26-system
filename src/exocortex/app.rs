@@ -320,6 +320,9 @@ impl Context<'_> {
                 Effect::Paste => self.model.paste_text(clipboard::paste()),
                 Effect::Dictate(what) => dictation::command(what),
                 Effect::StatusBar => ui::status_bar(&theme::status_bar()),
+                Effect::Reveal(stamp) => {
+                    self.view.reveal(self.model, stamp, self.height);
+                }
             }
             changed = true;
         }
@@ -698,6 +701,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let link = DaemonLink::spawn(proto::socket_path())?;
     let mut shell = ShellReader::spawn()?;
     let mut view = ViewState::new();
+    // The chat's chips (E) float over the chat page under its header.
+    view.overlays
+        .push(Box::new(super::sheets::chips::ChatChips::default()));
     let mut input = Input::default();
     let mut recognizer = Recognizer::new(f32::from(crate::REQUESTED_WIDTH));
     let mut seen_target: Option<u64> = None;
@@ -1304,12 +1310,13 @@ fn draw_frame(
                 renderer.presenter.scroll(conn, y0, y1, dy)?;
             }
             let drawn = started.elapsed();
-            renderer
-                .presenter
-                .present_rows(conn, &renderer.canvas, 0, &damage.rows)?;
-            renderer
-                .presenter
-                .present_areas(conn, &renderer.canvas, 0, &damage.areas)?;
+            renderer.presenter.present_rows_and_areas(
+                conn,
+                &renderer.canvas,
+                0,
+                &damage.rows,
+                &damage.areas,
+            )?;
             if env_flag("EXOCORTEX_APP_VERIFY") {
                 verify(&renderer.canvas, model, view, pressed, now, &damage);
             }

@@ -113,6 +113,18 @@ pub trait Overlay {
         true
     }
 
+    /// A floating overlay that belongs to the page (the chat's chips): it
+    /// hides while a modal one shows.
+    fn page_level(&self) -> bool {
+        false
+    }
+
+    /// The columns it draws in (shadow included), when narrower than the
+    /// window: what the page moves under it is redrawn there only.
+    fn columns(&self) -> Option<(i32, i32)> {
+        None
+    }
+
     /// Lays itself out for this frame (cheap when nothing changed).
     fn layout(&mut self, _cx: &Cx) {}
 
@@ -298,6 +310,14 @@ impl OverlayStack {
         before != self.len()
     }
 
+    /// A floating overlay's columns, if it keeps to some.
+    pub fn columns(&self, id: u64) -> Option<(i32, i32)> {
+        self.floating
+            .iter()
+            .find(|shown| shown.id == id)
+            .and_then(|shown| shown.overlay.columns())
+    }
+
     /// The farewells of overlays `sweep` removed.
     pub fn take_farewells(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.farewells)
@@ -346,9 +366,19 @@ impl OverlayStack {
     /// The modal overlays' and the floating ones' ids and bodies, bottom up.
     pub fn bodies(&self, cx: &Cx) -> (Bodies, Bodies) {
         let body = |shown: &Shown| (shown.id, shown.overlay.body(cx));
+        let hidden = self.has_modal();
         (
             self.modal.iter().map(body).collect(),
-            self.floating.iter().map(body).collect(),
+            self.floating
+                .iter()
+                .map(|shown| {
+                    if hidden && shown.overlay.page_level() {
+                        (shown.id, Body::empty())
+                    } else {
+                        body(shown)
+                    }
+                })
+                .collect(),
         )
     }
 
@@ -362,7 +392,11 @@ impl OverlayStack {
 
     /// Draws the floating overlays.
     pub fn draw_floating(&self, canvas: &mut Canvas, cx: &Cx) {
+        let hidden = self.has_modal();
         for shown in &self.floating {
+            if hidden && shown.overlay.page_level() {
+                continue;
+            }
             shown.overlay.draw_backdrop(canvas, cx);
             shown.overlay.draw(canvas, cx);
         }
@@ -374,8 +408,9 @@ impl OverlayStack {
         if let Gesture::Down { .. } = gesture {
             self.capture = None;
             // Floating ones first, topmost first.
+            let hidden = !self.modal.is_empty();
             for shown in self.floating.iter_mut().rev() {
-                if shown.overlay.closing() {
+                if shown.overlay.closing() || hidden && shown.overlay.page_level() {
                     continue;
                 }
                 let response = shown.overlay.gesture(gesture, cx);

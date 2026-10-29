@@ -144,6 +144,63 @@ pub enum Row {
         color: Rgb,
     },
     Gap(u16),
+    /// A search hit: its role, a preview with the match (char range)
+    /// highlighted, wrapped to at most `HIT_LINES` lines.
+    Hit {
+        role: String,
+        preview: String,
+        start: usize,
+        end: usize,
+        tap: Tap,
+    },
+}
+
+/// A hit's preview shows at most this many lines.
+const HIT_LINES: usize = 4;
+
+/// `text` wrapped at spaces to `width` in `ty`, as char ranges (the space a
+/// line breaks at belongs to neither line; a word longer than a line
+/// breaks anywhere).
+pub fn wrap_ranges(text: &str, ty: Type, width: f32) -> Vec<(usize, usize)> {
+    let metrics = super::super::editor::Metrics::new(ty.weight, ty.px());
+    let mut buffer = [0u8; 4];
+    let widths: Vec<f32> = text
+        .chars()
+        .map(|c| metrics.width(c.encode_utf8(&mut buffer)))
+        .collect();
+    let chars: Vec<char> = text.chars().collect();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let (mut end, mut x) = (start, 0.0);
+        let mut last_space = None;
+        while end < chars.len() && x + widths[end] <= width {
+            if chars[end] == ' ' {
+                last_space = Some(end);
+            }
+            x += widths[end];
+            end += 1;
+        }
+        if end >= chars.len() {
+            lines.push((start, chars.len()));
+            break;
+        }
+        match last_space.filter(|space| *space > start) {
+            Some(space) => {
+                lines.push((start, space));
+                start = space + 1;
+            }
+            None => {
+                let end = end.max(start + 1);
+                lines.push((start, end));
+                start = end;
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push((0, 0));
+    }
+    lines
 }
 
 const SECTION: f32 = 110.0;
@@ -247,6 +304,12 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
         Row::Pair { style, .. } => style.ty().line() + 8.0,
         Row::Bar { .. } => BAR + 14.0,
         Row::Gap(px) => *px as f32,
+        Row::Hit { preview, .. } => {
+            let lines = wrap_ranges(preview, Style::Caption.ty(), width)
+                .len()
+                .min(HIT_LINES);
+            PAD_Y + theme::T_EYEBROW.line() + lines as f32 * Style::Caption.ty().line() + PAD_Y
+        }
     };
     Laid {
         row,
@@ -394,6 +457,9 @@ pub fn targets(laid: &Laid, width: f32) -> Vec<(RectF, Tap)> {
                             targets.push((rect, tap.clone()));
                         }
                     }
+                }
+                Row::Hit { tap, .. } => {
+                    targets.push((RectF::new(0.0, top, width, laid.height), tap.clone()));
                 }
                 Row::Task { tap, more, .. } => {
                     let more_w = if more.is_some() { TARGET } else { 0.0 };
@@ -718,6 +784,61 @@ pub fn draw_row(
             }
         }
         Row::Gap(_) => {}
+        Row::Hit {
+            role,
+            preview,
+            start,
+            end,
+            tap,
+        } => {
+            if down(tap) {
+                widgets::fill(
+                    canvas,
+                    RectF::new(0.0, y, W, laid.height - HAIRLINE),
+                    p.selection_background,
+                );
+            }
+            let eyebrow = theme::T_EYEBROW;
+            widgets::text(
+                canvas,
+                role,
+                x,
+                eyebrow.baseline(y + PAD_Y),
+                eyebrow,
+                p.muted,
+                1.0,
+            );
+            let ty = Style::Caption.ty();
+            let chars: Vec<char> = preview.chars().collect();
+            let piece = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
+            let lines = wrap_ranges(preview, ty, width);
+            let top = y + PAD_Y + eyebrow.line();
+            for (row, &(a, b)) in lines.iter().take(HIT_LINES).enumerate() {
+                let line_top = top + row as f32 * ty.line();
+                let baseline = ty.baseline(line_top);
+                // The match's part of this line, on its highlight.
+                let (s, e) = ((*start).clamp(a, b), (*end).clamp(a, b));
+                if e > s {
+                    let x0 = x + widgets::measure(&piece(a, s), ty);
+                    let w = widgets::measure(&piece(s, e), ty);
+                    widgets::fill(
+                        canvas,
+                        RectF::new(x0.round(), line_top, w.round(), ty.line()),
+                        p.search_background,
+                    );
+                }
+                let mut pen = x;
+                for (from, to, color) in
+                    [(a, s, p.text), (s, e, p.search_foreground), (e, b, p.text)]
+                {
+                    if to > from {
+                        pen +=
+                            widgets::text(canvas, &piece(from, to), pen, baseline, ty, color, 1.0);
+                    }
+                }
+            }
+            widgets::hairline(canvas, x, right, y + laid.height - HAIRLINE, row_rule);
+        }
     }
 }
 
