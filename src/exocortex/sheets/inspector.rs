@@ -21,7 +21,8 @@ use super::super::theme::{self, HAIRLINE, T_BODY, T_CAPTION, T_NOTE, T_SECTION, 
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::overlay::Cx;
 use super::super::ui::sheet::{Reply, Sheet, SheetContent};
-use super::super::ui::widgets::{self, Button, ButtonKind};
+use super::super::ui::widgets::{self, Button};
+use super::panel;
 
 /// A section title: 44 above, its line, 17 below.
 const SECTION: f32 = 101.0;
@@ -49,13 +50,22 @@ enum Item {
     },
     Button {
         label: &'static str,
-        /// Primary (else secondary).
-        primary: bool,
+        kind: panel::Kind,
+        act: ops::Act,
+        disabled: bool,
+    },
+    /// A switch row: label, wrapped detail, on, what a tap does.
+    Switch {
+        label: &'static str,
+        detail: Vec<String>,
+        on: bool,
         act: ops::Act,
         disabled: bool,
     },
     /// Wrapped lines in `T_CAPTION` `muted`.
     Note(Vec<String>),
+    /// The same in `error`.
+    Error(Vec<String>),
     /// The defaults: lines in `T_NOTE`.
     Text(Vec<String>),
     /// A read-only row: label, value.
@@ -70,7 +80,13 @@ impl Item {
             Item::Pick { .. } | Item::Value(..) => ROW,
             Item::Speed { .. } => SPEED_ROW,
             Item::Button { .. } => TARGET,
-            Item::Note(lines) => 16.0 + lines.len() as f32 * T_CAPTION.line() + 6.0,
+            Item::Switch { detail, .. } => {
+                (2.0 * 22.0 + T_BODY.line() + detail.len() as f32 * theme::T_META.line())
+                    .max(theme::TOGGLE_ROW)
+            }
+            Item::Note(lines) | Item::Error(lines) => {
+                16.0 + lines.len() as f32 * T_CAPTION.line() + 6.0
+            }
             Item::Text(lines) => 11.0 + lines.len() as f32 * T_NOTE.line(),
             Item::Gap(px) => *px as f32,
         }
@@ -117,23 +133,58 @@ fn items(model: &Model, width: f32) -> Vec<Item> {
         Item::Gap(BUTTON_GAP as i32),
     ];
     let blocked = model.apply_blocked(&form);
-    let unchanged = model.form_unchanged(&form);
     let draft = form.conv.is_none();
+    let detail_w = width - theme::SWITCH.0 - 34.0;
+    let switch = |label, detail: &str, on, act, disabled| Item::Switch {
+        label,
+        detail: if detail.is_empty() {
+            Vec::new()
+        } else {
+            widgets::wrap_plain(detail, theme::T_META, detail_w)
+        },
+        on,
+        act,
+        disabled,
+    };
+    if draft {
+        items.push(switch(
+            "Delegation",
+            "Sent with the first message",
+            form.delegation,
+            ops::Act::FormDelegation,
+            false,
+        ));
+        items.push(switch(
+            "Allow legacy models",
+            "",
+            form.legacy,
+            ops::Act::FormLegacy,
+            false,
+        ));
+    }
+    items.push(switch(
+        "Use as daemon default",
+        "Also save this selection for new chats on the daemon",
+        form.make_default,
+        ops::Act::FormDefault,
+        !model.ready || model.ops.defaults_request.is_some(),
+    ));
+    items.push(Item::Gap(BUTTON_GAP as i32));
     items.push(Item::Button {
         label: if draft {
             "Use for this draft"
         } else {
             "Apply configuration"
         },
-        primary: true,
+        kind: panel::Kind::Primary,
         act: ops::Act::Apply,
-        disabled: blocked.is_some() || unchanged,
+        disabled: !model.can_apply(&form),
     });
     if draft && !model.resolve().inherited {
         items.push(Item::Gap(22));
         items.push(Item::Button {
             label: "Use daemon defaults for this draft",
-            primary: false,
+            kind: panel::Kind::Secondary,
             act: ops::Act::InheritDefaults,
             disabled: false,
         });
@@ -141,14 +192,32 @@ fn items(model: &Model, width: f32) -> Vec<Item> {
     if let Some(reason) = blocked.filter(|_| !draft) {
         items.push(Item::Note(widgets::wrap_plain(reason, T_CAPTION, width)));
     }
+    if let Some((notice, error)) = &model.ops.defaults_notice {
+        items.push(if *error {
+            Item::Error(widgets::wrap_plain(notice, T_CAPTION, width))
+        } else {
+            Item::Note(widgets::wrap_plain(notice, T_CAPTION, width))
+        });
+    }
     items.push(Item::Section("Daemon defaults"));
     match &model.ops.defaults {
-        Some(snapshot) => items.push(Item::Text(
-            ops::format_defaults(snapshot)
-                .lines()
-                .flat_map(|line| widgets::wrap_plain(line, T_NOTE, width))
-                .collect(),
-        )),
+        Some(snapshot) => {
+            items.push(Item::Text(
+                ops::format_defaults(snapshot)
+                    .lines()
+                    .flat_map(|line| widgets::wrap_plain(line, T_NOTE, width))
+                    .collect(),
+            ));
+            items.push(Item::Gap(BUTTON_GAP as i32));
+            items.push(Item::Button {
+                label: "Reset daemon default to app default",
+                kind: panel::Kind::Destructive,
+                act: ops::Act::ResetDefaults,
+                disabled: !model.ready
+                    || !snapshot.configured
+                    || model.ops.defaults_request.is_some(),
+            });
+        }
         None => items.push(Item::Note(widgets::wrap_plain(
             "Waiting for defaults from the connected daemon.",
             T_CAPTION,
@@ -231,6 +300,14 @@ impl Inspector {
                     ..
                 } => targets.push((
                     RectF::new(0.0, *y, self.width, TARGET),
+                    Target::Button(act.clone()),
+                )),
+                Item::Switch {
+                    act,
+                    disabled: false,
+                    ..
+                } => targets.push((
+                    RectF::new(0.0, *y, self.width, item.height()),
                     Target::Button(act.clone()),
                 )),
                 _ => {}
@@ -363,22 +440,81 @@ impl SheetContent for Inspector {
                 }
                 Item::Button {
                     label,
-                    primary,
+                    kind,
                     act,
                     disabled,
                 } => {
                     let down = pressed.as_ref() == Some(&Target::Button(act.clone()));
-                    let kind = if *primary {
-                        ButtonKind::Primary
-                    } else {
-                        ButtonKind::Secondary
-                    };
                     widgets::button(
                         canvas,
                         RectF::new(x, y, self.width, TARGET),
-                        &Button::new(label, kind).pressed(down).disabled(*disabled),
+                        &Button::new(label, kind.button())
+                            .pressed(down)
+                            .disabled(*disabled),
                         background,
                     );
+                }
+                Item::Switch {
+                    label,
+                    detail,
+                    on,
+                    act,
+                    disabled,
+                } => {
+                    let h = item.height();
+                    if pressed.as_ref() == Some(&Target::Button(act.clone())) {
+                        widgets::fill(
+                            canvas,
+                            RectF::new(0.0, y, W, h - HAIRLINE),
+                            p.selection_background,
+                        );
+                    }
+                    let alpha = if *disabled { 0.4 } else { 1.0 };
+                    let meta = theme::T_META;
+                    let text_h = T_BODY.line() + detail.len() as f32 * meta.line();
+                    let top = y + ((h - text_h) / 2.0).round();
+                    widgets::text(
+                        canvas,
+                        label,
+                        x,
+                        T_BODY.baseline(top),
+                        T_BODY,
+                        p.text,
+                        alpha,
+                    );
+                    for (index, line) in detail.iter().enumerate() {
+                        widgets::text(
+                            canvas,
+                            line,
+                            x,
+                            meta.baseline(top + T_BODY.line() + index as f32 * meta.line()),
+                            meta,
+                            p.muted,
+                            alpha,
+                        );
+                    }
+                    let (sw, sh) = theme::SWITCH;
+                    widgets::switch(
+                        canvas,
+                        right - sw,
+                        y + ((h - sh) / 2.0).round(),
+                        if *on { 1.0 } else { 0.0 },
+                        background,
+                    );
+                    widgets::hairline(canvas, x, right, y + h - HAIRLINE, c.rule_field_row);
+                }
+                Item::Error(lines) => {
+                    for (index, line) in lines.iter().enumerate() {
+                        widgets::text(
+                            canvas,
+                            line,
+                            x,
+                            T_CAPTION.baseline(y + 16.0 + index as f32 * T_CAPTION.line()),
+                            T_CAPTION,
+                            p.error,
+                            1.0,
+                        );
+                    }
                 }
                 Item::Note(lines) => {
                     for (index, line) in lines.iter().enumerate() {
