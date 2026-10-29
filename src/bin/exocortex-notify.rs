@@ -322,7 +322,8 @@ fn reply_body(entries: &[Entry]) -> String {
                 let text: String = spans.into_iter().map(|s| s.text).collect();
                 format!("{marker} {text}")
             }
-            markdown::MdBlock::Code(lines) => lines.join(" "),
+            markdown::MdBlock::Code { lines, .. } => lines.join(" "),
+            markdown::MdBlock::Table(table) => table.text(),
             markdown::MdBlock::Rule => String::new(),
         })
         .collect();

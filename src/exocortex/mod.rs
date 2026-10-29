@@ -6,6 +6,7 @@
 pub mod anim;
 pub mod app;
 pub mod clipboard;
+pub mod find;
 pub mod gesture;
 pub mod handoff;
 pub mod images;

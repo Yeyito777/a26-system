@@ -5,13 +5,11 @@ use crate::gfx::{RectF, Rgb};
 use crate::text::Weight;
 
 use super::super::markdown::{MdBlock, Span, Style};
-use super::super::model::{Action, chat};
+use super::super::model::{Action, chat, rich::Rich};
 use super::super::proto::Entry;
 use super::super::theme::{self, BUBBLE_PAD_X, BUBBLE_PAD_Y, HAIRLINE, RAIL, TRANSCRIPT_PAD};
 use super::W;
-use super::markdown_layout::{
-    SMALL, SMALL_LINE, lay_md_block, line_width, plain, push_lines, wrap,
-};
+use super::markdown_layout::{SMALL, SMALL_LINE, lay_block, line_width, plain, push_lines, wrap};
 use super::ops::{self, Laid, Op};
 use super::tools::TOOL_ROW;
 
@@ -73,10 +71,10 @@ pub(crate) fn lay_thinking(text: &str, key: &str, open: bool) -> Laid {
     laid
 }
 
-pub(crate) fn lay_md_piece(block: &MdBlock) -> Laid {
-    let mut laid = Laid::default();
-    laid.h = lay_md_block(&mut laid.ops, block, MARGIN, W - 2.0 * MARGIN, 0.0);
-    laid
+/// A markdown block (C1's `lay_block`); its key must include
+/// `markdown_layout::state_key`.
+pub(crate) fn lay_md_piece(block: &MdBlock, rich: &Rich) -> Laid {
+    lay_block(block, MARGIN, W - 2.0 * MARGIN, Some(rich))
 }
 
 pub(crate) fn lay_user(text: &str, alpha: f32, label: Option<&str>) -> Laid {
