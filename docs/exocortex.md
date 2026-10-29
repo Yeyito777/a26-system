@@ -108,13 +108,28 @@ The replies' markdown (`src/exocortex/markdown.rs`, GFM as the iPhone renders it
 the accent colours, paragraphs (a newline is a line break), bullet,
 numbered and task lists nested to 12 levels, quotes, rules, fenced (``` and
 ~~~) and indented code, tables, with bold, italic, strikethrough, inline
-code and underlined link spans. A code block has a header (its language,
-WRAP / NO WRAP, OPEN in the reader, COPY), keeps its lines and scrolls
-sideways, and over 8000 characters shows a preview. A table is a grid
-(header row, cells wrapped and aligned per its delimiter row, at most 12
-columns) that scrolls sideways when wide; over 10 rows it is at most 997 px
-tall and its rows scroll inside it under the header; "Open full response"
-opens the reply in the reader.
+code and underlined link spans, and TeX math. A code block has a header
+(its language, WRAP / NO WRAP, OPEN in the reader, COPY), keeps its lines
+and scrolls sideways, is coloured by the TUI's highlighter (`highlight.rs`:
+its 14 rule sets ported with a small regex engine, checked against the
+TUI's own output on its corpus), and over 8000 characters shows a preview.
+A table is a grid (header row, cells wrapped and aligned per its delimiter
+row, at most 12 columns) that scrolls sideways when wide; over 10 rows it
+is at most 997 px tall and its rows scroll inside it under the header;
+"Open full response" opens the reply in the reader. Math (`$…$` with the
+TUI's currency guard, `\(…\)`, `$$…$$`, `\[…\]`) is drawn by the TUI's
+renderer ported to `math/` (checked against the TUI's corpus): inline as one
+line of Unicode, display as centred rows on a monospaced grid (stacked
+fractions, limits, matrices), scrolled sideways when wide, with "Copy
+LaTeX". The iPhone's caps apply: 128 blocks a reply, then "Open all";
+a block over 24,000 characters shows 8,000 and "Read full paragraph".
+
+Links open: a web address in Moon's Browser, a mail address or number is
+copied, a local path (relative, `/abs`, `~/`, `file://`; underlined dashed)
+is resolved on the daemon's host (`resolve_file_link`) into a sheet with
+its path, kind, size and Copy path (`links.rs`). Bare `https://` and `www.`
+addresses are links too, and links inside a scrolled table are where they
+show.
 
 
 Images a model attached (the `attach` tool) show after its message, and
@@ -131,7 +146,10 @@ to pan, swipe down, Back or ✕ to close.
 The reader (`reader.rs`) shows a text as written (wrapped at spaces or
 anywhere), how many characters, Copy, and Find: a field on Moon's keyboard,
 i/N, previous and next, every match marked and the current one scrolled
-into view (`find.rs`, the engine Find in chat uses).
+into view. A long press selects a word; moving on or dragging its handles
+extends it; COPY copies it. `find.rs` is the search: the reader's, and
+`search_messages` for Find in chat (case- and accent-insensitive, with the
+iPhone's previews).
 
 The composer is a text area on Moon's `keyboard show multiline` (Return is
 a line break; only the Send button sends). Its editor (`editor.rs`) keeps a
@@ -270,7 +288,7 @@ the interfaces below. Every file's header says whose it is.
 | `model/mod.rs` | A | `Model`, `Action`, the pages, the connection, the event fan-out, `Ui` |
 | `proto/mod.rs`, `proto/fixtures.jsonl` | A | `Event`, `parse_event`, the bootstrap |
 | `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands (`list/actions.rs`), changes shown before the daemon answers (`list/pending.rs`), menus, prompts and pickers (`list/menus.rs`), the folder inspector (`list/sheets.rs`) |
-| `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks, tables; images in the transcript, their cache and the viewer; the reader and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
+| `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `highlight.rs`, `math/`, `links.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks (highlighted), tables, math; links and the file sheet; images in the transcript, their cache and the viewer; the reader, selection and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
 | `view/composer.rs`, `view/picker.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts, the mic, the command picker, commands and macros |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
