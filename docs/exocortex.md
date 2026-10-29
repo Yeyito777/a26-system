@@ -290,6 +290,17 @@ are discarded.
   a piece (entry stamp and index) and its distance from the top; it is kept
   when anything changes above it (older history, a fresh window).
   Following resumes within 12 pt of the end.
+- **Streaming costs what grew.** A chunk, a block, a tool call or result
+  and a tokens update change only the live reply (`Chat::live_version`, not
+  `Chat::version`): the layout keeps the history's part (`History`: its
+  pieces, footers, fold marks and folding, `fold::plan_turns`) and lays out
+  what follows it again. The live reply's plan is kept between passes
+  (`LivePlan`; `Live::rewrites` says when its blocks changed other than by
+  growing) and only its last block planned again; its pieces before that
+  block stay placed (`Shown::record` / `resume`), and the live turn's
+  folding is made from its base as the blocks come (`fold::live_fold`). A
+  test streams a long tool-heavy reply and checks every pass against a
+  layout made whole. What a follow costs on screen is the scroll itself.
 - **Marks.** What changes with time inside a piece (a spinner, the WORKING
   shimmer, the live footer's clock and rate, a status line's clock) is a
   mark (`blocks::Mark`): placed with its piece, keyed per frame
