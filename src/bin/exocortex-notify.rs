@@ -91,7 +91,12 @@ struct Bridge<F: FnMut(&str) -> bool> {
     streaming: HashSet<String>,
     next_request: u64,
     app_showing: F,
+    /// When each conversation last notified: at most one per 5 s (PAR-315).
+    notified: HashMap<String, Instant>,
 }
+
+/// A conversation notifies at most this often.
+const NOTIFY_EVERY: Duration = Duration::from_secs(5);
 
 impl<F: FnMut(&str) -> bool> Bridge<F> {
     fn new(app_showing: F) -> Self {
@@ -101,6 +106,7 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
             streaming: HashSet::new(),
             next_request: 0,
             app_showing,
+            notified: HashMap::new(),
         }
     }
 
@@ -233,6 +239,19 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
         if summary.notifications_muted || (self.app_showing)(&summary.id) {
             return effects;
         }
+        let now = Instant::now();
+        if self
+            .notified
+            .get(&summary.id)
+            .is_some_and(|at| now.duration_since(*at) < NOTIFY_EVERY)
+        {
+            return effects;
+        }
+        if self.notified.len() > MAX_KNOWN {
+            self.notified
+                .retain(|_, at| now.duration_since(*at) < NOTIFY_EVERY);
+        }
+        self.notified.insert(summary.id.clone(), now);
         let title = summary.display_title().to_owned();
         match reason {
             Reason::Goal(body) => effects.push(Effect::Post {
@@ -741,6 +760,28 @@ mod tests {
             bridge.on_line(&goal("blocked")).is_empty(),
             "only on a change"
         );
+    }
+
+    #[test]
+    fn a_conversation_notifies_at_most_once_in_five_seconds() {
+        let mut bridge = Bridge::new(|_| false);
+        bridge.on_connected();
+        let finished = |unread: bool| {
+            format!(
+                r#"{{"type":"conversation_updated","summary":{{"id":"r","title":"R","streaming":false,"unread":{unread}}},"ownerTurnFinished":true}}"#
+            )
+        };
+        let fetches = |effects: &[Effect]| {
+            effects
+                .iter()
+                .filter(|e| matches!(e, Effect::Daemon(_)))
+                .count()
+        };
+        assert_eq!(fetches(&bridge.on_line(&finished(true))), 1);
+        assert_eq!(fetches(&bridge.on_line(&finished(true))), 0, "within 5 s");
+        let at = bridge.notified.get_mut("r").unwrap();
+        *at = Instant::now() - NOTIFY_EVERY;
+        assert_eq!(fetches(&bridge.on_line(&finished(true))), 1, "5 s later");
     }
 
     #[test]

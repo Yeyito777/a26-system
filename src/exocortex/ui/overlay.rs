@@ -163,6 +163,12 @@ pub trait Overlay {
     fn images(&self, _cx: &Cx) -> Vec<super::super::images::Want> {
         Vec::new()
     }
+
+    /// What to do once it has gone (a panel that watched something stops
+    /// watching): taken when it is removed.
+    fn farewell(&mut self) -> Option<Action> {
+        None
+    }
 }
 
 /// Overlays' ids and bodies, bottom up.
@@ -190,6 +196,8 @@ pub struct OverlayStack {
     floating: Vec<Shown>,
     next: u64,
     capture: Option<Capture>,
+    /// Gone overlays' farewells, for the event loop to perform.
+    farewells: Vec<Action>,
 }
 
 impl OverlayStack {
@@ -272,9 +280,21 @@ impl OverlayStack {
     /// Drops the ones whose exit animation is over; whether any went.
     pub fn sweep(&mut self, now: Instant) -> bool {
         let before = self.len();
+        for shown in self.modal.iter_mut().chain(&mut self.floating) {
+            if shown.overlay.finished(now)
+                && let Some(action) = shown.overlay.farewell()
+            {
+                self.farewells.push(action);
+            }
+        }
         self.modal.retain(|shown| !shown.overlay.finished(now));
         self.floating.retain(|shown| !shown.overlay.finished(now));
         before != self.len()
+    }
+
+    /// The farewells of overlays `sweep` removed.
+    pub fn take_farewells(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.farewells)
     }
 
     pub fn layout(&mut self, cx: &Cx) {

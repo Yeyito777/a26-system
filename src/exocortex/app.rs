@@ -24,6 +24,7 @@ use crate::present::Presenter;
 
 use super::anim;
 use super::clipboard;
+use super::dictation;
 use super::gesture::{Axis, Gesture, Recognizer};
 use super::handoff;
 use super::line::{self, Waker};
@@ -317,6 +318,7 @@ impl Context<'_> {
                 }
                 Effect::HideKeyboard => self.hide_keyboard(),
                 Effect::Paste => self.model.paste_text(clipboard::paste()),
+                Effect::Dictate(what) => dictation::command(what),
                 Effect::StatusBar => ui::status_bar(&theme::status_bar()),
             }
             changed = true;
@@ -778,6 +780,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         };
         redraw |= cx.take_ui(now);
 
+        // The composer's microphone (D).
+        for line in dictation::take() {
+            cx.model.dictation_line(line);
+            redraw = true;
+        }
+        redraw |= cx.take_ui(now);
+
         // Moon's state: a tapped notification's target.
         if let Some(info) = shell.take() {
             redraw |= control::apply_time(&info);
@@ -954,6 +963,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             if !view.overlays.has_modal() {
                 view.lifted = None;
             }
+            for action in view.overlays.take_farewells() {
+                for command in model.handle(action) {
+                    link.send(command);
+                }
+            }
         }
 
         // A page change slides (Moon snapshots the old page first).
@@ -1003,7 +1017,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // Keep the transcript where the user left it.
         view.settle(&model, before_view, height, now);
         // Bring a revealed list row into view (B).
-        redraw |= view::list::settle(&mut model, &mut view, height, now);
+        let (settled, commands) = view::list::settle(&mut model, &mut view, height, now);
+        redraw |= settled;
+        for command in commands {
+            link.send(command);
+        }
         // Older history near the top, tool outputs near the screen (C2).
         for command in view::transcript::requests(&mut model, &mut view, height, now) {
             link.send(command);
@@ -1182,6 +1200,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             line::pollfd(conn.stream().as_raw_fd(), libc::POLLIN),
             line::pollfd(link.fd(), libc::POLLIN),
             line::pollfd(shell.waker.fd(), libc::POLLIN),
+            line::pollfd(dictation::fd().unwrap_or(-1), libc::POLLIN),
         ];
         slept_at = Instant::now();
         line::poll(&mut fds, timeout)?;
@@ -1191,6 +1210,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         control::hide_keyboard();
     }
     model.flush_drafts();
+    dictation::shutdown();
     store.take(&mut model.persist, Instant::now());
     store.flush_all();
     handoff::clear_view();

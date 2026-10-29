@@ -10,8 +10,8 @@
 //! relative time turning over, a row pressed, an update from the daemon).
 //! Only the rows on screen are looked at, however long the list.
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ use crate::text::Weight;
 use super::super::anim::{self, Animator};
 use super::super::list::activity::{self, Activity, Kind};
 use super::super::list::search::Search;
-use super::super::model::sidebar::{Act, Aggregates, Layout};
+use super::super::model::sidebar::{Act, Aggregates, Key, Layout};
 use super::super::model::{self, Action, Model, Page, Row};
 use super::super::theme::{
     self, FOLDER_ICON, FOLDER_INDENT, GESTURE_RESERVE, HAIRLINE, LIST_PAD, LIST_ROW, S1, SPINNER,
@@ -64,13 +64,121 @@ fn keyboard_up(height: f32) -> bool {
 
 /// Where the list's rows are: under the bar, above Moon's home gesture (or
 /// its keyboard).
-pub fn bounds(_model: &Model, height: f32) -> (f32, f32) {
+pub fn bounds(model: &Model, height: f32) -> (f32, f32) {
+    let bar = if model.sidebar.selection.is_some() {
+        SELECT_BAR
+    } else {
+        0.0
+    };
+    (TOP_BAR + HAIRLINE, bottom(height) - bar)
+}
+
+/// The page's bottom: Moon's home gesture (or its keyboard) below it.
+fn bottom(height: f32) -> f32 {
     let reserve = if keyboard_up(height) {
         0.0
     } else {
         GESTURE_RESERVE
     };
-    (TOP_BAR + HAIRLINE, height - reserve)
+    height - reserve
+}
+
+use super::super::model::sidebar::SELECT_BAR;
+/// The select bar's buttons' actions, left to right.
+const SELECT_ACTS: [Act; 4] = [
+    Act::SelectMove,
+    Act::SelectPin,
+    Act::SelectGroup,
+    Act::SelectDelete,
+];
+
+/// The select bar: its count line, whether every selected item is pinned,
+/// the button pressed.
+fn select_bar_key(model: &Model, pressed: Option<&Action>) -> Option<u64> {
+    let keys = model.sidebar.selected_keys();
+    model.sidebar.selection.as_ref()?;
+    let all_pinned = !keys.is_empty()
+        && keys
+            .iter()
+            .all(|key| model.sidebar.pinned_of(key) == Some(true));
+    let pressed = pressed.and_then(|action| match action {
+        Action::List(act) => SELECT_ACTS.iter().position(|a| a == act),
+        _ => None,
+    });
+    Some(super::hash_of((
+        keys.len(),
+        all_pinned,
+        pressed,
+        theme::generation(),
+    )))
+}
+
+fn draw_select_bar(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>, height: f32) {
+    let y = bottom(height) - SELECT_BAR;
+    if !widgets::shows(canvas, y, y + SELECT_BAR) {
+        return;
+    }
+    let p = theme::p();
+    let c = theme::c();
+    widgets::fill(canvas, RectF::new(0.0, y, W, SELECT_BAR), p.app_background);
+    widgets::hairline(canvas, 0.0, W, y, c.rule_topbar);
+    let keys = model.sidebar.selected_keys();
+    let n = keys.len();
+    let count = if n == 0 {
+        "Tap chats or folders to select".to_owned()
+    } else {
+        format!("{n} selected")
+    };
+    widgets::text_centered(
+        canvas,
+        &count,
+        W / 2.0,
+        T_EYEBROW.baseline(y + 17.0),
+        T_EYEBROW,
+        p.muted,
+        1.0,
+    );
+    let all_pinned = n > 0
+        && keys
+            .iter()
+            .all(|key| model.sidebar.pinned_of(key) == Some(true));
+    let cell = W / 4.0;
+    let labels = [
+        (Icon::FolderMove, "Move"),
+        if all_pinned {
+            (Icon::PinOff, "Unpin")
+        } else {
+            (Icon::Pin, "Pin")
+        },
+        (Icon::FolderPlus, "Group"),
+        (Icon::Trash, "Delete"),
+    ];
+    for (index, (icon, label)) in labels.into_iter().enumerate() {
+        let cx = cell * index as f32 + cell / 2.0;
+        let down = pressed == Some(&Action::List(SELECT_ACTS[index].clone()));
+        let color = if index == 3 { p.error } else { p.accent };
+        let alpha = if n == 0 {
+            0.3
+        } else if down {
+            0.5
+        } else {
+            1.0
+        };
+        icons::draw(canvas, icon, cx, y + 98.0, 60.0, color, alpha);
+        let ty = theme::T_FOOTER.weight(Weight::MonoBold);
+        widgets::text_centered(canvas, label, cx, ty.baseline(y + 138.0), ty, color, alpha);
+    }
+}
+
+/// The select bar's button at (`x`, `y`).
+fn select_bar_hit(model: &Model, height: f32, x: f32, y: f32) -> Option<Action> {
+    model.sidebar.selection.as_ref()?;
+    let top = bottom(height) - SELECT_BAR;
+    if y < top + 50.0 || y >= bottom(height) || model.sidebar.selected_keys().is_empty() {
+        return None;
+    }
+    let index = ((x / (W / 4.0)).floor() as usize).min(3);
+    Some(Action::List(SELECT_ACTS[index].clone()))
 }
 
 /// Where the first row starts on screen, unscrolled.
@@ -93,6 +201,8 @@ enum Face {
     Selected,
     Pressed,
     Lifted,
+    /// Selected in select mode.
+    Checked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -111,6 +221,8 @@ struct ConversationLook {
     /// The streaming dot's pulse (percent).
     pulse: u32,
     face: Face,
+    /// In select mode: whether it is selected.
+    check: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -131,6 +243,7 @@ struct FolderLook {
     unread: usize,
     face: Face,
     plus: bool,
+    check: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -180,6 +293,8 @@ struct Ctx<'a> {
     query: String,
     /// The folder toggled last and how far its chevron has turned (0..1).
     turning: Option<(String, f32)>,
+    /// Select mode's selection.
+    selection: Option<BTreeSet<Key>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -205,7 +320,15 @@ impl<'a> Ctx<'a> {
                 let t = now.saturating_duration_since(*at).as_secs_f32() / TURN_FOR;
                 (id.clone(), anim::ease_out(t))
             }),
+            selection: model.sidebar.selection.clone(),
         }
+    }
+
+    /// In select mode, whether `key` is selected.
+    fn check(&self, key: Key) -> Option<bool> {
+        self.selection
+            .as_ref()
+            .map(|selection| selection.contains(&key))
     }
 
     fn face(&self, action: &Action) -> Face {
@@ -219,8 +342,21 @@ impl<'a> Ctx<'a> {
     }
 }
 
-/// The action a row performs when tapped (its pressed and lifted state).
-fn row_action(row: &Row, searching: bool) -> Option<Action> {
+/// The item a row shows.
+fn row_key(row: &Row) -> Option<Key> {
+    match row {
+        Row::Conversation { id, .. } => Some(Key::Conv(id.clone())),
+        Row::Folder { id, .. } => Some(Key::Folder(id.clone())),
+        _ => None,
+    }
+}
+
+/// The action a row performs when tapped (its pressed and lifted state);
+/// in select mode, it is selected or not.
+fn row_action(row: &Row, searching: bool, selecting: bool) -> Option<Action> {
+    if selecting {
+        return row_key(row).map(|key| Action::List(Act::ToggleSelect(key)));
+    }
     match row {
         Row::Conversation { id, .. } => Some(Action::List(Act::Open(id.clone()))),
         Row::Folder { id, .. } if searching => Some(Action::List(Act::ShowFolder(id.clone()))),
@@ -239,6 +375,7 @@ fn badge_label(symbol: &str, count: u32) -> String {
 
 fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
     let searching = !ctx.query.is_empty();
+    let selecting = ctx.selection.is_some();
     match row {
         Row::Pinned => Look::Pinned,
         Row::Results(count) => Look::Results(*count),
@@ -267,7 +404,8 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
             if activity.queued > 0 {
                 meta.push_str(&format!(" · {} queued", activity.queued));
             }
-            let action = row_action(row, searching).expect("a conversation's");
+            let action = row_action(row, searching, selecting).expect("a conversation's");
+            let check = ctx.check(Key::Conv(id.clone()));
             Look::Conversation(ConversationLook {
                 depth: *depth,
                 title,
@@ -284,9 +422,15 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
                 },
                 activity,
                 face: match ctx.face(&action) {
-                    Face::Plain if ctx.selected.as_deref() == Some(id.as_str()) => Face::Selected,
+                    Face::Plain if check == Some(true) => Face::Checked,
+                    Face::Plain
+                        if check.is_none() && ctx.selected.as_deref() == Some(id.as_str()) =>
+                    {
+                        Face::Selected
+                    }
                     face => face,
                 },
+                check,
             })
         }
         Row::Folder { id, depth, open } => {
@@ -315,8 +459,12 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
                     model.sidebar.folder_path(f.parent_id.as_deref())
                 );
             }
-            let action = row_action(row, searching).expect("a folder's");
-            let face = ctx.face(&action);
+            let action = row_action(row, searching, selecting).expect("a folder's");
+            let check = ctx.check(Key::Folder(id.clone()));
+            let face = match ctx.face(&action) {
+                Face::Plain if check == Some(true) => Face::Checked,
+                face => face,
+            };
             let progress = match &ctx.turning {
                 Some((turning, progress)) if turning == id => *progress,
                 _ => 1.0,
@@ -345,6 +493,7 @@ fn look(model: &Model, ctx: &Ctx, row: &Row) -> Look {
                 unread: if shown && !muted { aggregate.unread } else { 0 },
                 face,
                 plus: ctx.pressed == Some(&Action::List(Act::NewChatIn(id.clone()))),
+                check,
             })
         }
     }
@@ -360,6 +509,7 @@ fn face_color(face: Face) -> Rgb {
         Face::Selected => p.selection_background,
         Face::Pressed => c.row_pressed,
         Face::Lifted => c.row_lifted,
+        Face::Checked => c.row_checked,
     }
 }
 
@@ -415,6 +565,23 @@ fn text_with_hit(
         }
     }
     widgets::text(canvas, &shown, x, baseline, ty, color, 1.0)
+}
+
+/// Where the ◆ badge of these counts is (x from, x to), right to left from
+/// `right` as `draw_badges` places it.
+fn agents_badge((agents, commands, chrono): (u32, u32, u32), right: f32) -> Option<(f32, f32)> {
+    if agents == 0 {
+        return None;
+    }
+    let ty = T_CAPTION.weight(Weight::MonoBold);
+    let mut right = right;
+    for (count, symbol) in [(commands, "$"), (chrono, "◷")] {
+        if count > 0 {
+            right -= widgets::measure(&badge_label(symbol, count), ty) + GAP;
+        }
+    }
+    let w = widgets::measure(&badge_label("◆", agents), ty);
+    Some((right - w, right))
 }
 
 /// Badges ◆ $ ◷ right to left from `right`; returns where they start.
@@ -486,8 +653,11 @@ fn draw_conversation(canvas: &mut Canvas, c: &ConversationLook, y: f32) {
             p.accent,
         );
     }
-    let x = LIST_PAD + FOLDER_INDENT * c.depth as f32;
+    let mut x = LIST_PAD + FOLDER_INDENT * c.depth as f32;
     let cy = y + ROW_H / 2.0;
+    if let Some(checked) = c.check {
+        x += draw_check(canvas, x, cy, checked);
+    }
     // Trailing: badges, then the dot left of them.
     let mut trail = draw_badges(
         canvas,
@@ -579,14 +749,29 @@ fn chevron(canvas: &mut Canvas, cx: f32, cy: f32, size: f32, turn: u8, color: Rg
     canvas.fill_path(&path, color, 1.0);
 }
 
+/// Select mode's check circle at a row's start; returns how far the row's
+/// content moves right.
+fn draw_check(canvas: &mut Canvas, x: f32, cy: f32, checked: bool) -> f32 {
+    let p = theme::p();
+    if checked {
+        icons::draw(canvas, Icon::CheckCircle, x + 30.0, cy, 60.0, p.accent, 1.0);
+    } else {
+        icons::draw(canvas, Icon::Circle, x + 30.0, cy, 60.0, p.muted, 1.0);
+    }
+    60.0 + 28.0
+}
+
 fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
     let p = theme::p();
     let c = theme::c();
     let background = face_color(f.face);
     widgets::fill(canvas, RectF::new(0.0, y, W, ROW_H), background);
     // 8 pt in, 14 pt a level.
-    let base = 22.0 + FOLDER_INDENT * f.depth as f32;
+    let mut base = 22.0 + FOLDER_INDENT * f.depth as f32;
     let cy = y + ROW_H / 2.0;
+    if let Some(checked) = f.check {
+        base += draw_check(canvas, base, cy, checked);
+    }
     chevron(canvas, base + 19.5, cy, 39.0, f.turn, p.muted);
     let icon = RectF::new(
         base + 67.0,
@@ -610,7 +795,12 @@ fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
         1.0,
     );
     // Trailing: the unread count, badges, the dot; then the "+".
-    let mut trail = FOLDER_RIGHT;
+    // In select mode there is no "+".
+    let mut trail = if f.check.is_some() {
+        RIGHT
+    } else {
+        FOLDER_RIGHT
+    };
     if f.unread > 0 {
         let w = widgets::badge(
             canvas,
@@ -626,15 +816,17 @@ fn draw_folder(canvas: &mut Canvas, f: &FolderLook, y: f32) {
     if let Some((kind, count)) = f.indicator {
         trail = draw_dot(canvas, kind, count, f.pulse, trail, cy, background) - GAP;
     }
-    widgets::icon_button(
-        canvas,
-        Icon::Plus,
-        FOLDER_PLUS_CX,
-        cy,
-        50.0,
-        c.text_output,
-        f.plus,
-    );
+    if f.check.is_none() {
+        widgets::icon_button(
+            canvas,
+            Icon::Plus,
+            FOLDER_PLUS_CX,
+            cy,
+            50.0,
+            c.text_output,
+            f.plus,
+        );
+    }
     let x = base + 178.0;
     let baseline = y + 72.0;
     let mut tx = x;
@@ -727,10 +919,26 @@ fn header_owns(action: &Action) -> bool {
     matches!(
         action,
         Action::List(
-            Act::NewChat | Act::NewFolder(None) | Act::Menu(_) | Act::Search | Act::ClearSearch
+            Act::NewChat
+                | Act::NewFolder { parent: None, .. }
+                | Act::Menu(_)
+                | Act::Search
+                | Act::ClearSearch
+                | Act::EndSelect
         )
     )
 }
+
+/// The header's folder-plus.
+fn new_folder() -> Act {
+    Act::NewFolder {
+        parent: None,
+        items: Vec::new(),
+    }
+}
+
+/// Select mode's Done: where the header's controls are otherwise.
+const DONE: RectF = RectF::new(708.0, 0.0, W - 708.0, TOP_BAR);
 
 /// The search field's ✕ target (when there is text).
 fn clear_target() -> RectF {
@@ -743,10 +951,15 @@ fn header_hit(model: &Model, x: f32, y: f32) -> Option<Action> {
         return None;
     }
     let near = |cx: f32| (x - cx).abs() < 60.0;
-    let act = if near(PLUS_X) {
+    let selecting = model.sidebar.selection.is_some();
+    let act = if selecting && DONE.contains(x, y) {
+        Act::EndSelect
+    } else if selecting && x >= SEARCH.x + SEARCH.w {
+        return None;
+    } else if near(PLUS_X) {
         Act::NewChat
     } else if near(FOLDER_PLUS_X) {
-        Act::NewFolder(None)
+        new_folder()
     } else if near(MORE_X) {
         Act::Menu(widgets::target(MORE_X, ROW_Y))
     } else if x < SEARCH.x + SEARCH.w {
@@ -767,6 +980,7 @@ fn header_key(model: &Model, pressed: Option<&Action>) -> u64 {
     (
         &model.sidebar.search.text,
         model.sidebar.search.focused,
+        model.sidebar.selection.is_some(),
         super::action_key(pressed.filter(|action| header_owns(action))),
         theme::generation(),
     )
@@ -851,6 +1065,19 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
             p.accent,
         );
     }
+    if model.sidebar.selection.is_some() {
+        let ty = T_NOTE.weight(Weight::MonoBold);
+        widgets::text_centered(
+            canvas,
+            "DONE",
+            DONE.x + DONE.w / 2.0,
+            ty.baseline(ROW_Y - ty.line() / 2.0),
+            ty,
+            p.accent,
+            if down(Act::EndSelect) { 0.5 } else { 1.0 },
+        );
+        return;
+    }
     widgets::ellipsis(
         canvas,
         MORE_X,
@@ -869,7 +1096,7 @@ fn draw_header(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>) {
         ROW_Y,
         60.0,
         p.text,
-        down(Act::NewFolder(None)),
+        down(new_folder()),
     );
     widgets::icon_button(
         canvas,
@@ -1038,7 +1265,7 @@ fn pill_top(height: f32) -> f32 {
 
 /// The pill shows over a list that has rows, while not connected.
 fn pill_shows(model: &Model) -> bool {
-    model.offline && model.sidebar.loaded
+    model.offline && model.sidebar.loaded && model.sidebar.selection.is_none()
 }
 
 // ----- Frames ---------------------------------------------------------------------
@@ -1061,6 +1288,12 @@ pub struct ListFrame {
     pub(crate) pill: Option<u32>,
     /// What shows pressed (bands drawn for the frame agree).
     pub(crate) pressed: Option<Action>,
+    /// Select mode's bar, as drawn.
+    pub(crate) bar: Option<u64>,
+    /// The lifted row (top, height), whose shadow falls on its neighbours.
+    pub(crate) lifted: Option<(i32, i32)>,
+    /// A pull past the top: the gap it opens and how the indicator shows.
+    pub(crate) pull: Option<(i32, u64)>,
 }
 
 /// The rows of `layout` reaching into `y0..y1` (from the list's top).
@@ -1107,12 +1340,18 @@ pub fn list_frame(
     );
     let ctx = Ctx::new(model, pressed, lifted, now);
     let mut pulsing = false;
+    let searching = model.sidebar.search.active();
+    let selecting = model.sidebar.selection.is_some();
+    let mut lifted_row = None;
     let rows = layout.rows[range.clone()]
         .iter()
         .zip(&layout.tops[range])
         .map(|(row, y)| {
             let look = look(model, &ctx, row);
             pulsing |= look.pulsing();
+            if lifted.is_some() && row_action(row, searching, selecting).as_ref() == lifted {
+                lifted_row = Some((*y as i32, row.height() as i32));
+            }
             (*y as i32, row.height() as i32, look.keys())
         })
         .collect();
@@ -1127,7 +1366,70 @@ pub fn list_frame(
         end: layout.height as i32,
         pill: pill_shows(model).then(|| (anim::phase(now, 700) * 60.0) as u32),
         pressed: pressed.cloned(),
+        bar: select_bar_key(model, pressed),
+        lifted: lifted_row,
+        pull: pull(model, offset, now),
     })
+}
+
+/// How far past the top a pull must go to refresh (the iPhone's 56 pt of
+/// its damped pull).
+pub const PULL: f32 = 95.0;
+
+/// A pull past the top: the gap, and a key of its indicator (the arrow's
+/// look, or the spinner's step while the list is being asked for).
+fn pull(model: &Model, offset: f32, now: Instant) -> Option<(i32, u64)> {
+    if offset >= 0.0 {
+        return None;
+    }
+    let gap = -offset;
+    let look = if model.list_refreshing() {
+        (2, (anim::phase(now, 700) * 30.0) as u32)
+    } else {
+        (u32::from(gap >= PULL), (gap.min(60.0) / 2.0) as u32)
+    };
+    Some((gap as i32, super::hash_of(look)))
+}
+
+/// The pull indicator in the gap above the first row.
+fn draw_pull(canvas: &mut Canvas, model: &Model, top: f32, gap: f32, now: Instant) {
+    let p = theme::p();
+    let clip = canvas.clip();
+    let y1 = (top + gap).floor() as i32;
+    if y1 <= clip.1 || (top as i32) >= clip.3 {
+        return;
+    }
+    canvas.set_clip(clip.0, clip.1.max(top as i32), clip.2, clip.3.min(y1));
+    let cy = (top + gap / 2.0).round();
+    if model.list_refreshing() {
+        widgets::spinner(
+            canvas,
+            W / 2.0,
+            cy,
+            SPINNER,
+            p.accent,
+            p.sidebar_background,
+            now,
+        );
+    } else {
+        let color = if gap >= PULL { p.accent } else { p.muted };
+        let alpha = ((gap.min(60.0) / 2.0).floor() / 30.0).min(1.0);
+        icons::draw(canvas, Icon::Refresh, W / 2.0, cy, 50.0, color, alpha);
+    }
+    canvas.set_clip(clip.0, clip.1, clip.2, clip.3);
+}
+
+/// A lifted row's shadow (§3.5: blur 44, black 34 %, 19 down), drawn on
+/// the rows around it.
+const LIFT_BLUR: f32 = 44.0;
+const LIFT_DY: f32 = 19.0;
+
+/// The rows a lifted row's shadow reaches (content coordinates).
+fn lift_reach((y, h): (i32, i32)) -> (i32, i32) {
+    (
+        y - (LIFT_BLUR - LIFT_DY) as i32 - 1,
+        y + h + (LIFT_BLUR + LIFT_DY) as i32 + 1,
+    )
 }
 
 /// Asks for the frames the list needs: pulsing dots and spinners at 30 Hz,
@@ -1212,6 +1514,33 @@ pub fn draw_list_update(
     if old.header != new.header {
         redraw.push(widgets::TOP_BAR_ROWS);
     }
+    // A lifted row's shadow, come or gone (it moves with a scroll).
+    if old.lifted != new.lifted || (shift != 0 && new.lifted.is_some()) {
+        for (y0, y1) in [old.lifted, new.lifted]
+            .into_iter()
+            .flatten()
+            .map(lift_reach)
+        {
+            redraw.push(on_screen(content_top + y0, content_top + y1));
+            // Where the old frame's shadow was, before this frame's move.
+            redraw.push(on_screen(
+                content_top + y0 - shift,
+                content_top + y1 - shift,
+            ));
+        }
+    }
+    // The pull's gap.
+    if old.pull != new.pull {
+        let gap = old
+            .pull
+            .map_or(0, |(g, _)| g)
+            .max(new.pull.map_or(0, |(g, _)| g));
+        redraw.push(on_screen(top, top + gap + theme::S1 as i32 + 2));
+    }
+    // Select mode's bar.
+    if old.bar != new.bar {
+        redraw.push((bottom, bottom + SELECT_BAR as i32));
+    }
     if new.pill.is_some() && (old.pill != new.pill || shift != 0)
         || old.pill.is_some() != new.pill.is_some()
     {
@@ -1278,10 +1607,30 @@ fn draw_list_with(
             canvas.set_clip(outer.0, y0 as i32, outer.2, y1 as i32);
             let range = visible(&layout, y0 - content_top, y1 - content_top);
             let searching = model.sidebar.search.active();
+            let selecting = model.sidebar.selection.is_some();
             let ctx = Ctx::new(model, pressed, lifted.as_ref(), now);
             for index in range {
                 let look = look(model, &ctx, &layout.rows[index]);
                 draw_look(canvas, &look, content_top + layout.tops[index]);
+            }
+            // A lifted row's shadow on the rows around it.
+            if let Some(lifted) = &lifted {
+                let reach = visible(
+                    &layout,
+                    y0 - content_top - (LIFT_BLUR + LIFT_DY),
+                    y1 - content_top + LIFT_BLUR,
+                );
+                for index in reach {
+                    let row = &layout.rows[index];
+                    if row_action(row, searching, selecting).as_ref() == Some(lifted) {
+                        let rect =
+                            RectF::new(0.0, content_top + layout.tops[index], W, row.height());
+                        widgets::shadow(canvas, rect, LIFT_BLUR, LIFT_DY, 0.34);
+                    }
+                }
+            }
+            if offset < 0.0 {
+                draw_pull(canvas, model, top, -offset, now);
             }
             if searching && layout.rows.len() <= 1 {
                 draw_no_results(
@@ -1292,6 +1641,9 @@ fn draw_list_with(
             draw_state(canvas, &state, area, pressed, now);
             canvas.set_clip(outer.0, outer.1, outer.2, outer.3);
         }
+    }
+    if model.sidebar.selection.is_some() {
+        draw_select_bar(canvas, model, pressed, height);
     }
     draw_header(canvas, model, pressed);
     if pill_shows(model) {
@@ -1344,6 +1696,9 @@ pub fn hit(
     if y < TOP_BAR {
         return header_hit(model, x, y).map(Hit::Action);
     }
+    if let Some(action) = select_bar_hit(model, height, x, y) {
+        return Some(Hit::Action(action));
+    }
     let layout = model.sidebar.layout();
     let state = state(model, &layout);
     if let Some((_, act, rect)) = state_button(&state, area(model, height)) {
@@ -1352,12 +1707,41 @@ pub fn hit(
             .then_some(Hit::Action(Action::List(act)));
     }
     let searching = model.sidebar.search.active();
+    let selecting = model.sidebar.selection.is_some();
     match row_at(model, view, height, y, now)? {
-        (Row::Folder { id, .. }, _) if x >= W - TARGET => {
+        (Row::Folder { id, .. }, _) if x >= W - TARGET && !selecting => {
             Some(Hit::Action(Action::List(Act::NewChatIn(id))))
         }
-        (row, _) => row_action(&row, searching).map(Hit::Action),
+        (Row::Conversation { id, .. }, _) if !selecting && on_agents(model, &id, x) => {
+            Some(Hit::Action(Action::List(Act::Subagents(id))))
+        }
+        (row, _) => row_action(&row, searching, selecting).map(Hit::Action),
     }
+}
+
+/// Whether `x` is on the ◆ badge of conversation `id` (a 122 px target).
+fn on_agents(model: &mut Model, id: &str, x: f32) -> bool {
+    let Some(c) = model.sidebar.conversations.get(id) else {
+        return false;
+    };
+    if !c.tasks.iter().any(|t| t.kind == "subagent") {
+        return false;
+    }
+    let aggregates = model.sidebar.aggregates(&model.composer.queued);
+    let Some(c) = model.sidebar.conversations.get(id) else {
+        return false;
+    };
+    let folder_muted = c
+        .folder_id
+        .as_ref()
+        .is_some_and(|f| aggregates.muted.contains(f));
+    let queue = aggregates.queues.get(id).copied().unwrap_or_default();
+    let a = activity::conversation(c, queue, false, folder_muted);
+    agents_badge((a.agents, a.commands, a.chrono), RIGHT).is_some_and(|(x0, x1)| {
+        let cx = (x0 + x1) / 2.0;
+        let half = ((x1 - x0) / 2.0).max(TARGET / 2.0);
+        (x - cx).abs() <= half
+    })
 }
 
 /// The row a press held at (`x`, `y`) lifts.
@@ -1369,10 +1753,14 @@ pub fn liftable(
     y: f32,
     now: Instant,
 ) -> Option<Action> {
+    // Select mode taps, it does not lift.
+    if model.sidebar.selection.is_some() {
+        return None;
+    }
     let searching = model.sidebar.search.active();
     match row_at(model, view, height, y, now)? {
         (Row::Folder { .. }, _) if x >= W - TARGET => None,
-        (row, _) => row_action(&row, searching),
+        (row, _) => row_action(&row, searching, false),
     }
 }
 
@@ -1397,9 +1785,29 @@ pub fn long_press(
 
 /// Before a frame: the search follows the typing, its results start at
 /// their top (the tree comes back where it was), a revealed row comes into
-/// view, and the scroll stays inside a list that got shorter (a folder
-/// closed). Returns whether anything changed.
-pub fn settle(model: &mut Model, view: &mut ViewState, height: f32, now: Instant) -> bool {
+/// view, the scroll stays inside a list that got shorter (a folder closed),
+/// and a pull past the top, let go, asks for the list again (PAR-062).
+/// Returns whether anything changed, and commands to send.
+pub fn settle(
+    model: &mut Model,
+    view: &mut ViewState,
+    height: f32,
+    now: Instant,
+) -> (bool, Vec<serde_json::Value>) {
+    let mut commands = Vec::new();
+    if model.page == Page::List {
+        let offset = view.list_scroll.value(now);
+        if view.list_scroll.dragging() {
+            model.sidebar.pull_armed = -offset >= PULL;
+        } else if std::mem::take(&mut model.sidebar.pull_armed) {
+            model.ui.haptic(super::super::ui::Haptic::Light);
+            commands = model.refresh_list();
+        }
+    }
+    (settle_scroll(model, view, height, now), commands)
+}
+
+fn settle_scroll(model: &mut Model, view: &mut ViewState, height: f32, now: Instant) -> bool {
     let mut changed = model.list_tick(now);
     if model.page != Page::List {
         return changed;
@@ -1712,6 +2120,290 @@ mod tests {
     }
 
     #[test]
+    fn a_lifted_row_casts_its_shadow_on_its_neighbours() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let lift = Action::List(Act::Open("c4".into()));
+        let damage = update_matches(
+            &mut model,
+            &mut view,
+            (None, None),
+            (now, now),
+            |_, view| {
+                view.lifted = Some(lift.clone());
+            },
+        );
+        // The row and the shadow's reach around it, nothing more.
+        assert!(
+            drawn(&damage) <= ROW_H as i32 + (2.0 * LIFT_BLUR) as i32 + 4 + 2 * 2 * DOT_HALF,
+            "{damage:?}"
+        );
+        let damage = update_matches(
+            &mut model,
+            &mut view,
+            (None, None),
+            (now, now),
+            |_, view| {
+                view.lifted = None;
+            },
+        );
+        assert!(!damage.rows.is_empty());
+    }
+
+    #[test]
+    fn select_mode_checks_rows_and_counts_them_in_its_bar() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        model.handle(Action::List(Act::Select(None)));
+        let layout = model.sidebar.layout();
+        let y = list_top(&model) + layout.tops[3] + 40.0;
+        let Some(Hit::Action(toggle)) = hit(&mut model, &mut view, H, 400.0, y, now) else {
+            panic!("a row");
+        };
+        assert!(matches!(toggle, Action::List(Act::ToggleSelect(_))));
+        assert_eq!(liftable(&mut model, &view, H, 400.0, y, now), None);
+        let damage = update_matches(
+            &mut model,
+            &mut view,
+            (None, None),
+            (now, now),
+            |model, _| {
+                model.handle(toggle.clone());
+            },
+        );
+        // The row, and the bar's count.
+        assert!(
+            drawn(&damage) <= ROW_H as i32 + SELECT_BAR as i32 + 2 * 2 * DOT_HALF,
+            "{damage:?}"
+        );
+        // The bar's buttons, now that something is selected.
+        let bar = bottom(H) - SELECT_BAR + 100.0;
+        assert_eq!(
+            hit(&mut model, &mut view, H, 100.0, bar, now),
+            Some(act(Act::SelectMove))
+        );
+        assert_eq!(
+            hit(&mut model, &mut view, H, 1000.0, bar, now),
+            Some(act(Act::SelectDelete))
+        );
+        assert_eq!(
+            hit(&mut model, &mut view, H, 900.0, 60.0, now),
+            Some(act(Act::EndSelect))
+        );
+    }
+
+    #[test]
+    fn a_pull_past_the_top_opens_a_gap_and_asks_for_the_list() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        for to in [-30.0, -60.0, -100.0, -40.0, 0.0] {
+            update_matches(
+                &mut model,
+                &mut view,
+                (None, None),
+                (now, now),
+                |_, view| {
+                    view.list_scroll.offset = to;
+                },
+            );
+        }
+        // Dragged past the threshold and let go: the list again.
+        view.list_scroll.begin(500.0, now);
+        view.list_scroll
+            .moved(500.0 + 3.0 * (PULL + 10.0), 1000.0, now);
+        let (_, commands) = settle(&mut model, &mut view, H, now);
+        assert!(commands.is_empty() && model.sidebar.pull_armed);
+        view.list_scroll.end(1000.0, now);
+        let (_, commands) = settle(&mut model, &mut view, H, now);
+        assert_eq!(commands[0]["type"], "list_conversations");
+        assert!(model.list_refreshing());
+    }
+
+    /// Pixel rows where two frames differ.
+    fn differing(a: &Canvas, b: &Canvas) -> Vec<f32> {
+        (0..H as usize)
+            .filter(|y| a.pixels[y * 1080..(y + 1) * 1080] != b.pixels[y * 1080..(y + 1) * 1080])
+            .map(|y| y as f32)
+            .collect()
+    }
+
+    /// Pixel rows in `y0..y1` where `color` is drawn (text ink).
+    fn ink(canvas: &Canvas, y0: f32, y1: f32, color: Rgb) -> Vec<f32> {
+        (y0 as usize..y1 as usize)
+            .filter(|y| canvas.pixels[y * 1080..(y + 1) * 1080].contains(&color))
+            .map(|y| y as f32)
+            .collect()
+    }
+
+    /// Taps where each row is drawn — its title's ink, its top and bottom
+    /// pixel rows, scrolled or not — land on that row; a header or a
+    /// divider takes no tap and gives none to its neighbours.
+    #[test]
+    fn taps_land_on_the_row_drawn_there() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        model.handle(Action::List(Act::Toggle("f".into())));
+        let text = theme::p().text;
+        for offset in [0.0, 37.0, 311.0, 1500.0] {
+            view.list_scroll.offset = offset;
+            let base = full(&mut model, &mut view, None, now);
+            let layout = model.sidebar.layout();
+            let content_top = list_top(&model) - offset;
+            let (top, bottom) = bounds(&model, H);
+            let mut checked = 0;
+            for (index, row) in layout.rows.iter().enumerate() {
+                let y = content_top + layout.tops[index];
+                // Rows wholly on screen.
+                if y < top || y + row.height() > bottom {
+                    continue;
+                }
+                let Some(action) = row_action(row, false, false) else {
+                    // A header or a divider: nothing, wherever it is drawn.
+                    for ty in [y + 1.0, y + row.height() / 2.0, y + row.height() - 1.0] {
+                        assert_eq!(
+                            hit(&mut model, &mut view, H, 300.0, ty, now),
+                            None,
+                            "{row:?} at {ty}"
+                        );
+                    }
+                    continue;
+                };
+                // Where the row is drawn: what its pressed face changes.
+                let pressed = Hit::Action(action.clone());
+                let lit = full(&mut model, &mut view, Some(&pressed), now);
+                let drawn = differing(&base, &lit);
+                let (y0, y1) = (drawn[0], *drawn.last().unwrap());
+                assert!(y1 - y0 >= ROW_H - 2.0, "{row:?} drawn at {y0}..{y1}");
+                let title = ink(&base, y0, y0 + ROW_H / 2.0, text);
+                assert!(
+                    !title.is_empty(),
+                    "{row:?}: its title is drawn in its upper half"
+                );
+                let title_mid = title[title.len() / 2];
+                for ty in [y0, title_mid, (y0 + y1) / 2.0, y1] {
+                    for tx in [60.0, 300.0, 700.0] {
+                        assert_eq!(
+                            hit(&mut model, &mut view, H, tx, ty, now),
+                            Some(pressed.clone()),
+                            "{row:?} drawn at {y0}..{y1} (title at {title_mid}), tapped at ({tx}, {ty}) with the list at {offset}"
+                        );
+                    }
+                }
+                // A folder's "+" at its right; the row elsewhere.
+                if let Row::Folder { id, .. } = row {
+                    assert_eq!(
+                        hit(
+                            &mut model,
+                            &mut view,
+                            H,
+                            FOLDER_PLUS_CX,
+                            (y0 + y1) / 2.0,
+                            now
+                        ),
+                        Some(act(Act::NewChatIn(id.clone())))
+                    );
+                }
+                checked += 1;
+            }
+            assert!(checked >= 8, "rows checked at {offset}: {checked}");
+        }
+    }
+
+    /// A long-pressed row's menu: each item answers where it is drawn (its
+    /// pressed face), the quick row's cells included.
+    #[test]
+    fn menu_items_answer_where_they_are_drawn() {
+        use crate::exocortex::gesture::Gesture;
+        use crate::exocortex::ui::overlay::Response;
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let layout = model.sidebar.layout();
+        let y = list_top(&model) + layout.tops[1] + 80.0;
+        let Some(menu) = long_press(&mut model, &view, H, 300.0, y, now) else {
+            panic!("a row's menu");
+        };
+        model.handle(menu);
+        view.take_ui(&mut model, now);
+        // Opened at `now` (its first layout), drawn at rest.
+        super::super::frame::record(&mut model, &mut view, None, (1080, H as i32), now);
+        let later = now + Duration::from_millis(400);
+        // As a frame is: laid out (the overlays place themselves), then drawn.
+        let draw = |model: &mut Model, view: &mut ViewState| {
+            super::super::frame::record(model, view, None, (1080, H as i32), later);
+            full(model, view, None, later)
+        };
+        let base = draw(&mut model, &mut view);
+        let expected = [
+            "Pin",
+            "Mark",
+            "Mute",
+            "Rename",
+            "MarkEmoji",
+            "MovePicker",
+            "Clone",
+            "Select",
+            "Copy",
+            "ConfirmDelete",
+        ];
+        let mut found = Vec::new();
+        // Probe a grid; each press lights one item's cell.
+        let mut seen_cells: Vec<(f32, f32, f32)> = Vec::new();
+        for gy in (150..2000).step_by(46) {
+            for gx in [120.0, 340.0, 560.0] {
+                let gy = gy as f32;
+                let mut overlays = std::mem::take(&mut view.overlays);
+                let cx = view.cx(&model, 1080.0, H, later);
+                overlays.gesture(&Gesture::Down { x: gx, y: gy }, &cx);
+                view.overlays = overlays;
+                let lit = draw(&mut model, &mut view);
+                let mut overlays = std::mem::take(&mut view.overlays);
+                let cx = view.cx(&model, 1080.0, H, later);
+                overlays.gesture(&Gesture::Cancel, &cx);
+                view.overlays = overlays;
+                let rows = differing(&base, &lit);
+                let Some((&y0, &y1)) = rows.first().zip(rows.last()) else {
+                    continue;
+                };
+                assert!(gy >= y0 && gy <= y1, "pressed at {gy}, lit {y0}..{y1}");
+                if seen_cells.contains(&(y0, y1, gx)) {
+                    continue;
+                }
+                seen_cells.push((y0, y1, gx));
+                // A tap there performs that item.
+                let mut overlays = std::mem::take(&mut view.overlays);
+                let cx = view.cx(&model, 1080.0, H, later);
+                overlays.gesture(&Gesture::Down { x: gx, y: gy }, &cx);
+                let response = overlays.gesture(&Gesture::Tap { x: gx, y: gy }, &cx);
+                let Response::Action(action) = response else {
+                    panic!("no item at {gx},{gy}: {response:?}");
+                };
+                // The variant: `List(Pin(…))` → Pin, `Ui(Copy(…))` → Copy.
+                let name = format!("{action:?}");
+                let inner = name.split_once('(').map_or("", |(_, rest)| rest);
+                let variant: String = inner.chars().take_while(|c| c.is_alphanumeric()).collect();
+                if let Some(item) = expected.iter().find(|e| **e == variant) {
+                    if !found.contains(item) {
+                        found.push(*item);
+                    }
+                }
+                // Open it again for the next probe.
+                overlays.sweep(later + Duration::from_secs(5));
+                view.overlays = overlays;
+                let again = long_press(&mut model, &view, H, 300.0, y, now).unwrap();
+                model.handle(again);
+                view.take_ui(&mut model, now);
+                super::super::frame::record(&mut model, &mut view, None, (1080, H as i32), now);
+            }
+        }
+        assert_eq!(found.len(), expected.len(), "items answered: {found:?}");
+    }
+
+    #[test]
     fn rows_hit_and_long_press_where_they_are() {
         let mut model = model();
         let mut view = ViewState::new();
@@ -1753,7 +2445,7 @@ mod tests {
         );
         assert_eq!(
             hit(&mut model, &mut view, H, 888.0, 60.0, now),
-            Some(act(Act::NewFolder(None)))
+            Some(act(new_folder()))
         );
         model.sidebar.search.text = "x".into();
         assert_eq!(
@@ -1771,7 +2463,7 @@ mod tests {
             id: "c50".into(),
             depth: 0,
         });
-        settle(&mut model, &mut view, H, now);
+        let _ = settle(&mut model, &mut view, H, now);
         let layout = model.sidebar.layout();
         let index = layout
             .index_of(|row| matches!(row, Row::Conversation { id, .. } if id == "c50"))
@@ -1786,7 +2478,7 @@ mod tests {
         assert!(y >= top && y + ROW_H <= bottom, "on screen: {y}");
         // Closing the folders shortens the list: the scroll stays inside.
         model.handle(Action::List(Act::Toggle("f".into())));
-        settle(&mut model, &mut view, H, now);
+        let _ = settle(&mut model, &mut view, H, now);
         assert!(view.list_scroll.offset <= list_max(&mut model, H));
     }
 
@@ -1801,11 +2493,11 @@ mod tests {
             '3',
         ))));
         model.tick(t + Duration::from_secs(1));
-        settle(&mut model, &mut view, H, t);
+        let _ = settle(&mut model, &mut view, H, t);
         assert_eq!(view.list_scroll.offset, 0.0);
         assert!(matches!(model.sidebar.layout().rows[0], Row::Results(_)));
         model.handle(Action::Nav(crate::exocortex::model::Nav::Back));
-        settle(&mut model, &mut view, H, t);
+        let _ = settle(&mut model, &mut view, H, t);
         assert_eq!(view.list_scroll.offset, 900.0);
     }
 

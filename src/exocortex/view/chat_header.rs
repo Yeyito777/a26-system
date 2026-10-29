@@ -16,6 +16,7 @@ use crate::gfx::{Canvas, Rgb};
 
 use super::super::anim::{self, Animator};
 use super::super::model::{Action, Model, Nav, UiAct, chat, composer, ops};
+use super::super::sheets;
 use super::super::theme::{self, T_SUBTITLE, T_TITLE, TOP_BAR};
 use super::super::ui::icons::{self, Icon, Style};
 use super::super::ui::sheet::{ActionItem, ActionList, Sheet, Tone, action_sheet};
@@ -62,8 +63,14 @@ pub fn subtitle(model: &Model) -> Subtitle {
     let live = model.live_status();
     let streaming = model.streaming();
     let connected = model.ready || (!model.connected && !model.offline);
+    let link = &model.ops.usage.link;
     let (mut text, dot) = if !model.connected && model.offline {
-        let text = if model.was_connected {
+        // A restart the daemon announced (PAR-029).
+        let text = if link.shutdown.as_deref() == Some("restart") {
+            "Daemon restarting…"
+        } else if link.shutdown.is_some() {
+            "Daemon stopped"
+        } else if model.was_connected {
             "Reconnecting…"
         } else {
             "Connecting…"
@@ -94,6 +101,10 @@ pub fn subtitle(model: &Model) -> Subtitle {
         && !goal.status.is_empty()
     {
         text = format!("{text} · goal {}", goal.status);
+    }
+    // The daemon's own network is down (PAR-030; not the phone's).
+    if connected && link.online == Some(false) {
+        text = format!("⚠ offline · {text}");
     }
     let detail = model
         .context_tokens()
@@ -242,7 +253,9 @@ fn draw_subtitle(
     }
 }
 
-/// The ⋯ menu (PAR-010): Stop, Retry, the model, the last reply, the id.
+/// The ⋯ menu (PAR-010, `fake-09-chat-menu`): Stop and Retry when they
+/// apply, the model, the operations panels, reload, read, export, the
+/// work toggle, the id.
 pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
     let resolved = model.resolve();
     let label = model.generation_label(&resolved, true);
@@ -252,8 +265,21 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
     )
     .icon(Icon::Sparkle)
     .detail(label.clone());
+    // D's Discard draft (PAR-190), when there is one to discard.
+    let discard = (!model.composer.text.trim().is_empty() && !model.submitting()).then(|| {
+        ActionItem::new("Discard draft", Action::Composer(composer::Act::Discard))
+            .icon(Icon::Trash)
+            .tone(Tone::Destructive)
+    });
     let Some(id) = model.chat.id.clone() else {
-        return action_sheet(ActionList::new("New chat", vec![model_item]).scoped());
+        let mut items = vec![
+            model_item,
+            ActionItem::new("System prompt", Action::Ops(ops::Act::OpenSystemPrompt))
+                .icon(Icon::FileText)
+                .detail("Read the effective prompt"),
+        ];
+        items.extend(discard);
+        return action_sheet(ActionList::new("New chat", items).scoped());
     };
     let mut items = Vec::new();
     if model.streaming() {
@@ -270,23 +296,94 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
         );
     }
     items.push(model_item);
-    if let Some(text) = last_reply(model) {
+    items.push(ActionItem::new("Find in chat", Action::Ops(ops::Act::OpenFind)).icon(Icon::Search));
+    let tasks = model.activity_count(&id);
+    items.push(
+        ActionItem::new("Activity & tasks", Action::Ops(ops::Act::OpenActivity))
+            .icon(Icon::ListChecks)
+            .detail(match tasks {
+                0 => "Nothing running".to_owned(),
+                1 => "1 item".to_owned(),
+                n => format!("{n} items"),
+            }),
+    );
+    items.push(
+        ActionItem::new("Goal", Action::Ops(ops::Act::OpenGoal))
+            .icon(Icon::Target)
+            .detail(sheets::goal::menu_detail(model, &id)),
+    );
+    items.push(
+        ActionItem::new("Chrono schedules", Action::Ops(ops::Act::OpenChrono))
+            .icon(Icon::Timer)
+            .detail("Schedule a message or command"),
+    );
+    items.push(
+        ActionItem::new("Ask aside (BTW)", Action::Ops(ops::Act::OpenBtw))
+            .icon(Icon::MessageSquare)
+            .detail(sheets::btw::menu_detail(model, &id)),
+    );
+    items.push(
+        ActionItem::new("System prompt", Action::Ops(ops::Act::OpenSystemPrompt))
+            .icon(Icon::FileText)
+            .detail("Read the effective prompt"),
+    );
+    let usage = sheets::usage::compact(model.usage_of(&resolved.provider))
+        .map(|(five, week)| {
+            let pct =
+                |v: Option<f64>| v.map_or_else(|| "?".to_owned(), |v| format!("{}", v.round()));
+            format!("5h {}% · weekly {}% left", pct(five), pct(week))
+        })
+        .unwrap_or_else(|| "Provider limits".into());
+    let (usage_label, usage_action) = if model.accounts_likely() {
+        ("Accounts & usage", ops::Act::OpenAccounts)
+    } else {
+        ("Usage limits", ops::Act::OpenUsage)
+    };
+    items.push(
+        ActionItem::new(usage_label, Action::Ops(usage_action))
+            .icon(Icon::Gauge)
+            .detail(usage),
+    );
+    items.push(
+        ActionItem::new("Reload conversation", Action::Chat(chat::Act::Retry)).icon(Icon::Refresh),
+    );
+    // Their text is made when chosen (a menu's items are hashed every
+    // frame).
+    if last_reply(model).is_some() {
         items.push(
-            ActionItem::new(
-                "Read the last reply",
-                Action::Ui(UiAct::Read {
-                    title: "Last reply".into(),
-                    text,
-                }),
-            )
-            .icon(Icon::FileText),
+            ActionItem::new("Read the last reply", Action::Ops(ops::Act::ReadLastReply))
+                .icon(Icon::FileText),
         );
     }
+    if !model.chat.entries.is_empty() {
+        items.push(
+            ActionItem::new("Export loaded transcript", Action::Ops(ops::Act::Export))
+                .icon(Icon::Export),
+        );
+    }
+    let all = model.persist.settings().show_all_work;
+    items.push(
+        ActionItem::new(
+            if all {
+                "Fold finished work"
+            } else {
+                "Show all work"
+            },
+            Action::Ops(ops::Act::ToggleAllWork),
+        )
+        .icon(Icon::ListChecks)
+        .detail(if all {
+            "Replies only; tap a row to open one"
+        } else {
+            "Every tool call and notification"
+        }),
+    );
     items.push(
         ActionItem::new("Copy conversation id", Action::Ui(UiAct::Copy(id.clone())))
             .icon(Icon::Copy)
             .detail(id),
     );
+    items.extend(discard);
     let mut line = label;
     if let Some(tokens) = model.context_tokens() {
         line = format!("{line} · {} context tokens", ops::grouped(tokens));
@@ -294,8 +391,42 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
     action_sheet(ActionList::new(title(model), items).subtitle(line).scoped())
 }
 
+/// The loaded history as plain text (PAR-333): who said what, tool calls
+/// as one line each.
+pub fn export(model: &Model) -> String {
+    use super::super::proto::{Block, Entry};
+    let mut out = Vec::new();
+    for entry in &model.chat.entries {
+        match entry {
+            Entry::User { text, .. } => out.push(format!("You:\n{text}")),
+            Entry::Ai { blocks, .. } => {
+                let mut parts = Vec::new();
+                for block in blocks {
+                    match block {
+                        Block::Text { text } if !text.trim().is_empty() => {
+                            parts.push(text.trim().to_owned());
+                        }
+                        Block::ToolCall {
+                            tool_name, summary, ..
+                        } => parts.push(format!("[{tool_name}] {summary}")),
+                        _ => {}
+                    }
+                }
+                if !parts.is_empty() {
+                    out.push(format!("Assistant:\n{}", parts.join("\n\n")));
+                }
+            }
+            Entry::System { text, .. } if !text.trim().is_empty() => {
+                out.push(format!("System: {}", text.trim()));
+            }
+            _ => {}
+        }
+    }
+    out.join("\n\n")
+}
+
 /// The newest reply's text, if any is loaded.
-fn last_reply(model: &Model) -> Option<String> {
+pub fn last_reply(model: &Model) -> Option<String> {
     use super::super::proto::{self, Entry};
     model
         .chat
@@ -408,6 +539,34 @@ mod tests {
     }
 
     #[test]
+    fn a_restarting_or_offline_daemon_says_so() {
+        let mut model = open("");
+        loaded(&mut model);
+        event(
+            &mut model,
+            r#"{"type":"connectivity_status","online":false,"offlineSince":1}"#,
+        );
+        assert_eq!(says(&model).0, "⚠ offline · Opus 5.5 · high");
+        event(
+            &mut model,
+            r#"{"type":"connectivity_status","online":true}"#,
+        );
+        event(&mut model, r#"{"type":"daemon_shutdown","mode":"restart"}"#);
+        model.on_disconnected();
+        assert_eq!(
+            says(&model),
+            ("Daemon restarting…".into(), Some(Dot::Waiting))
+        );
+        model.on_connected();
+        model.on_disconnected();
+        assert_eq!(
+            says(&model).0,
+            "Reconnecting…",
+            "a new connection forgets it"
+        );
+    }
+
+    #[test]
     fn the_first_connection_says_connecting_and_a_quiet_one_nothing() {
         let model = Model::new();
         assert_eq!(says(&model), ("Connecting…".into(), Some(Dot::Waiting)));
@@ -460,6 +619,15 @@ mod tests {
                 "Stop",
                 "Retry opening conversation",
                 "Model, effort & speed…",
+                "Find in chat",
+                "Activity & tasks",
+                "Goal",
+                "Chrono schedules",
+                "Ask aside (BTW)",
+                "System prompt",
+                "Usage limits",
+                "Reload conversation",
+                "Show all work",
                 "Copy conversation id"
             ]
         );

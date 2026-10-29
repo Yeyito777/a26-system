@@ -21,6 +21,7 @@ pub mod list;
 pub mod markdown_layout;
 pub mod media;
 pub mod ops;
+pub mod picker;
 pub mod table;
 pub mod tools;
 pub mod transcript;

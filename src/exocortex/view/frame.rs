@@ -275,14 +275,22 @@ pub fn update(
             }
             _ => return None,
         };
-        let page_changed = page.moved.is_some() || !page.rows.is_empty();
-        damage = page;
-        // Floating overlays sit on what the page drew: drawn again there.
-        if page_changed {
-            for (_, body) in &new.floating {
+        // Floating overlays sit on what the page drew: drawn again where it
+        // drew (or moved) under them.
+        let under = |rows: (i32, i32)| {
+            page.moved
+                .is_some_and(|(y0, y1, _)| rows.1 > y0 && rows.0 < y1)
+                || page
+                    .rows
+                    .iter()
+                    .any(|(y0, y1)| rows.1 > *y0 && rows.0 < *y1)
+        };
+        for (_, body) in &new.floating {
+            if under(body.rows) {
                 bands.push(body.rows);
             }
         }
+        damage = page;
     } else {
         let count = new.modal.len();
         for index in 0..count - 1 {
