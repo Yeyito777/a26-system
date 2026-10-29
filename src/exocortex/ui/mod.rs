@@ -9,6 +9,7 @@ pub mod icons;
 pub mod menu;
 pub mod overlay;
 pub mod sheet;
+pub mod textarea;
 pub mod toast;
 pub mod widgets;
 

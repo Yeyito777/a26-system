@@ -28,6 +28,7 @@ use super::find;
 use super::gesture::{Axis, Gesture};
 use super::model::{Action, Ui, UiAct};
 use super::theme::{self, HAIRLINE, T_BODY, T_META, T_NOTE, T_SUBTITLE, T_TITLE, TARGET, TOP_BAR};
+use super::ui::Haptic;
 use super::ui::icons::{self, Icon};
 use super::ui::overlay::{Body, Cx, Overlay, Response, Scroller};
 use super::ui::widgets;
@@ -76,6 +77,8 @@ pub struct Reader {
     /// Selected text (byte range), and which end a drag moves.
     selection: Option<(usize, usize)>,
     dragging: Option<bool>,
+    /// A haptic for the event loop (a long press selected a word).
+    haptic: Option<Haptic>,
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +105,7 @@ impl Reader {
             widths: RefCell::new(HashMap::new()),
             selection: None,
             dragging: None,
+            haptic: None,
         }
     }
 
@@ -764,6 +768,8 @@ impl Overlay for Reader {
                     let at = self.offset_at(cx, x, y);
                     self.selection = Some(self.word_at(at));
                     self.dragging = Some(false);
+                    // A long press recognised (roadmap §3.8).
+                    self.haptic = Some(Haptic::Medium);
                 }
                 Response::Handled
             }
@@ -877,6 +883,10 @@ impl Overlay for Reader {
         Response::Handled
     }
 
+    fn take_haptic(&mut self) -> Option<Haptic> {
+        self.haptic.take()
+    }
+
     fn keyboard(&self) -> Option<KeyboardPurpose> {
         self.find
             .as_ref()
@@ -969,6 +979,8 @@ mod tests {
         let (x, y) = at(8.0, 0.0);
         reader.gesture(&Gesture::LongPress { x, y }, &c);
         assert_eq!(reader.selection, Some((6, 16)), "beta_gamma");
+        assert_eq!(reader.take_haptic(), Some(Haptic::Medium));
+        assert_eq!(reader.take_haptic(), None, "once");
         // Moving on extends it to where the finger is.
         let (x, y) = at(4.0, 1.0);
         reader.gesture(&Gesture::LongPressMove { x, y }, &c);

@@ -16,6 +16,7 @@ pub mod blocks;
 pub mod chat_header;
 pub mod code;
 pub mod composer;
+pub mod draft;
 pub mod files;
 pub mod frame;
 pub mod list;
@@ -496,6 +497,7 @@ pub fn draw_chat_update(
         transcript::jump_damage(&old.transcript, &new.transcript, shift, (top, bottom))
     {
         let rest = transcript::subtract_rows((y0, y1), &damage.rows);
+        let x0 = transcript::jump_columns();
         for &rows in &rest {
             transcript::draw_band(
                 canvas,
@@ -503,12 +505,13 @@ pub fn draw_chat_update(
                 view,
                 new.pressed.as_ref(),
                 rows,
-                transcript::jump_columns(),
+                x0,
                 new.offset,
                 now,
             );
+            // Its columns only: the rest of these rows is what moved.
+            damage.areas.push((x0, rows.0, canvas.width, rows.1));
         }
-        damage.rows = frame::merge(damage.rows.iter().copied().chain(rest).collect());
     }
     if old.header != new.header || header_pressed {
         chat_header::draw(canvas, model, new.pressed.as_ref(), now);
@@ -597,6 +600,7 @@ fn new_chat_state(
 ) {
     let p = theme::p();
     let c = theme::c();
+    draft::draw(canvas, model, top, pressed);
     let rect = new_chat_box(model, (top, bottom));
     let label_ty = T_EYEBROW.tracked(3.3);
     widgets::text_centered(
@@ -682,11 +686,14 @@ pub fn hit(
             if y < top || y >= bottom {
                 return None;
             }
-            if model.chat.id.is_none()
-                && model.chat.echoes.is_empty()
-                && new_chat_box(model, (top, bottom)).contains(x, y)
-            {
-                return Some(Hit::Action(Action::Ops(ops_model::Act::OpenInspector)));
+            if model.chat.id.is_none() && model.chat.echoes.is_empty() {
+                if new_chat_box(model, (top, bottom)).contains(x, y) {
+                    return Some(Hit::Action(Action::Ops(ops_model::Act::OpenInspector)));
+                }
+                // A folder's instructions the draft inherits (PAR-085).
+                if let Some(action) = draft::hit(model, top, x, y) {
+                    return Some(Hit::Action(action));
+                }
             }
             if transcript::stateful(model) {
                 return Some(
@@ -842,7 +849,7 @@ mod tests {
     use crate::exocortex::proto::parse_event;
     use crate::text::Weight;
     use list::{ROW_H, draw_list_update, list_frame, list_top};
-    use markdown_layout::{BODY, lay_markdown, line_width, plain, wrap};
+    use markdown_layout::{body, lay_markdown, line_width, plain, wrap};
     use ops::Op;
     use theme::TRANSCRIPT_PAD as MARGIN;
     use tools::TOOL_ROW;
@@ -859,7 +866,7 @@ mod tests {
                 Style::Plain,
             ),
         ];
-        let lines = wrap(&spans, 400.0, BODY);
+        let lines = wrap(&spans, 400.0, body());
         assert!(lines.len() >= 4);
         for line in &lines {
             assert!(line_width(line) <= 400.5, "{line:?}");
@@ -877,10 +884,10 @@ mod tests {
             .map(|r| r.text.as_str())
             .collect();
         assert_eq!(last, "and breaks");
-        let long = wrap(&plain(&"x".repeat(200)), 300.0, BODY);
+        let long = wrap(&plain(&"x".repeat(200)), 300.0, body());
         assert!(long.len() > 3);
         assert!(long.iter().all(|line| line_width(line) <= 300.5));
-        assert_eq!(wrap(&plain(""), 300.0, BODY).len(), 1);
+        assert_eq!(wrap(&plain(""), 300.0, body()).len(), 1);
     }
 
     #[test]
@@ -1258,16 +1265,7 @@ mod tests {
                 (dst * width) as usize,
             );
         }
-        for y in 0..height as i32 {
-            if damage.rows.iter().any(|(y0, y1)| (*y0..*y1).contains(&y)) {
-                continue;
-            }
-            let row = (y * width) as usize..((y + 1) * width) as usize;
-            assert!(
-                shadow[row.clone()] == canvas.pixels[row],
-                "row {y} changed outside the damage"
-            );
-        }
+        frame::assert_unchanged_outside(&shadow, &canvas.pixels, width as usize, &damage);
         damage
     }
 

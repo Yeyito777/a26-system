@@ -19,6 +19,7 @@ use super::gesture::{Axis, Gesture};
 use super::images::{Pic, State, Want};
 use super::model::{Action, UiAct, rich};
 use super::theme::{self, T_META, T_NOTE, T_SMALL, TARGET, TOP_BAR};
+use super::ui::Haptic;
 use super::ui::icons::{self, Icon};
 use super::ui::overlay::{Body, Cx, Overlay, Response};
 use super::ui::widgets::{self, Button, ButtonKind};
@@ -63,6 +64,8 @@ pub struct Viewer {
     last_tap: Option<(Instant, f32, f32)>,
     pressed: Option<Control>,
     closed: bool,
+    /// A haptic for the event loop (a zoom, a page turned).
+    haptic: Option<Haptic>,
 }
 
 impl Viewer {
@@ -79,6 +82,7 @@ impl Viewer {
             last_tap: None,
             pressed: None,
             closed: false,
+            haptic: None,
         }
     }
 
@@ -222,6 +226,7 @@ impl Viewer {
             self.index = index;
             self.zoom = 1.0;
             self.pan = (0.0, 0.0);
+            self.haptic = Some(Haptic::Selection);
         }
     }
 }
@@ -413,6 +418,7 @@ impl Overlay for Viewer {
                 });
                 if double {
                     self.last_tap = None;
+                    self.haptic = Some(Haptic::Light);
                     if self.zoom > 1.0 {
                         self.zoom = 1.0;
                         self.pan = (0.0, 0.0);
@@ -497,6 +503,10 @@ impl Overlay for Viewer {
         if self.image(cx).is_none() && !self.failed(cx) {
             animator.slow_frame(cx.now);
         }
+    }
+
+    fn take_haptic(&mut self) -> Option<Haptic> {
+        self.haptic.take()
     }
 
     fn images(&self, cx: &Cx) -> Vec<Want> {
@@ -608,12 +618,14 @@ mod tests {
         viewer.gesture(&end(Axis::Horizontal, -900.0, 0.0), &cx(&model, now));
         assert_eq!(viewer.index, 1);
         assert_eq!(viewer.label(), "viewer: 2/3");
+        assert_eq!(viewer.take_haptic(), Some(Haptic::Selection));
         // A double tap zooms; the pan stays within the image.
         for _ in 0..2 {
             viewer.gesture(&Gesture::Tap { x: 900.0, y: 600.0 }, &cx(&model, now));
             now += Duration::from_millis(120);
         }
         assert_eq!(viewer.zoom, ZOOM);
+        assert_eq!(viewer.take_haptic(), Some(Haptic::Light));
         let c = cx(&model, now);
         let area = viewer.area(&c);
         let fitted_w = (1080.0_f32 * (area.h / 2400.0)).round();

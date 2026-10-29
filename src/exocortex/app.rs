@@ -322,6 +322,9 @@ impl Context<'_> {
                 Effect::Dictate(what) => dictation::command(what),
                 Effect::Files(job) => files::command(job),
                 Effect::StatusBar => ui::status_bar(&theme::status_bar()),
+                Effect::Reveal(stamp) => {
+                    self.view.reveal(self.model, stamp, self.height);
+                }
             }
             changed = true;
         }
@@ -360,6 +363,10 @@ impl Context<'_> {
             let mut overlays = std::mem::take(&mut self.view.overlays);
             let cx = self.view.cx(self.model, self.width, self.height, now);
             let response = overlays.gesture(&gesture, &cx);
+            // What it felt like (the reader's long press, the viewer's zoom).
+            for haptic in overlays.take_haptics() {
+                self.model.ui.haptic(haptic);
+            }
             self.view.overlays = overlays;
             response
         };
@@ -699,6 +706,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let link = DaemonLink::spawn(proto::socket_path())?;
     let mut shell = ShellReader::spawn()?;
     let mut view = ViewState::new();
+    // The chat's chips (E) float over the chat page under its header.
+    view.overlays
+        .push(Box::new(super::sheets::chips::ChatChips::default()));
     let mut input = Input::default();
     let mut recognizer = Recognizer::new(f32::from(crate::REQUESTED_WIDTH));
     let mut seen_target: Option<u64> = None;
@@ -1304,15 +1314,19 @@ fn draw_frame(
     renderer.frame = Some(record);
     let (drawn, kind) = match update {
         // Nothing on screen changed.
-        Some(damage) if damage.rows.is_empty() && damage.moved.is_none() => return Ok(()),
+        Some(damage) if damage.is_empty() => return Ok(()),
         Some(damage) => {
             if let Some((y0, y1, dy)) = damage.moved {
                 renderer.presenter.scroll(conn, y0, y1, dy)?;
             }
             let drawn = started.elapsed();
-            renderer
-                .presenter
-                .present_rows(conn, &renderer.canvas, 0, &damage.rows)?;
+            renderer.presenter.present_rows_and_areas(
+                conn,
+                &renderer.canvas,
+                0,
+                &damage.rows,
+                &damage.areas,
+            )?;
             if env_flag("EXOCORTEX_APP_VERIFY") {
                 verify(&renderer.canvas, model, view, pressed, now, &damage);
             }

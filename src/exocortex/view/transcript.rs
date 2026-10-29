@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use crate::gfx::{Canvas, RectF};
 
-use super::super::anim::{Animator, Tween};
+use super::super::anim::{self, Animator, Tween};
 use super::super::footer;
 use super::super::markdown::{self, MdBlock};
 use super::super::model::chat::{
@@ -128,6 +128,9 @@ pub struct TranscriptView {
     /// button would show once it is still.
     last_offset: Option<f32>,
     held: bool,
+    /// Since when the transcript has not moved (tool outputs are fetched
+    /// only then: never while it scrolls).
+    still_since: Option<Instant>,
     /// The transcript's rows at the last frame (for `animate`).
     bounds: (f32, f32),
 }
@@ -732,8 +735,10 @@ impl ViewState {
                     h += gap;
                     let open = open_at(key);
                     let growing = context.live && *end == blocks.len();
-                    let (_, text) = merged_thinking(blocks, *index);
+                    // Its text merged only when laid out (a cached piece
+                    // needs none of it).
                     let piece = self.piece(hash_of((hash, open, growing, stamp)), || {
+                        let (_, text) = merged_thinking(blocks, *index);
                         lay_thinking(&text, key, stamp, open, growing)
                     });
                     put(layout, &mut h, piece);
@@ -770,7 +775,7 @@ impl ViewState {
                             open,
                             indent as i32,
                             context.styles_version,
-                            open.then_some(&output),
+                            open.then(|| output.key()),
                             (!open).then(|| expandable(&output)),
                             matches!(output, Output::Running) && context.live,
                         ));
@@ -1197,6 +1202,20 @@ impl ViewState {
         }
     }
 
+    /// Scrolls to an entry (its stamp), its top 8 pt below the
+    /// transcript's top (the iPhone's `reveal`), and stops following (E: a
+    /// Find in chat match). False when it isn't laid out.
+    pub fn reveal(&mut self, model: &Model, stamp: u64, height: f32) -> bool {
+        let max = self.chat_max(model, height);
+        let Some(item) = self.layout.items.iter().find(|item| item.stamp == stamp) else {
+            return false;
+        };
+        self.chat_scroll.reset();
+        self.chat_scroll.offset = (item.y - 22.0).clamp(0.0, max);
+        self.follow = false;
+        true
+    }
+
     /// The transcript is scrolled near its oldest loaded message.
     pub fn near_top(&self, now: Instant) -> bool {
         self.chat_scroll.value(now) < 1500.0
@@ -1210,8 +1229,44 @@ impl ViewState {
     }
 }
 
-/// What the chat asks the daemon for as it is scrolled: older history near
-/// the top, the outputs of tool rows within a screen of what shows.
+/// Tool outputs are fetched once the transcript has been still this long.
+const PREFETCH_AFTER: Duration = Duration::from_millis(300);
+
+/// Folded tool rows on screen (and half a screen around) whose output is
+/// not here yet, once the transcript is still.
+fn prefetchable(model: &Model, view: &ViewState, height: f32, now: Instant) -> Vec<String> {
+    let still = view
+        .transcript
+        .still_since
+        .is_some_and(|since| now.saturating_duration_since(since) >= PREFETCH_AFTER);
+    if !still
+        || view.chat_scroll.dragging()
+        || view.layout.tools.is_empty()
+        || !model.chat.outputs_inflight.is_empty()
+    {
+        return Vec::new();
+    }
+    let (top, bottom) = transcript_bounds(model, height, view.keyboard);
+    let screen = bottom - top;
+    let offset = view.chat_scroll.value(now);
+    let tools = &view.layout.tools;
+    let from = tools.partition_point(|(y, _)| *y < offset - screen / 2.0);
+    tools[from..]
+        .iter()
+        .take_while(|(y, _)| *y < offset + 1.5 * screen)
+        .map(|(_, id)| id)
+        .filter(|id| {
+            !model.chat.outputs.contains_key(*id)
+                && !model.chat.outputs_requested.contains(*id)
+                && !model.chat.output_errors.contains_key(*id)
+        })
+        .cloned()
+        .collect()
+}
+
+/// What the chat asks the daemon for: older history near the top; the
+/// outputs of folded tool rows on screen once it is still (never while it
+/// scrolls: their answers cost the daemon and the link).
 pub fn requests(model: &mut Model, view: &mut ViewState, height: f32, now: Instant) -> Vec<Value> {
     if model.page != Page::Chat {
         return Vec::new();
@@ -1221,20 +1276,9 @@ pub fn requests(model: &mut Model, view: &mut ViewState, height: f32, now: Insta
         commands.extend(model.load_older());
     }
     view.layout(model);
-    if view.layout.tools.is_empty() || !model.chat.outputs_inflight.is_empty() {
-        return commands;
-    }
-    let (top, bottom) = transcript_bounds(model, height, view.keyboard);
-    let screen = bottom - top;
-    let offset = view.chat_scroll.value(now);
-    let tools = &view.layout.tools;
-    let from = tools.partition_point(|(y, _)| *y < offset - screen);
-    let near: Vec<&str> = tools[from..]
-        .iter()
-        .take_while(|(y, _)| *y < offset + 2.0 * screen)
-        .map(|(_, id)| id.as_str())
-        .collect();
+    let near = prefetchable(model, view, height, now);
     if !near.is_empty() {
+        let near: Vec<&str> = near.iter().map(String::as_str).collect();
         commands.extend(model.prefetch_outputs(&near));
     }
     commands
@@ -1258,8 +1302,10 @@ fn jump_rect(bottom: f32) -> RectF {
     RectF::new(W - JUMP_INSET - JUMP, bottom - 17.0 - JUMP, JUMP, JUMP)
 }
 
-/// Its shadow's reach (blur 44, 11 down).
-const JUMP_SHADOW: (f32, f32) = (44.0, 11.0);
+/// Its shadow's reach: blur and drop. Compact (the spec's 44 px blur is
+/// barely visible on the dark themes, and every row and column it reaches
+/// is drawn and sent again when the button comes or goes over moved rows).
+const JUMP_SHADOW: (f32, f32) = (14.0, 5.0);
 
 /// The columns the jump button and its shadow cover.
 pub(crate) fn jump_columns() -> i32 {
@@ -1295,14 +1341,24 @@ pub(crate) fn frame(
         .is_some_and(|last| last != offset)
         || view.chat_scroll.dragging();
     view.transcript.last_offset = Some(offset);
+    if moving {
+        view.transcript.still_since = None;
+    } else if view.transcript.still_since.is_none() {
+        view.transcript.still_since = Some(now);
+    }
     let far = max - offset > JUMP_THRESHOLD && !loading;
-    view.transcript.held = far && moving;
-    let wanted = far && !moving;
+    // Shown once the transcript has been still a moment: a fling's slow end
+    // moves it a pixel now and then, and must not make it flicker.
+    let settled = view
+        .transcript
+        .still_since
+        .is_some_and(|since| now.saturating_duration_since(since) >= JUMP_SETTLE);
+    view.transcript.held = far && !settled;
     let shown = view.transcript.jump.as_ref().is_some_and(|(on, _)| *on);
-    if wanted && !shown {
+    if far && settled && !shown {
         let tween = Tween::new(now, JUMP_FADE, 0.0, 1.0);
         view.transcript.jump = Some((true, tween));
-    } else if !wanted && shown {
+    } else if shown && (!far || moving) {
         view.transcript.jump = None;
     }
     let jump = jump_alpha(view, now);
@@ -1429,7 +1485,16 @@ pub fn animate(model: &Model, view: &ViewState, now: Instant, animator: &mut Ani
     }
     // Held back while the transcript moved: a frame once it may be still.
     if view.transcript.held {
-        animator.request(now + JUMP_SETTLE);
+        let since = view.transcript.still_since.unwrap_or(now);
+        animator.request((since + JUMP_SETTLE).max(now + anim::FRAME));
+    }
+    // Outputs to fetch once still: a pass of the loop then.
+    if let Some(since) = view.transcript.still_since
+        && !view.layout.tools.is_empty()
+        && model.chat.outputs_inflight.is_empty()
+        && now.saturating_duration_since(since) < PREFETCH_AFTER
+    {
+        animator.request(since + PREFETCH_AFTER);
     }
     let (top, bottom) = view.transcript.bounds;
     let offset = view.chat_scroll.value(now);
@@ -1906,27 +1971,24 @@ mod tests {
                 dst as usize * width,
             );
         }
-        for y in 0..HEIGHT as i32 {
-            if damage.rows.iter().any(|(a, b)| (*a..*b).contains(&y)) {
-                continue;
-            }
-            let row = y as usize * width..(y as usize + 1) * width;
-            assert!(
-                shadow[row.clone()] == canvas.pixels[row],
-                "row {y} changed outside the damage"
-            );
-        }
+        crate::exocortex::view::frame::assert_unchanged_outside(
+            &shadow,
+            &canvas.pixels,
+            width,
+            &damage,
+        );
         damage
     }
 
     /// Rows damaged in the transcript (the header pulses on its own).
     fn rows(damage: &crate::exocortex::view::FrameDamage) -> i32 {
         let top = CHAT_TOP as i32;
-        damage
+        let rows: i32 = damage
             .rows
             .iter()
             .map(|(a, b)| (b - a.max(&top)).max(0))
-            .sum()
+            .sum();
+        rows + damage.areas.iter().map(|(_, a, _, b)| b - a).sum::<i32>()
     }
 
     const START: &str = r#"{"type":"streaming_started","convId":"c","provider":"anthropic","model":"claude-opus-5-5","startedAt":5000,"snapshotKind":"start"}"#;
@@ -2085,7 +2147,14 @@ mod tests {
         chat_frame(&model, &mut view, None, HEIGHT, t0);
         assert_eq!(jump_alpha(&view, t0 + JUMP_FADE), 0, "not while it moves");
         chat_frame(&model, &mut view, None, HEIGHT, t0);
-        let shown = t0 + JUMP_FADE;
+        assert_eq!(
+            jump_alpha(&view, t0 + JUMP_FADE),
+            0,
+            "not before it settles"
+        );
+        let settled = t0 + JUMP_SETTLE;
+        chat_frame(&model, &mut view, None, HEIGHT, settled);
+        let shown = settled + JUMP_FADE;
         assert_eq!(jump_alpha(&view, shown), 32);
         // Its tap jumps to the newest message.
         let (top, bottom) = transcript_bounds(&model, HEIGHT, false);
@@ -2119,7 +2188,8 @@ mod tests {
         view.chat_scroll.offset = (max / 2.0).round();
         chat_frame(&model, &mut view, None, HEIGHT, t0);
         chat_frame(&model, &mut view, None, HEIGHT, t0);
-        let t = t0 + JUMP_FADE;
+        chat_frame(&model, &mut view, None, HEIGHT, t0 + JUMP_SETTLE);
+        let t = t0 + JUMP_SETTLE + JUMP_FADE;
         assert_eq!(jump_alpha(&view, t), 32);
         // The first step of a scroll takes it away (its rows drawn once).
         let damage = update(&mut model, &mut view, (t, t), |_, view| {
@@ -2138,11 +2208,70 @@ mod tests {
         let mut animator = Animator::default();
         animate(&model, &view, t, &mut animator);
         assert_eq!(animator.take(), Some(t + JUMP_SETTLE));
-        // Still again: it fades back in, in its own columns.
-        let damage = update(&mut model, &mut view, (t, t + JUMP_FADE), |_, _| {});
+        // A pixel now and then (a fling's end) does not bring it back.
+        let damage = update(&mut model, &mut view, (t, t + JUMP_SETTLE / 2), |_, _| {});
+        assert!(damage.moved.is_none() && rows(&damage) == 0, "{damage:?}");
+        let damage = update(
+            &mut model,
+            &mut view,
+            (t, t + JUMP_SETTLE / 2),
+            |_, view| {
+                view.chat_scroll.offset += 1.0;
+            },
+        );
+        assert!(rows(&damage) <= 3, "{damage:?}");
+        // Still a moment: it fades back in, in its own columns.
+        let t = t + JUMP_SETTLE;
+        chat_frame(&model, &mut view, None, HEIGHT, t);
+        let damage = update(&mut model, &mut view, (t, t + JUMP_SETTLE), |_, _| {});
         assert!(damage.moved.is_none());
         assert!(rows(&damage) <= 122 + 2 * 44 + 11 + 4, "{damage:?}");
-        assert_eq!(jump_alpha(&view, t + JUMP_FADE), 32);
+        assert!(jump_alpha(&view, t + JUMP_SETTLE + JUMP_FADE) == 32);
+    }
+
+    #[test]
+    fn tool_outputs_are_fetched_only_once_the_transcript_is_still() {
+        let calls: Vec<String> = (0..4)
+            .map(|i| format!(r#"{{"type":"tool_call","toolCallId":"t{i}","toolName":"Bash","input":{{}},"summary":"ls {i}"}},{{"type":"tool_result","toolCallId":"t{i}","toolName":"Bash","output":"","isError":false}},{{"type":"text","text":"step {i}"}}"#))
+            .collect();
+        let mut model = open_with(&format!(
+            r#"{{"type":"ai","blocks":[{}]}}"#,
+            calls.join(",")
+        ));
+        let mut view = ViewState::new();
+        let t0 = Instant::now();
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
+        let outputs = |commands: Vec<Value>| {
+            commands
+                .iter()
+                .filter(|c| c["type"] == "load_tool_outputs")
+                .count()
+        };
+        // Not yet still long enough; then asked for, once.
+        assert_eq!(outputs(requests(&mut model, &mut view, HEIGHT, t0)), 0);
+        let later = t0 + PREFETCH_AFTER;
+        assert_eq!(outputs(requests(&mut model, &mut view, HEIGHT, later)), 1);
+        assert_eq!(outputs(requests(&mut model, &mut view, HEIGHT, later)), 0);
+        // Their answer changes nothing on screen: no layout pass.
+        let version = model.chat.version;
+        let request = model.chat.outputs_inflight.keys().next().unwrap().clone();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"tool_outputs_loaded","reqId":"{request}","convId":"c","outputs":[{{"toolCallId":"t0","output":"a"}},{{"toolCallId":"t1","output":"b"}},{{"toolCallId":"t2","output":"c"}},{{"toolCallId":"t3","output":"d"}}]}}"#
+            )),
+            Instant::now(),
+        );
+        assert_eq!(model.chat.version, version);
+        assert_eq!(model.chat.output_of("t2"), Some("c"));
+        // While it moves, nothing is asked for.
+        let mut model = open_with(&format!(
+            r#"{{"type":"ai","blocks":[{}]}}"#,
+            calls.join(",")
+        ));
+        let mut view = ViewState::new();
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
+        view.chat_scroll.begin(500.0, later);
+        assert_eq!(outputs(requests(&mut model, &mut view, HEIGHT, later)), 0);
     }
 
     #[test]

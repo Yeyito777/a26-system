@@ -22,8 +22,8 @@ use super::super::proto;
 use super::super::sheets::{panel, usage};
 use super::super::store;
 use super::super::theme::{
-    self, HAIRLINE, SETTINGS_PAD, SWITCH, T_BODY, T_EYEBROW, T_META, T_NOTE, T_PAGE_TITLE,
-    T_SECTION, T_SMALL, TOGGLE_ROW, TOP_BAR, Theme, W,
+    self, HAIRLINE, SETTINGS_PAD, SWITCH, T_BODY, T_CAPTION, T_EYEBROW, T_META, T_NOTE,
+    T_PAGE_TITLE, T_SECTION, T_SMALL, TOGGLE_ROW, TOP_BAR, Theme, W,
 };
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets::{self, RAIL_SETTINGS};
@@ -75,6 +75,10 @@ enum Row {
     Note(Vec<String>),
     /// A panel's row (usage, connection, …), laid out at the page's width.
     Panel(Box<panel::Laid>),
+    /// Text size: its step.
+    TextSize(usize),
+    /// A line of text in the body type as it now reads.
+    Sample,
 }
 
 impl Row {
@@ -83,6 +87,8 @@ impl Row {
             Row::Section(_) => SECTION_HEAD,
             Row::End => SECTION_END,
             Row::Themes(card) => GRID_PAD.0 + *card as f32 + GRID_PAD.1,
+            Row::TextSize(_) => (T_BODY.line() + T_META.line()).max(TOGGLE_ROW),
+            Row::Sample => T_BODY.line() + 22.0,
             Row::Switch(_, detail) => {
                 (T_BODY.line() + detail.len() as f32 * T_META.line()).max(TOGGLE_ROW)
             }
@@ -103,6 +109,11 @@ impl Row {
     }
 }
 
+/// A card summary's line at the current text size.
+fn summary_line() -> f32 {
+    (SUMMARY_LINE * theme::text_scale()).round()
+}
+
 /// A theme card's width (three to a row).
 fn card_width() -> f32 {
     ((width() - 2.0 * CARD_GAP) / 3.0).floor()
@@ -121,7 +132,7 @@ fn card_height() -> f32 {
         .max()
         .unwrap_or(1);
     let name = T_NOTE.line();
-    (CARD_PAD + SWATCH + SWATCH_GAP + name + SWATCH_GAP + lines as f32 * SUMMARY_LINE + CARD_PAD)
+    (CARD_PAD + SWATCH + SWATCH_GAP + name + SWATCH_GAP + lines as f32 * summary_line() + CARD_PAD)
         .round()
 }
 
@@ -216,6 +227,12 @@ fn build_rows(model: &Model, now: Instant) -> Vec<(f32, Row)> {
         };
         list.push(Row::Switch(toggle, detail));
     }
+    list.push(Row::End);
+    list.push(Row::Section("Text & transcript"));
+    list.push(Row::TextSize(ops::text_step(
+        model.persist.settings().text_scale,
+    )));
+    list.push(Row::Sample);
     list.push(Row::End);
     list.push(Row::Section("New chats"));
     let defaults = match &model.ops.defaults {
@@ -633,7 +650,93 @@ fn draw_row(
             }
         }
         Row::Panel(laid) => panel::draw_row(canvas, laid, x, y, width(), pressed),
+        Row::TextSize(step) => {
+            let h = row.height();
+            let (label, _) = ops::TEXT_SIZES[*step];
+            let text_top = y + ((h - T_BODY.line() - T_META.line()) / 2.0).round();
+            widgets::text(
+                canvas,
+                "Text size",
+                x,
+                T_BODY.baseline(text_top),
+                T_BODY,
+                p.text,
+                1.0,
+            );
+            widgets::text(
+                canvas,
+                label,
+                x,
+                T_META.baseline(text_top + T_BODY.line()),
+                T_META,
+                p.muted,
+                1.0,
+            );
+            let (small, track, large) = text_size_parts();
+            let last = ops::TEXT_SIZES.len() - 1;
+            let bold = |size: f32| T_CAPTION.weight(Weight::MonoBold).sized(size);
+            for (rect, size, enabled) in [(small, 34.0, *step > 0), (large, 60.0, *step < last)] {
+                let ty = bold(size);
+                widgets::text_centered(
+                    canvas,
+                    "A",
+                    rect.x + rect.w / 2.0,
+                    ty.baseline(y + (h - ty.line()) / 2.0),
+                    ty,
+                    p.secondary_accent,
+                    if enabled { 1.0 } else { 0.3 },
+                );
+            }
+            let cy = y + h / 2.0;
+            let bar = RectF::new(track.x, cy - 8.0, track.w, 16.0);
+            canvas.fill_rrect(bar, 8.0, c.switch_off, 1.0);
+            let knob_x = knob_x(track, *step);
+            canvas.fill_rrect(
+                RectF::new(bar.x, bar.y, knob_x - bar.x, bar.h),
+                8.0,
+                p.accent,
+                1.0,
+            );
+            canvas.fill_circle(knob_x, cy, 24.0, p.accent, 1.0);
+        }
+        Row::Sample => {
+            let baseline = T_BODY.baseline(y + 11.0);
+            let w = widgets::text(
+                canvas,
+                "The quick brown fox · ",
+                x,
+                baseline,
+                T_BODY,
+                p.muted,
+                1.0,
+            );
+            widgets::text(
+                canvas,
+                "tok/s",
+                x + w,
+                baseline,
+                T_BODY,
+                p.secondary_accent,
+                1.0,
+            );
+        }
     }
+}
+
+/// The text size controls (page x; the row's full height): the small A,
+/// the track, the large A.
+fn text_size_parts() -> (RectF, RectF, RectF) {
+    let right = W - SETTINGS_PAD.1;
+    let large = RectF::new(right - 110.0, 0.0, 110.0, 0.0);
+    let track = RectF::new(large.x - 330.0, 0.0, 330.0, 0.0);
+    let small = RectF::new(track.x - 110.0, 0.0, 110.0, 0.0);
+    (small, track, large)
+}
+
+/// Where the knob is for `step` on `track`.
+fn knob_x(track: RectF, step: usize) -> f32 {
+    let last = (ops::TEXT_SIZES.len() - 1) as f32;
+    (track.x + 24.0 + (track.w - 48.0) * step as f32 / last).round()
 }
 
 /// A theme card (PAR-323) in its own palette: three swatches (accent,
@@ -691,12 +794,13 @@ fn theme_card(canvas: &mut Canvas, theme: &Theme, rect: RectF, current: bool, pr
         );
     }
     y += name.line() + SWATCH_GAP;
-    for (index, line) in summary_lines(theme).iter().enumerate() {
+    let line = summary_line();
+    for (index, text) in summary_lines(theme).iter().enumerate() {
         widgets::text(
             canvas,
-            line,
+            text,
             x,
-            T_META.baseline(y + index as f32 * SUMMARY_LINE - (T_META.line() - SUMMARY_LINE) / 2.0),
+            T_META.baseline(y + index as f32 * line - (T_META.line() - line) / 2.0),
             T_META.weight(Weight::Mono),
             t.muted,
             1.0,
@@ -732,6 +836,27 @@ pub fn hit(model: &Model, view: &ViewState, x: f32, y: f32, now: Instant) -> Opt
                 .map(|t| Action::Ops(ops::Act::SetTheme(t.id)))
         }
         Row::Switch(toggle, _) => Some(Action::Ops(ops::Act::Toggle(toggle))),
+        Row::TextSize(step) => {
+            let (small, track, large) = text_size_parts();
+            let last = ops::TEXT_SIZES.len() - 1;
+            // The track's ends are its own: the knob's last place is near.
+            if x >= large.x {
+                Some(Action::Ops(ops::Act::TextSize((step + 1).min(last))))
+            } else if x >= track.x {
+                let nearest = (0..=last)
+                    .min_by(|a, b| {
+                        (knob_x(track, *a) - x)
+                            .abs()
+                            .total_cmp(&(knob_x(track, *b) - x).abs())
+                    })
+                    .unwrap_or(step);
+                Some(Action::Ops(ops::Act::TextSize(nearest)))
+            } else if x >= small.x - 20.0 {
+                Some(Action::Ops(ops::Act::TextSize(step.saturating_sub(1))))
+            } else {
+                None
+            }
+        }
         Row::Panel(laid) => {
             let mut laid = *laid;
             laid.top = row_y;
@@ -946,6 +1071,18 @@ mod tests {
             hit(&model, &view, 1030.0, 60.0, now),
             Some(Action::Nav(Nav::CloseSettings))
         );
+        // Text size: the track's ends are its first and last steps, the
+        // A's a step down and up.
+        let size = at(&model, |r| matches!(r, Row::TextSize(_))) + 20.0;
+        let (small, track, large) = text_size_parts();
+        let tap = |x: f32| match hit(&model, &view, x, size, now) {
+            Some(Action::Ops(ops::Act::TextSize(step))) => Some(step),
+            _ => None,
+        };
+        assert_eq!(tap(track.x + 4.0), Some(0));
+        assert_eq!(tap(track.x + track.w - 4.0), Some(5));
+        assert_eq!(tap(large.x + 50.0), Some(3));
+        assert_eq!(tap(small.x + 50.0), Some(1));
     }
 
     #[test]

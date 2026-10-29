@@ -276,6 +276,15 @@ are discarded.
   over the transcript in its own columns; it steps aside while the
   transcript moves (a floating button over moving rows would cost its rows
   in every frame of a scroll) and fades back in once it is still.
+- **Chips** (E, `sheets/chips.rs`: usage at 20 % or less, the aside, tasks)
+  stay under the chat header while the transcript moves: a page-level
+  floating overlay that says its columns (`Overlay::columns`), so a frame
+  draws it again only there (`FrameDamage::areas`, also where a page move
+  carried its old pixels) and sends rows and areas in one upload
+  (`Presenter::present_rows_and_areas`). Their shadow is compact, as the
+  jump button's. Measured dragging a tool-heavy chat with the usage chip
+  showing, draw and present: median 2.0-2.2 ms a frame, p95 6.7-8.4 ms;
+  without it 1.8-1.9 ms, p95 5.2-7.3 ms.
 - **The list's rows.** The rows (`sidebar::Layout`) are rebuilt only when
   rows may come, go or move (a pin, a sort order, a folder opened, the
   search), and folder activity is added up once per change
@@ -387,7 +396,11 @@ additions are the only shared edits.
   pauses, `drafts.rs`) through `persist.section(DRAFTS, "drafts")`. After changing
   the theme or text size call `theme::set_current(theme::by_id(id))` /
   `theme::set_text_scale(s)`: the generation changes, every layout cache is
-  dropped and the next frame is drawn whole.
+  dropped and the next frame is drawn whole. Text size (E, Settings) has
+  the iPhone's first six steps, `ops::TEXT_SIZES` (Extra small 0.82 to XXL
+  1.36; its Accessibility sizes are left out, the bars keep their
+  heights); the transcript's body text is `T_BODY` (`markdown_layout::body()`),
+  so it follows too.
 
 ### View: pages, frames and pieces
 
@@ -437,14 +450,20 @@ additions are the only shared edits.
   `draw`, `item_at`, `activate` → `Reply::{Action, Close, CloseWith, …}`,
   `key`), `sheet::action_sheet(ActionList::new(title, items))` with
   `ActionItem::new(label, action).icon(..).detail(..).tone(..)`,
-  `sheet::prompt_sheet(Prompt::new(..))`, `menu::AnchoredMenu::new(anchor, items, cut_out)`,
+  `sheet::prompt_sheet(Prompt::new(..))` (one line),
+  `textarea::sheet(TextArea::new(title, message, text, confirm, submit))`
+  (several lines on Moon's multiline keyboard, Return a line break, grows
+  to seven lines then scrolls; `.allow_empty()` for a text that may be
+  cleared), `menu::AnchoredMenu::new(anchor, items, cut_out)`,
   `menu::Confirm::new(title, message, confirm, action)`,
   `toast::Snackbar::new(text, button, action, lift)`, `ui.toast(..)`,
   `reader::open(&mut ui, title, text)`. An item's action closes its menu or
   sheet first. A `SheetContent` can say when it next changes by itself
   (`wake`, a ticking time) and what to do once it has gone (`farewell`: the
   stack collects them, the event loop performs them; the Accounts panel
-  stops watching so). E's panels are `sheets::panel`: rows (sections,
+  stops watching so). A floating overlay that belongs to the page
+  (`page_level()`: E's chips) is hidden under a modal one and takes no
+  touches then. E's panels are `sheets::panel`: rows (sections,
   key/value, navigation, task rows, rail cards, bars, buttons) built from
   the model each frame (`Panel::{Goal, Activity, Chrono, Btw, SystemPrompt,
   Usage, Accounts, Connection, Tokens, Find}`), opened with
@@ -482,7 +501,9 @@ additions are the only shared edits.
   the like.
 - **Other interfaces.** `chat_header::subtitle(model)` (PAR-009: the
   connection, a failed load, a retry, a wait, Working, Syncing, else the
-  model label; " · 1.0k ctx" after it), `ui::haptic(Haptic)`, `ui::open_url(url)` (Moon's
+  model label; " · 1.0k ctx" after it), `Effect::Reveal(stamp)` (the chat
+  scrolled to an entry, its top 8 pt under the header, following stopped:
+  `ViewState::reveal`; a Find in chat match), `ui::haptic(Haptic)`, `ui::open_url(url)` (Moon's
   Browser, http and https only), `clipboard::copy(text)`,
   `clipboard::paste()`.
 

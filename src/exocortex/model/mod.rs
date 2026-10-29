@@ -114,6 +114,9 @@ pub enum Effect {
     /// Moon's status bar takes the theme's background again (E: a theme
     /// change).
     StatusBar,
+    /// The chat scrolls to an entry (its stamp) and stops following (E: a
+    /// Find in chat match).
+    Reveal(u64),
 }
 
 /// What the model asks of the interface: overlays to open or close and
