@@ -11,6 +11,7 @@ pub mod dictation;
 pub mod drafts;
 pub mod editor;
 pub mod find;
+pub mod fold;
 pub mod footer;
 pub mod gesture;
 pub mod handoff;
