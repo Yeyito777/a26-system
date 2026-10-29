@@ -5,8 +5,13 @@
 
 #![allow(dead_code)]
 
+pub mod env;
+pub mod inline;
 pub mod queue_targets;
+pub mod registry;
+pub mod run;
 pub mod search;
+pub mod syntax;
 
 use std::collections::HashMap;
 

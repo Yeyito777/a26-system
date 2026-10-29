@@ -51,6 +51,8 @@ const CARET_W: f32 = 5.0;
 const CARET_H: f32 = 52.0;
 /// The handles' dots.
 const HANDLE_R: f32 = 13.0;
+/// The Run capsule's width (its height is a button face's).
+const RUN_W: f32 = 133.0;
 /// The spinner in a button's face, and how often it is drawn a step on
 /// (20 steps a turn).
 const SPINNER: f32 = 39.0;
@@ -83,6 +85,10 @@ pub enum Primary {
     Busy,
     /// Nothing typed: dictate (PAR-180, PAR-243).
     Mic,
+    /// A command is typed: Run it (PAR-183).
+    Run {
+        enabled: bool,
+    },
 }
 
 /// The composer's trailing buttons.
@@ -102,6 +108,10 @@ pub fn trailing(model: &Model) -> Trailing {
         Primary::Mic
     } else if !typed {
         Primary::None
+    } else if model.composer.is_command {
+        Primary::Run {
+            enabled: model.ready,
+        }
     } else if streaming {
         Primary::Queue {
             enabled: model.ready,
@@ -439,7 +449,7 @@ pub fn hit(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) -> Option
     }
     if near(geometry.send, x, y) {
         match geometry.trailing.primary {
-            Primary::Send { .. } | Primary::Queue { .. } => {
+            Primary::Send { .. } | Primary::Queue { .. } | Primary::Run { .. } => {
                 return Some(Hit::Action(Action::Composer(Act::Send)));
             }
             Primary::Mic => return Some(Hit::Action(Action::Composer(Act::Mic))),
@@ -836,6 +846,40 @@ fn draw_trailing(
                 sx,
                 sy,
                 Style::new(if down { 46.0 } else { 52.0 }, icon).stroke(5.0),
+            );
+        }
+        Primary::Run { enabled } => {
+            let down = enabled && send_down;
+            let (fill, ink) = if enabled {
+                (p.accent, p.on_accent)
+            } else {
+                (c.send_disabled_face, c.send_disabled_icon)
+            };
+            let (w, h) = if down {
+                (RUN_W * 0.88, COMPOSER_FACE * 0.88)
+            } else {
+                (RUN_W, COMPOSER_FACE)
+            };
+            canvas.fill_rrect(
+                RectF::new(
+                    (sx - w / 2.0).round(),
+                    (sy - h / 2.0).round(),
+                    w.round(),
+                    h.round(),
+                ),
+                (h / 2.0).round(),
+                fill,
+                1.0,
+            );
+            let bold = T_NOTE.weight(crate::text::Weight::MonoBold);
+            widgets::text_centered(
+                canvas,
+                "Run",
+                sx,
+                T_NOTE.baseline(sy - T_NOTE.line() / 2.0),
+                bold,
+                ink,
+                1.0,
             );
         }
         Primary::Mic => {
