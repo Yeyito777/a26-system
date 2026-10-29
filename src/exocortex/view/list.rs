@@ -1327,6 +1327,7 @@ pub fn list_frame(
     (
         &state,
         no_results,
+        footer(model),
         height as i32,
         theme::generation(),
         matches!(state, State::Loading(_)).then(|| (anim::phase(now, 700) * 30.0) as u32),
@@ -1370,6 +1371,35 @@ pub fn list_frame(
         lifted: lifted_row,
         pull: pull(model, offset, now),
     })
+}
+
+/// The daemon's update status under the list (PAR-086), when it asks for
+/// something.
+fn footer(model: &Model) -> Option<&'static str> {
+    match model.sidebar.update_status.as_deref() {
+        Some("update_available") => Some("↑ Daemon update available"),
+        Some("restart_needed") => Some("↻ Daemon restart needed"),
+        _ => None,
+    }
+}
+
+/// The footer at `y`: a hairline, then the status in the accent.
+fn draw_footer(canvas: &mut Canvas, label: &str, y: f32) {
+    if !widgets::shows(canvas, y, y + 70.0) {
+        return;
+    }
+    let p = theme::p();
+    widgets::hairline(canvas, LIST_PAD, RIGHT, y, theme::c().rule_list);
+    let ty = T_META.weight(Weight::MonoBold).tracked(1.2);
+    widgets::text(
+        canvas,
+        label,
+        LIST_PAD,
+        ty.baseline(y + 14.0),
+        ty,
+        p.accent,
+        1.0,
+    );
 }
 
 /// How far past the top a pull must go to refresh (the iPhone's 56 pt of
@@ -1633,6 +1663,11 @@ fn draw_list_with(
             }
             if offset < 0.0 {
                 draw_pull(canvas, model, top, -offset, now);
+            }
+            if let Some(label) = footer(model)
+                && !layout.rows.is_empty()
+            {
+                draw_footer(canvas, label, content_top + layout.height + S1);
             }
             if searching && layout.rows.len() <= 1 {
                 draw_no_results(

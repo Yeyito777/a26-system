@@ -278,6 +278,9 @@ pub struct Sidebar {
     /// `now` through it, so a frame and its redraw agree whatever the real
     /// clock does meanwhile (and tests are deterministic).
     pub clock: Option<(Instant, u64)>,
+    /// The daemon's update status (`update_status`, a pong's
+    /// `updateStatus`): `update_available`, `restart_needed`, … (PAR-086).
+    pub update_status: Option<String>,
     /// The list could not be loaded (the state's Retry asks again).
     pub error: Option<String>,
     /// A row on screen has a pulsing dot (the view's frames).
@@ -479,6 +482,18 @@ impl Sidebar {
             }
             // Queued counts and global-idle waits show on rows.
             Event::QueueUpdated { .. } => self.changed(),
+            Event::UpdateStatus { status }
+            | Event::Pong {
+                update_status: Some(status),
+                ..
+            } => {
+                let status = status.as_str().map(str::to_owned);
+                if status.is_none() || status == self.update_status {
+                    return false;
+                }
+                self.update_status = status;
+                self.changed();
+            }
             _ => return false,
         }
         true
@@ -2076,6 +2091,34 @@ mod tests {
         list(&mut model, Act::Open("p".into()));
         assert_eq!(model.sidebar.unread_at_open.get("p"), Some(&true));
         assert_eq!(model.sidebar.unread_at_open.get("k"), Some(&false));
+    }
+
+    #[test]
+    fn the_daemons_update_status_is_kept_for_the_footer() {
+        let mut model = model(&[conv("a", "")], &[]);
+        assert!(
+            model.on_connected()[0]["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&"update-status-push".into())
+        );
+        event(
+            &mut model,
+            r#"{"type":"update_status","status":"update_available"}"#,
+        );
+        assert_eq!(
+            model.sidebar.update_status.as_deref(),
+            Some("update_available")
+        );
+        // A barrier's pong carries it too.
+        event(
+            &mut model,
+            r#"{"type":"pong","reqId":"x","updateStatus":"restart_needed"}"#,
+        );
+        assert_eq!(
+            model.sidebar.update_status.as_deref(),
+            Some("restart_needed")
+        );
     }
 
     #[test]

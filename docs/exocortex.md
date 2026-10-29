@@ -26,9 +26,10 @@ unknown events and fields are ignored, missing ones take defaults
 parse).
 
 The app declares `targeted-unwind`, `sidebar-reorder-delta`,
-`sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`
-and `sidebar-incremental` (with a tree `sidebarView` naming the folders open
-on the list), then `ping`s.
+`sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`,
+`sidebar-incremental` (with a tree `sidebarView` naming the folders open on
+the list) and `update-status-push` (the daemon's update status, shown under
+the list: "Daemon update available", "Daemon restart needed"), then `ping`s.
 Its bootstrap, and every reconnection's, is that, with `load_conversation`
 for the conversation on screen before the `ping`, in the same write, so its
 window comes ahead of the list. A window or an older page the daemon has not
