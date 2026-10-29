@@ -284,6 +284,13 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
     }
     items.push(model_item);
     items.push(ActionItem::new("Find in chat", Action::Ops(ops::Act::OpenFind)).icon(Icon::Search));
+    // D's Edit… (PAR-268): queued and sent messages, instructions; where
+    // fake-09 has it.
+    items.push(
+        ActionItem::new("Edit…", Action::Composer(composer::Act::EditPicker))
+            .icon(Icon::Pencil)
+            .detail("Rewind a sent message or edit the queue"),
+    );
     let tasks = model.activity_count(&id);
     items.push(
         ActionItem::new("Activity & tasks", Action::Ops(ops::Act::OpenActivity))
@@ -364,12 +371,6 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
         } else {
             "Every tool call and notification"
         }),
-    );
-    // D's Edit… (PAR-268): queued and sent messages, instructions.
-    items.push(
-        ActionItem::new("Edit…", Action::Composer(composer::Act::EditPicker))
-            .icon(Icon::Pencil)
-            .detail("Rewind a sent message or edit the queue"),
     );
     items.push(
         ActionItem::new("Copy conversation id", Action::Ui(UiAct::Copy(id.clone())))
@@ -613,6 +614,7 @@ mod tests {
                 "Retry opening conversation",
                 "Model, effort & speed…",
                 "Find in chat",
+                "Edit…",
                 "Activity & tasks",
                 "Goal",
                 "Chrono schedules",
@@ -621,7 +623,6 @@ mod tests {
                 "Usage limits",
                 "Reload conversation",
                 "Show all work",
-                "Edit…",
                 "Copy conversation id"
             ]
         );
