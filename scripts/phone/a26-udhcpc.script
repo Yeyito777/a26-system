@@ -54,13 +54,22 @@ configure_network() {
     [ "$mask" -le 32 ] || return 1
     if [ -n "${broadcast:-}" ]; then valid_ipv4 "$broadcast" || return 1; fi
     $IP link set dev "$interface" up
-    $IP -4 addr flush dev "$interface"
-    $IP -4 addr add "$ip/$mask" dev "$interface" ${broadcast:+broadcast "$broadcast"}
+    # A renewal that keeps the address must leave it alone: removing it, even
+    # for an instant, makes Android's netd destroy every socket bound to it
+    # (ECONNABORTED), which dropped every SSH link and stream at each renewal
+    # (half the lease: every 10 minutes on UofT).
+    current=$($IP -4 -o addr show dev "$interface" | $BB awk '{ print $4 }')
+    if [ "$current" != "$ip/$mask" ]; then
+        $IP -4 addr flush dev "$interface"
+        $IP -4 addr add "$ip/$mask" dev "$interface" ${broadcast:+broadcast "$broadcast"}
+    fi
     connected=$($IP -4 route show dev "$interface" scope link | $BB awk 'NR == 1 { print $1 }')
     [ -n "$connected" ]
     $IP route replace table "$table" "$connected" dev "$interface" scope link src "$ip"
-    clear_native_rule
-    $IP rule add priority "$rule_priority" lookup "$table"
+    if ! $IP rule | $BB grep -qx "$rule_priority:[[:space:]]*from all lookup $table[[:space:]]*"; then
+        clear_native_rule
+        $IP rule add priority "$rule_priority" lookup "$table"
+    fi
 
     gateway=
     set -- ${router:-}
