@@ -232,6 +232,9 @@ struct Input {
     dragging: Option<ScrollArea>,
     /// The horizontal scroller a sideways drag moves, and the finger's last x.
     sideways: Option<(u64, f32)>,
+    /// The inner scroller a vertical drag moves (a tall table's rows, C1),
+    /// and the finger's last y.
+    inner: Option<(u64, f32)>,
     /// Moon's keyboard was asked for.
     keyboard: bool,
     /// …by an overlay (a prompt), which puts it away when it goes.
@@ -261,6 +264,11 @@ impl Context<'_> {
             }
             // The tapped row stays under the finger as it opens.
             Action::Chat(chat::Act::ToggleExpanded(_)) => self.view.follow = false,
+            // Back to the newest message at once, any fling stopped.
+            Action::Chat(chat::Act::JumpToLatest) => {
+                self.view.chat_scroll.reset();
+                self.view.follow = true;
+            }
             Action::Nav(_) if self.input.keyboard => self.hide_keyboard(),
             _ => {}
         }
@@ -426,12 +434,29 @@ impl Context<'_> {
             Gesture::DragStart {
                 axis: Axis::Vertical,
                 y,
+                start_x,
                 start_y,
                 edge: false,
                 ..
             } => {
                 self.input.pressed = None;
                 self.view.lifted = None;
+                // On a tall table that can scroll that way: its rows move.
+                self.input.inner = view::inner_vertical_target(
+                    self.model,
+                    self.view,
+                    height,
+                    (start_x, start_y),
+                    y - start_y,
+                    now,
+                )
+                .map(|key| (key, start_y));
+                if let Some((key, last)) = &mut self.input.inner {
+                    view::inner_drag(self.view, *key, y - *last);
+                    *last = y;
+                    self.input.dragging = None;
+                    return true;
+                }
                 self.input.dragging = view::scroll_area(self.model, self.view, height, start_y);
                 match self.input.dragging {
                     Some(ScrollArea::List) => {
@@ -481,6 +506,11 @@ impl Context<'_> {
                 y,
                 ..
             } => {
+                if let Some((key, last)) = &mut self.input.inner {
+                    view::inner_drag(self.view, *key, y - *last);
+                    *last = y;
+                    return true;
+                }
                 match self.input.dragging {
                     Some(ScrollArea::List) => {
                         let max = view::list_max(self.model, height);
@@ -525,6 +555,7 @@ impl Context<'_> {
                     }
                 }
                 self.input.sideways = None;
+                self.input.inner = None;
                 true
             }
             Gesture::Tap { x, y } => {
@@ -977,10 +1008,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         for command in commands {
             link.send(command);
         }
-        if model.page == Page::Chat && view.near_top(now) {
-            for command in model.load_older() {
-                link.send(command);
-            }
+        // Older history near the top, tool outputs near the screen (C2).
+        for command in view::transcript::requests(&mut model, &mut view, height, now) {
+            link.send(command);
         }
 
         let mut flinging = match model.page {

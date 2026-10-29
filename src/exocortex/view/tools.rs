@@ -1,35 +1,67 @@
-//! Tool call rows (WP-C2): one per call (opened: its input and output), or
-//! one folded row for a run of calls, labelled as the TUI labels tools, in
-//! Whale's colours (their redesign, §3.6.10, is C2's).
+//! Tool call rows (WP-C2, roadmap §3.6.10, PAR-123–125, 146): a box in
+//! the tool's colour with its rail, the call's label and summary (at most
+//! three lines folded), ERR or a spinner, and opened, its output with Read
+//! full output and Copy; a run of calls folds into one row that opens to
+//! them.
 
 use std::collections::HashMap;
 
 use crate::gfx::{RectF, Rgb};
-use crate::text::{self, Weight};
+use crate::text::Weight;
 
+use super::super::markdown::{Span, Style};
+use super::super::model::chat::{Chat, OUTPUT_MISSING};
 use super::super::model::{Action, chat};
-use super::super::proto::{Block, ToolStyle};
-use super::super::theme::{self, TRANSCRIPT_PAD as MARGIN};
+use super::super::proto::{Block, Presentation, ToolStyle};
+use super::super::theme::{
+    self, HAIRLINE, RAIL, T_CAPTION, T_EYEBROW, T_SMALL, TRANSCRIPT_PAD as MARGIN, mix,
+};
+use super::super::ui::icons::Icon;
 use super::W;
-use super::markdown_layout::{SMALL, lay_code};
-use super::ops::{Laid, Op};
+use super::blocks::{Mark, MarkKind, Piece, push_runs, text_op};
+use super::markdown_layout::wrap;
+use super::ops::Op;
 use super::transcript::{Context, ToolRef};
 
-// Tool rows.
-pub(crate) const TOOL_ROW: f32 = 84.0;
 /// Runs of this many tool calls fold into one row.
 pub(crate) const GROUP_MIN: usize = 3;
+/// A tool row's head at least (44 pt).
+pub(crate) const TOOL_ROW: f32 = 122.0;
+/// Head padding: top, right, bottom, left.
+const PAD: (f32, f32, f32, f32) = theme::TOOL_PAD;
+/// The right column (ERR, the spinner, the chevron).
+const BADGES: f32 = 77.0;
+/// Summary rows shown folded.
+const FOLDED_ROWS: usize = 3;
+/// Rows shown at most opened (a whole script).
+const OPEN_ROWS: usize = 400;
+/// The output preview (PAR-125).
+pub(crate) const OUTPUT_PREVIEW: usize = 6000;
+const CHEVRON: f32 = 31.0;
+const SPINNER: f32 = 28.0;
+/// The actions row of an opened output.
+const ACTIONS: f32 = 122.0;
 
-/// The tool a summary names, as the TUI labels it: its style's label, an
-/// MCP server's name, or the tool's own name.
-pub(crate) fn tool_label(name: &str, styles: &HashMap<String, ToolStyle>) -> (String, Rgb) {
-    let lower = name.to_ascii_lowercase();
+/// The tool a call names, as the TUI labels it (PAR-146): the call's own
+/// style, the daemon's registry, an MCP server's name, else its name; in
+/// its colour, else the theme's tool colour.
+pub(crate) fn tool_label(
+    name: &str,
+    styles: &HashMap<String, ToolStyle>,
+    own: Option<&ToolStyle>,
+) -> (String, Rgb) {
     let p = theme::p();
-    if let Some(style) = styles.get(&lower) {
-        return (
-            style.label.clone(),
-            theme::parse_hex(&style.color).unwrap_or(p.tool),
-        );
+    let lower = name.to_ascii_lowercase();
+    if let Some(style) = own
+        .filter(|style| style.name.eq_ignore_ascii_case(name) || style.name.is_empty())
+        .or_else(|| styles.get(&lower))
+    {
+        let label = if style.label.is_empty() {
+            name.to_owned()
+        } else {
+            style.label.clone()
+        };
+        return (label, theme::parse_hex(&style.color).unwrap_or(p.tool));
     }
     if let Some(rest) = name.strip_prefix("mcp__")
         && let Some((server, _)) = rest.split_once("__")
@@ -37,29 +69,23 @@ pub(crate) fn tool_label(name: &str, styles: &HashMap<String, ToolStyle>) -> (St
         let server = server.trim_start_matches("claude_ai_").replace('_', " ");
         return (server, p.tool);
     }
-    (name.to_owned(), p.secondary_accent)
+    (name.to_owned(), p.tool)
 }
 
-/// What a tool call shows on its row: its summary, else the input's most
-/// telling field.
-pub(crate) fn tool_summary(summary: &str, input: &serde_json::Value) -> String {
-    // One line, and no longer than a row can show (a summary may be a whole
-    // script).
-    let line = |text: &str| {
-        let mut out = String::new();
-        for word in text.split_whitespace() {
-            if out.len() >= 240 {
-                break;
-            }
-            if !out.is_empty() {
-                out.push(' ');
-            }
-            out.push_str(word);
-        }
-        out
-    };
+/// What a call shows after its label: `presentation.detail`, its summary,
+/// else the input's most telling field.
+pub(crate) fn tool_detail(
+    summary: &str,
+    input: &serde_json::Value,
+    presentation: Option<&Presentation>,
+) -> String {
+    if let Some(detail) = presentation.and_then(|p| p.detail.as_ref())
+        && !detail.trim().is_empty()
+    {
+        return detail.trim_end().to_owned();
+    }
     if !summary.trim().is_empty() {
-        return line(summary);
+        return summary.trim_end().to_owned();
     }
     for key in [
         "command",
@@ -72,26 +98,10 @@ pub(crate) fn tool_summary(summary: &str, input: &serde_json::Value) -> String {
         "prompt",
     ] {
         if let Some(value) = input.get(key).and_then(serde_json::Value::as_str) {
-            return line(value);
+            return value.trim_end().to_owned();
         }
     }
     String::new()
-}
-
-pub(crate) fn tool_input_text(name: &str, input: &serde_json::Value) -> Vec<String> {
-    if let Some(command) = input.get("command").and_then(serde_json::Value::as_str)
-        && matches!(
-            name.to_ascii_lowercase().as_str(),
-            "bash" | "shell" | "exec_command"
-        )
-    {
-        return command.lines().map(str::to_owned).collect();
-    }
-    serde_json::to_string_pretty(input)
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_owned)
-        .collect()
 }
 
 /// A run of tool calls (and their results) starting at `from`.
@@ -110,150 +120,431 @@ pub(crate) fn tool_run(blocks: &[Block], from: usize) -> (usize, Vec<usize>) {
     (end, calls)
 }
 
-/// One tool call's row (and, opened, its input and output), from its top.
+/// What an opened row's body shows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Output {
+    /// Still running (no result yet).
+    Running,
+    /// The output (known, fetched or empty).
+    Text(String),
+    Loading,
+    Failed(String),
+    /// Not asked for yet (asked for as the row opens).
+    Unknown,
+}
+
+/// The output a call's result has here.
+pub(crate) fn output_state(chat: &Chat, tool: &ToolRef, blocks: &[Block], live: bool) -> Output {
+    let Some(Block::ToolResult { output, .. }) = tool.result.map(|at| &blocks[at]) else {
+        return Output::Running;
+    };
+    let id = tool.key.trim_start_matches("tool:");
+    if !output.is_empty() {
+        return Output::Text(output.clone());
+    }
+    if let Some(fetched) = chat.outputs.get(id) {
+        return Output::Text(fetched.clone());
+    }
+    if let Some(error) = chat.output_errors.get(id) {
+        return Output::Failed(error.clone());
+    }
+    if chat.outputs_requested.contains(id) {
+        return Output::Loading;
+    }
+    // Streamed results carry their output: empty is empty.
+    if live {
+        Output::Text(String::new())
+    } else {
+        Output::Unknown
+    }
+}
+
+/// The call's lines: label (Bold) and detail, wrapped to `width`; folded,
+/// at most three rows, and how many more there are.
+fn call_lines(
+    label: &str,
+    detail: &str,
+    width: f32,
+    open: bool,
+) -> (Vec<Vec<super::markdown_layout::Run>>, usize) {
+    let size = T_CAPTION.px();
+    let advance = crate::text::measure("M", Weight::Mono, size).max(1.0);
+    let columns = ((width / advance).floor() as usize).max(8);
+    let keep = if open { OPEN_ROWS } else { FOLDED_ROWS };
+    // Wrap only what can show (a summary may be a whole script); count the
+    // rest's rows from its lengths.
+    let budget = columns * (keep + 1);
+    let mut shown = String::new();
+    let mut rest_rows = 0;
+    for (index, line) in detail.split('\n').enumerate() {
+        let chars = line.chars().count()
+            + if index == 0 {
+                label.chars().count() + 1
+            } else {
+                0
+            };
+        if index <= keep {
+            if index > 0 {
+                shown.push('\n');
+            }
+            shown.extend(line.chars().take(budget));
+            rest_rows += chars.saturating_sub(budget).div_ceil(columns);
+        } else {
+            rest_rows += chars.div_ceil(columns).max(1);
+        }
+    }
+    let mut spans = vec![Span {
+        text: label.to_owned(),
+        style: Style::Bold,
+    }];
+    if !shown.is_empty() {
+        spans.push(Span {
+            text: format!(" {shown}"),
+            style: Style::Plain,
+        });
+    }
+    let mut lines = wrap(&spans, width, size);
+    let total = lines.len() + rest_rows;
+    let hidden = total.saturating_sub(keep);
+    lines.truncate(keep);
+    (lines, hidden)
+}
+
+/// The bytes of `output` a row previews (on a character boundary).
+fn preview(output: &str) -> (&str, bool) {
+    if output.len() <= OUTPUT_PREVIEW {
+        return (output, false);
+    }
+    let mut end = OUTPUT_PREVIEW;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&output[..end], true)
+}
+
+/// Whether a row offers its disclosure: a result whose output is not known
+/// to be empty.
+pub(crate) fn expandable(output: &Output) -> bool {
+    match output {
+        Output::Running => false,
+        Output::Text(text) => !text.trim().is_empty(),
+        _ => true,
+    }
+}
+
+/// One tool call's row (and, opened, its output), from its top.
 pub(crate) fn lay_tool(
     blocks: &[Block],
     tool: &ToolRef,
     indent: f32,
     open: bool,
+    output: &Output,
     context: &Context,
-) -> Laid {
-    let mut laid = Laid::default();
+) -> Piece {
+    let mut piece = Piece::default();
     let Block::ToolCall {
         tool_call_id,
         tool_name,
         input,
         summary,
+        presentation,
         ..
     } = &blocks[tool.call]
     else {
-        return laid;
+        return piece;
     };
-    let x = MARGIN + indent;
-    let (label, color) = tool_label(tool_name, context.styles);
-    let result = tool.result.and_then(|at| match &blocks[at] {
-        Block::ToolResult {
-            output, is_error, ..
-        } => Some((output.as_str(), *is_error)),
-        _ => None,
-    });
     let p = theme::p();
-    let c = theme::c();
-    let base = TOOL_ROW / 2.0 + 12.0;
-    let label_w = text::measure(&label, Weight::MonoBold, SMALL);
-    laid.ops.push(Op::Text {
-        x,
-        baseline: base,
-        text: label,
-        weight: Weight::MonoBold,
-        size: SMALL,
-        tracking: 0.0,
-        color,
-        alpha: 1.0,
-    });
-    let status_w = 70.0;
-    let summary = tool_summary(summary, input);
-    let fitted = text::fit(
-        &summary,
-        Weight::Mono,
-        SMALL,
-        W - MARGIN - status_w - (x + label_w + 18.0),
+    let app = p.app_background;
+    let (label, color) = tool_label(
+        tool_name,
+        context.styles,
+        presentation.as_ref().and_then(|p| p.tool_style.as_ref()),
     );
-    laid.ops.push(Op::Text {
-        x: x + label_w + 18.0,
-        baseline: base,
-        text: fitted,
-        weight: Weight::Mono,
-        size: SMALL,
-        tracking: 0.0,
-        color,
+    let failed = tool
+        .result
+        .is_some_and(|at| matches!(&blocks[at], Block::ToolResult { is_error: true, .. }));
+    let x0 = MARGIN + indent;
+    let x1 = W - MARGIN;
+    let width = x1 - x0;
+    let tx = x0 + HAIRLINE + PAD.3;
+    let text_w = x1 - HAIRLINE - PAD.1 - BADGES - tx;
+    let detail = tool_detail(summary, input, presentation.as_ref());
+    let expand = expandable(output);
+    let open = open && expand;
+    let (lines, hidden) = call_lines(&label, &detail, text_w, open);
+    let ty = T_CAPTION;
+    let line_h = ty.line();
+    let top = HAIRLINE + PAD.0;
+    let rows = lines.len() + usize::from(hidden > 0);
+    let head = (top + rows as f32 * line_h + PAD.2 + HAIRLINE).max(TOOL_ROW);
+    let ops = &mut piece.laid.ops;
+    // The box and its rail; the body's rows are added below.
+    ops.push(Op::Rect {
+        rect: RectF::new(x0, 0.0, width, 0.0),
+        radius: 0.0,
+        color: mix(color, 5, app),
         alpha: 1.0,
     });
-    match result {
-        Some((_, true)) => laid.ops.push(Op::Text {
-            x: W - MARGIN - 100.0,
-            baseline: base,
-            text: "ERR".into(),
-            weight: Weight::MonoBold,
-            size: SMALL,
-            tracking: 0.0,
-            color: p.error,
-            alpha: 1.0,
-        }),
-        None => laid.ops.push(Op::Text {
-            x: W - MARGIN - 70.0,
-            baseline: base,
-            text: "…".into(),
-            weight: Weight::Mono,
-            size: SMALL,
-            tracking: 0.0,
+    let after = push_runs(ops, &lines, tx, top, ty, Some(color), 1.0);
+    if failed && let Some(last) = lines.last() {
+        let end = tx + super::markdown_layout::line_width(last);
+        ops.push(text_op(
+            end + super::super::ui::widgets::measure(" ", ty),
+            ty.baseline(top + (lines.len() - 1) as f32 * line_h),
+            "✗",
+            ty,
+            p.error,
+        ));
+    }
+    if hidden > 0 {
+        ops.push(text_op(
+            tx,
+            ty.baseline(after),
+            &format!("… +{hidden} more lines"),
+            ty,
+            p.muted,
+        ));
+    }
+    let first_cy = top + line_h / 2.0;
+    let chevron_cx = x1 - HAIRLINE - PAD.1 - CHEVRON / 2.0;
+    if failed {
+        let err = ty.weight(Weight::MonoBold);
+        let w = super::super::ui::widgets::measure("ERR", err);
+        let right = if expand {
+            chevron_cx - CHEVRON / 2.0 - 17.0
+        } else {
+            x1 - HAIRLINE - PAD.1
+        };
+        ops.push(text_op(right - w, ty.baseline(top), "ERR", err, p.error));
+    }
+    if matches!(output, Output::Running) && context.live {
+        piece.marks.push(Mark {
+            y: first_cy - SPINNER / 2.0 - 2.0,
+            h: SPINNER + 4.0,
+            kind: MarkKind::Spinner {
+                cx: chevron_cx,
+                cy: first_cy,
+                size: SPINNER,
+                color: p.accent,
+                background: mix(color, 5, app),
+            },
+        });
+    }
+    if expand {
+        ops.push(Op::Icon {
+            icon: if open {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            },
+            cx: chevron_cx,
+            cy: first_cy,
+            size: CHEVRON,
             color: p.muted,
             alpha: 1.0,
-        }),
-        Some(_) => {}
+        });
+        piece.laid.hits.push((
+            RectF::new(x0, 0.0, width, head),
+            Action::Chat(chat::Act::ToggleExpanded(tool.key.clone())),
+        ));
     }
-    laid.ops.push(Op::Chevron {
-        x: W - MARGIN - 14.0,
-        cy: TOOL_ROW / 2.0,
-        open,
-    });
-    laid.hits.push((
-        RectF::new(0.0, 0.0, W, TOOL_ROW),
-        Action::Chat(chat::Act::ToggleExpanded(tool.key.clone())),
-    ));
-    laid.h = TOOL_ROW;
+    let mut h = head;
     if open {
-        let width = W - MARGIN - x;
-        let mut lines = tool_input_text(tool_name, input);
-        lines.truncate(40);
-        laid.h += lay_code(&mut laid.ops, &lines, x, width, laid.h, c.code_bg, 24) + 14.0;
-        let output = match result {
-            Some((output, _)) if !output.is_empty() => Some(output.to_owned()),
-            _ => context.chat.outputs.get(tool_call_id).cloned(),
-        };
-        let (lines, color) = match output {
-            Some(output) if output.trim().is_empty() => (vec!["No output.".to_owned()], p.muted),
-            Some(output) => (
-                output.lines().map(str::to_owned).collect(),
-                if result.is_some_and(|(_, error)| error) {
-                    p.error
-                } else {
-                    c.text_output
-                },
+        ops.push(Op::Rect {
+            rect: RectF::new(
+                x0 + HAIRLINE,
+                h - HAIRLINE,
+                width - 2.0 * HAIRLINE,
+                HAIRLINE,
             ),
-            None if result.is_none() => (vec!["Running…".to_owned()], p.muted),
-            None => (vec!["Loading output…".to_owned()], p.muted),
-        };
-        let box_top = laid.h;
-        let h = lay_code(&mut laid.ops, &lines, x, width, box_top, c.code_bg, 60);
-        for op in &mut laid.ops {
-            if let Op::Text {
-                baseline, color: c, ..
-            } = op
-                && *baseline > box_top
-                && *baseline < box_top + h
-            {
-                *c = color;
-            }
-        }
-        laid.h += h + 18.0;
+            radius: 0.0,
+            color: mix(color, 22, app),
+            alpha: 1.0,
+        });
+        h += body(&mut piece, tool_call_id, output, failed, (x0, x1), h);
     }
-    laid
+    let ops = &mut piece.laid.ops;
+    if let Op::Rect { rect, .. } = &mut ops[0] {
+        rect.h = h;
+    }
+    ops.push(Op::Border {
+        rect: RectF::new(x0, 0.0, width, h),
+        width: HAIRLINE,
+        color: mix(color, 28, app),
+    });
+    ops.push(Op::Rect {
+        rect: RectF::new(x0 + HAIRLINE, HAIRLINE, RAIL, h - 2.0 * HAIRLINE),
+        radius: 0.0,
+        color,
+        alpha: 1.0,
+    });
+    piece.laid.h = h;
+    piece
 }
 
-/// The folded row of a run of tool calls: how many, which tools, failures.
+/// An opened row's body from `top`: the actions and the output, or what
+/// stands for it. Returns its height.
+fn body(
+    piece: &mut Piece,
+    tool: &str,
+    output: &Output,
+    failed: bool,
+    (x0, x1): (f32, f32),
+    top: f32,
+) -> f32 {
+    let p = theme::p();
+    let c = theme::c();
+    let ty = T_SMALL;
+    let tx = x0 + HAIRLINE + 34.0;
+    let width = x1 - HAIRLINE - 34.0 - tx;
+    let ops = &mut piece.laid.ops;
+    match output {
+        Output::Text(text) if text.trim().is_empty() => {
+            ops.push(text_op(
+                tx,
+                ty.baseline(top + 22.0),
+                "No output.",
+                ty,
+                p.muted,
+            ));
+            22.0 + ty.line() + 22.0
+        }
+        Output::Text(text) => {
+            // Read full output, Copy.
+            let mut x = tx;
+            for (label, icon, action) in [
+                (
+                    "Read full output",
+                    Icon::FileText,
+                    chat::Act::ReadOutput(tool.into()),
+                ),
+                ("Copy", Icon::Copy, chat::Act::CopyOutput(tool.into())),
+            ] {
+                let w = 39.0 + 14.0 + super::super::ui::widgets::measure(label, ty);
+                ops.push(Op::Icon {
+                    icon,
+                    cx: x + 19.5,
+                    cy: top + ACTIONS / 2.0,
+                    size: 39.0,
+                    color: p.secondary_accent,
+                    alpha: 1.0,
+                });
+                ops.push(text_op(
+                    x + 53.0,
+                    ty.baseline(top + (ACTIONS - ty.line()) / 2.0),
+                    label,
+                    ty,
+                    p.secondary_accent,
+                ));
+                piece.laid.hits.push((
+                    RectF::new(x - 17.0, top, w + 34.0, ACTIONS),
+                    Action::Chat(action),
+                ));
+                x += w + 50.0;
+            }
+            let (shown, cut) = preview(text.trim_end_matches('\n'));
+            let color = if failed { p.error } else { c.text_output };
+            let lines = wrap(
+                &[Span {
+                    text: shown.to_owned(),
+                    style: Style::Plain,
+                }],
+                width,
+                ty.px(),
+            );
+            let mut y = top + ACTIONS + 11.0 - 22.0;
+            y = push_runs(ops, &lines, tx, y, ty, Some(color), 1.0);
+            if cut {
+                ops.push(text_op(
+                    tx,
+                    ty.baseline(y),
+                    "… preview; open full output above",
+                    ty,
+                    p.muted,
+                ));
+                y += ty.line();
+            }
+            y + 28.0 - top
+        }
+        Output::Loading | Output::Unknown => {
+            let cy = top + 22.0 + ty.line() / 2.0;
+            piece.marks.push(Mark {
+                y: cy - theme::SPINNER / 2.0 - 2.0,
+                h: theme::SPINNER + 4.0,
+                kind: MarkKind::Spinner {
+                    cx: tx + theme::SPINNER / 2.0,
+                    cy,
+                    size: theme::SPINNER,
+                    color: p.accent,
+                    background: c.tool_bg,
+                },
+            });
+            ops.push(text_op(
+                tx + theme::SPINNER + 22.0,
+                ty.baseline(top + 22.0),
+                "Loading output…",
+                ty,
+                p.muted,
+            ));
+            22.0 + ty.line() + 22.0
+        }
+        Output::Failed(message) => {
+            let lines = wrap(
+                &[Span {
+                    text: if message == OUTPUT_MISSING || message.ends_with("Tap to retry.") {
+                        message.clone()
+                    } else {
+                        format!("{message} Tap to retry.")
+                    },
+                    style: Style::Plain,
+                }],
+                width,
+                ty.px(),
+            );
+            let y = push_runs(ops, &lines, tx, top + 22.0, ty, Some(p.error), 1.0);
+            let h = y + 22.0 - top;
+            piece.laid.hits.push((
+                RectF::new(x0, top, x1 - x0, h),
+                Action::Chat(chat::Act::RetryOutput(tool.into())),
+            ));
+            h
+        }
+        Output::Running => {
+            ops.push(text_op(
+                tx,
+                ty.baseline(top + 22.0),
+                "Running…",
+                ty,
+                p.muted,
+            ));
+            22.0 + ty.line() + 22.0
+        }
+    }
+}
+
+/// The folded row of a run of tool calls: how many, which tools, failures
+/// (`4 TOOL CALLS  $, Read · 1 failed`).
 pub(crate) fn lay_group(
     blocks: &[Block],
     calls: &[ToolRef],
     key: &str,
     open: bool,
     context: &Context,
-) -> Laid {
-    let mut laid = Laid::default();
+) -> Piece {
+    let mut piece = Piece::default();
     let mut names: Vec<String> = Vec::new();
     for tool in calls {
-        if let Block::ToolCall { tool_name, .. } = &blocks[tool.call] {
-            let (label, _) = tool_label(tool_name, context.styles);
+        if let Block::ToolCall {
+            tool_name,
+            presentation,
+            ..
+        } = &blocks[tool.call]
+        {
+            let (label, _) = tool_label(
+                tool_name,
+                context.styles,
+                presentation.as_ref().and_then(|p| p.tool_style.as_ref()),
+            );
             if !names.contains(&label) {
                 names.push(label);
             }
@@ -267,47 +558,48 @@ pub(crate) fn lay_group(
         })
         .count();
     let p = theme::p();
-    let title = format!("{} tool calls", calls.len());
-    let title_w = text::measure(&title, Weight::MonoBold, SMALL);
-    laid.ops.push(Op::Text {
-        x: MARGIN,
-        baseline: TOOL_ROW / 2.0 + 12.0,
-        text: title,
-        weight: Weight::MonoBold,
-        size: SMALL,
-        tracking: 0.0,
-        color: p.text,
+    let h = 100.0;
+    let cy = h / 2.0;
+    let ops = &mut piece.laid.ops;
+    ops.push(Op::Icon {
+        icon: if open {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        },
+        cx: MARGIN + 16.0,
+        cy,
+        size: 33.0,
+        color: p.muted,
         alpha: 1.0,
     });
+    let label = format!("{} tool calls", calls.len());
+    let x = MARGIN + 33.0 + 22.0;
+    let label_w = super::super::ui::widgets::measure(&label, T_EYEBROW);
+    ops.push(text_op(
+        x,
+        T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0),
+        &label,
+        T_EYEBROW,
+        p.muted,
+    ));
     let mut detail = names.join(", ");
     if failed > 0 {
         detail = format!("{detail} · {failed} failed");
     }
-    let detail = text::fit(
+    let dx = x + label_w + 22.0;
+    let detail = super::super::ui::widgets::fit(&detail, T_SMALL, W - MARGIN - dx);
+    ops.push(text_op(
+        dx,
+        T_SMALL.baseline(cy - T_SMALL.line() / 2.0),
         &detail,
-        Weight::Mono,
-        SMALL,
-        W - 2.0 * MARGIN - title_w - 90.0,
-    );
-    laid.ops.push(Op::Text {
-        x: MARGIN + title_w + 18.0,
-        baseline: TOOL_ROW / 2.0 + 12.0,
-        text: detail,
-        weight: Weight::Mono,
-        size: SMALL,
-        tracking: 0.0,
-        color: if failed > 0 { p.error } else { p.muted },
-        alpha: 1.0,
-    });
-    laid.ops.push(Op::Chevron {
-        x: W - MARGIN - 14.0,
-        cy: TOOL_ROW / 2.0,
-        open,
-    });
-    laid.hits.push((
-        RectF::new(0.0, 0.0, W, TOOL_ROW),
+        T_SMALL,
+        if failed > 0 { p.error } else { p.muted },
+    ));
+    piece.laid.hits.push((
+        RectF::new(0.0, 0.0, W, h),
         Action::Chat(chat::Act::ToggleExpanded(key.to_owned())),
     ));
-    laid.h = TOOL_ROW;
-    laid
+    piece.laid.h = h;
+    piece
 }
