@@ -209,7 +209,7 @@ mod tests {
         assert_eq!(completion("http://x.org/a", 14), None);
         assert_eq!(completion("//x", 3), None);
         assert_eq!(completion("/go\nnext", 8), None);
-        assert_eq!(completion("é /mo", 7).map(|c| c.start), Some(3));
+        assert_eq!(completion("é /mo", 6).map(|c| c.start), Some(3));
     }
 
     #[test]

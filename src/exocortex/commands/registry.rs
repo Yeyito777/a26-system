@@ -118,11 +118,15 @@ impl Command {
             .then_some(inner)
     }
 
-    /// Its static first-level choices as items.
+    /// Its static first-level choices as items (a destructive one, as
+    /// `clear`, is only ever run typed out: `Item::exact`).
     pub fn choice_items(&self) -> Vec<Item> {
         self.choices
             .iter()
-            .map(|(name, desc)| Item::new(*name, *desc))
+            .map(|(name, desc)| Item {
+                exact: matches!(*name, "clear" | "reset"),
+                ..Item::new(*name, *desc)
+            })
             .collect()
     }
 }

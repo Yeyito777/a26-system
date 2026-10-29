@@ -185,6 +185,17 @@ pub struct Composer {
 }
 
 impl Composer {
+    /// Forgets messages on their way (tests send several in a row).
+    #[cfg(test)]
+    pub fn inflight_clear_for_tests(&mut self) {
+        self.inflight.clear();
+    }
+
+    #[cfg(test)]
+    pub fn rewinding_for_tests(&self) -> Option<&(String, String)> {
+        self.rewinding.as_ref()
+    }
+
     /// The caret and selection, inside the text.
     pub fn cursor(&self) -> Cursor {
         self.cursor.clamped(&self.text)
