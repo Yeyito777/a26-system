@@ -1288,8 +1288,10 @@ fn jump_rect(bottom: f32) -> RectF {
     RectF::new(W - JUMP_INSET - JUMP, bottom - 17.0 - JUMP, JUMP, JUMP)
 }
 
-/// Its shadow's reach (blur 44, 11 down).
-const JUMP_SHADOW: (f32, f32) = (44.0, 11.0);
+/// Its shadow's reach: blur and drop. Compact (the spec's 44 px blur is
+/// barely visible on the dark themes, and every row and column it reaches
+/// is drawn and sent again when the button comes or goes over moved rows).
+const JUMP_SHADOW: (f32, f32) = (14.0, 5.0);
 
 /// The columns the jump button and its shadow cover.
 pub(crate) fn jump_columns() -> i32 {
