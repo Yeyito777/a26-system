@@ -186,6 +186,17 @@ pub fn query(command: &str) -> Option<serde_json::Value> {
     Some(document.get_mut("result")?.take())
 }
 
+/// `query` for a long answer (`clipboard get image`: megabytes of base64 on
+/// one line): up to `limit` bytes, each read and write within `timeout`.
+pub fn query_long(command: &str, timeout: Duration, limit: u64) -> Option<serde_json::Value> {
+    let response = request_limited(&socket(), format!("{command}\n").as_bytes(), timeout, limit)?;
+    let mut document: serde_json::Value = serde_json::from_str(&response).ok()?;
+    if !document.get("ok")?.as_bool()? {
+        return None;
+    }
+    Some(document.get_mut("result")?.take())
+}
+
 /// Sends one command to Moon (`brightness set 40`, `settings set ...`).
 /// Returns whether Moon accepted it.
 pub fn send(command: &str) -> bool {
@@ -241,6 +252,10 @@ fn request(path: &Path, command: &[u8]) -> Option<String> {
 }
 
 fn request_within(path: &Path, command: &[u8], timeout: Duration) -> Option<String> {
+    request_limited(path, command, timeout, RESPONSE_LIMIT)
+}
+
+fn request_limited(path: &Path, command: &[u8], timeout: Duration, limit: u64) -> Option<String> {
     let mut stream = UnixStream::connect(path).ok()?;
     stream.set_read_timeout(Some(timeout)).ok()?;
     stream.set_write_timeout(Some(timeout)).ok()?;
@@ -248,10 +263,7 @@ fn request_within(path: &Path, command: &[u8], timeout: Duration) -> Option<Stri
     stream.shutdown(Shutdown::Write).ok()?;
 
     let mut response = String::new();
-    stream
-        .take(RESPONSE_LIMIT)
-        .read_to_string(&mut response)
-        .ok()?;
+    stream.take(limit).read_to_string(&mut response).ok()?;
     Some(response)
 }
 

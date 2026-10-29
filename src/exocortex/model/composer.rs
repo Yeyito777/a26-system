@@ -632,7 +632,7 @@ impl Model {
                 }
             }
             // No text: an image, if the clipboard holds one (PAR-242).
-            None => self.paste_image(),
+            None => self.paste_image(true),
         }
         let _ = self.composer_changed();
     }
@@ -760,7 +760,7 @@ impl Model {
                 Vec::new()
             }
             Act::PasteImage => {
-                self.paste_image();
+                self.paste_image(false);
                 Vec::new()
             }
             Act::RemoveAttachment(id) => {
@@ -2358,7 +2358,8 @@ mod tests {
             model.ui.effects,
             vec![Effect::Files(Job::Paste {
                 key: "c".into(),
-                name: "Pasted image 1".into()
+                name: "Pasted image 1".into(),
+                menu: true,
             })]
         );
         model.files_done(Done::Prepared {
@@ -2768,9 +2769,13 @@ mod tests {
         assert_eq!(opened(&mut model), vec!["Add attachment or voice"]);
         model.handle(Action::Composer(Act::Browse(None)));
         assert_eq!(opened(&mut model), vec!["Browse files"]);
-        let Some(Effect::Files(Job::List { dir })) = model.ui.effects.pop() else {
+        let Some(dir) = model.ui.effects.iter().find_map(|e| match e {
+            Effect::Files(Job::List { dir }) => Some(dir.clone()),
+            _ => None,
+        }) else {
             panic!("a listing asked for");
         };
+        assert!(model.ui.effects.contains(&Effect::HideKeyboard));
         assert!(dir.is_absolute());
         let entry = |name: &str, dir: bool| crate::exocortex::files::Entry {
             name: name.into(),

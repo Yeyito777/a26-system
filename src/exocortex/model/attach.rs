@@ -142,6 +142,8 @@ impl Model {
         browser.listing = None;
         self.ui.effect(Effect::Files(Job::List { dir }));
         if open {
+            // The rows need the room.
+            self.ui.effect(Effect::HideKeyboard);
             self.ui
                 .open(Box::new(super::super::view::files::file_sheet()));
         }
@@ -158,24 +160,28 @@ impl Model {
             self.attach_error(&key, TOO_MANY);
             return;
         }
+        self.composer.errors.remove(&key);
         *self.composer.importing.entry(key.clone()).or_default() += 1;
         self.ui.effect(Effect::Files(Job::Read { key, path }));
     }
 
-    /// The clipboard's image, into the shown draft.
-    pub(super) fn paste_image(&mut self) {
+    /// The clipboard's image, into the shown draft (`menu`: the edit
+    /// menu's Paste found no text).
+    pub(super) fn paste_image(&mut self, menu: bool) {
         let key = self.shown_draft_key();
         if self.room(&key) == 0 {
             self.attach_error(&key, TOO_MANY);
             return;
         }
+        self.composer.errors.remove(&key);
         let importing = self.composer.importing.entry(key.clone()).or_default();
         *importing += 1;
         let name = format!(
             "Pasted image {}",
             self.attachments_of(&key).len() + self.composer.importing[&key]
         );
-        self.ui.effect(Effect::Files(Job::Paste { key, name }));
+        self.ui
+            .effect(Effect::Files(Job::Paste { key, name, menu }));
     }
 
     pub(super) fn remove_attachment(&mut self, id: u64) {

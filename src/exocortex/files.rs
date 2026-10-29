@@ -30,8 +30,14 @@ pub enum Job {
     List { dir: PathBuf },
     /// A file, as an attachment of draft `key`.
     Read { key: String, path: PathBuf },
-    /// The clipboard's image, as an attachment of draft `key` named `name`.
-    Paste { key: String, name: String },
+    /// The clipboard's image, as an attachment of draft `key` named `name`;
+    /// `menu`: the edit menu's Paste found no text (none: "Nothing to
+    /// paste.").
+    Paste {
+        key: String,
+        name: String,
+        menu: bool,
+    },
 }
 
 /// A folder's entry.
@@ -123,14 +129,23 @@ fn run(job: Job) -> Done {
             key,
             result: read(&path),
         },
-        Job::Paste { key, name } => Done::Prepared {
+        Job::Paste { key, name, menu } => Done::Prepared {
             key,
-            result: clipboard_image().and_then(|bytes| {
-                if attachments::media_type(&bytes).is_none() {
-                    return Err("The clipboard's image could not be decoded.".into());
-                }
-                attachments::prepare(&name, &bytes)
-            }),
+            result: moon_image()
+                .unwrap_or_else(clipboard_image)
+                .map_err(|why| {
+                    if menu && why == NO_IMAGE {
+                        "Nothing to paste.".into()
+                    } else {
+                        why
+                    }
+                })
+                .and_then(|bytes| {
+                    if attachments::media_type(&bytes).is_none() {
+                        return Err("The clipboard's image could not be decoded.".into());
+                    }
+                    attachments::prepare(&name, &bytes)
+                }),
         },
     }
 }
@@ -196,6 +211,28 @@ fn read(path: &Path) -> Result<Attachment, String> {
 }
 
 pub const NO_IMAGE: &str = "There is no image on the clipboard.";
+
+/// The clipboard's image from Moon, which keeps one (`clipboard get image`,
+/// docs/app-services.md: up to 8 MiB, so megabytes of base64 on a line);
+/// None when Moon does not answer (a development host): X's CLIPBOARD then.
+fn moon_image() -> Option<Result<Vec<u8>, String>> {
+    if cfg!(test) {
+        return None;
+    }
+    let reply =
+        crate::control::query_long("clipboard get image", Duration::from_secs(5), 16 << 20)?;
+    let Some(image) = reply.get("image").filter(|i| !i.is_null()) else {
+        return Some(Err(NO_IMAGE.into()));
+    };
+    Some(
+        image
+            .get("data")
+            .and_then(serde_json::Value::as_str)
+            .and_then(super::proto::base64_decode)
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| "The clipboard's image could not be read.".into()),
+    )
+}
 pub const NOT_ANSWERING: &str = "The app that copied the image isn't answering: Moon's clipboard keeps text only, so an image copied in an app now in the background can't be pasted yet.";
 
 /// How long the clipboard's owner has to answer, and to send it all.
@@ -383,5 +420,179 @@ mod tests {
                 .contains("no longer exists")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An app owning CLIPBOARD with `bytes` as image/png: answering at once,
+    /// in INCR chunks, or not at all (frozen). Until `done` is set.
+    fn owner(
+        bytes: Vec<u8>,
+        mode: &'static str,
+        done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::Event;
+        use x11rb::protocol::xproto::*;
+        use x11rb::rust_connection::RustConnection;
+        use x11rb::wrapper::ConnectionExt as _;
+        let (conn, screen) = RustConnection::connect(None).unwrap();
+        let root = conn.setup().roots[screen].root;
+        let window = conn.generate_id().unwrap();
+        conn.create_window(
+            0,
+            window,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new(),
+        )
+        .unwrap();
+        let atom = |name: &str| {
+            conn.intern_atom(false, name.as_bytes())
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom
+        };
+        let (clipboard, targets, png, incr) = (
+            atom("CLIPBOARD"),
+            atom("TARGETS"),
+            atom("image/png"),
+            atom("INCR"),
+        );
+        conn.set_selection_owner(window, clipboard, x11rb::CURRENT_TIME)
+            .unwrap();
+        conn.flush().unwrap();
+        let mut sending: Option<(u32, u32, usize)> = None;
+        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+            let Some(event) = conn.poll_for_event().unwrap() else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            match event {
+                Event::SelectionRequest(r) if mode != "frozen" => {
+                    // Nothing but the image (Moon asks for text: none).
+                    let mut property = r.property;
+                    if r.target != targets && r.target != png {
+                        property = x11rb::NONE;
+                    } else if r.target == targets {
+                        conn.change_property32(
+                            PropMode::REPLACE,
+                            r.requestor,
+                            r.property,
+                            AtomEnum::ATOM,
+                            &[targets, png],
+                        )
+                        .unwrap();
+                    } else if mode == "incr" {
+                        conn.change_window_attributes(
+                            r.requestor,
+                            &ChangeWindowAttributesAux::new()
+                                .event_mask(EventMask::PROPERTY_CHANGE),
+                        )
+                        .unwrap();
+                        conn.change_property32(
+                            PropMode::REPLACE,
+                            r.requestor,
+                            r.property,
+                            incr,
+                            &[bytes.len() as u32],
+                        )
+                        .unwrap();
+                        sending = Some((r.requestor, r.property, 0));
+                    } else {
+                        conn.change_property8(
+                            PropMode::REPLACE,
+                            r.requestor,
+                            r.property,
+                            png,
+                            &bytes,
+                        )
+                        .unwrap();
+                    }
+                    conn.send_event(
+                        false,
+                        r.requestor,
+                        EventMask::NO_EVENT,
+                        SelectionNotifyEvent {
+                            response_type: SELECTION_NOTIFY_EVENT,
+                            sequence: 0,
+                            time: r.time,
+                            requestor: r.requestor,
+                            selection: r.selection,
+                            target: r.target,
+                            property,
+                        },
+                    )
+                    .unwrap();
+                    conn.flush().unwrap();
+                }
+                Event::PropertyNotify(e) if e.state == Property::DELETE => {
+                    if let Some((window, property, at)) = sending
+                        && e.window == window
+                        && e.atom == property
+                    {
+                        let end = (at + 65536).min(bytes.len());
+                        conn.change_property8(
+                            PropMode::REPLACE,
+                            window,
+                            property,
+                            png,
+                            &bytes[at..end],
+                        )
+                        .unwrap();
+                        conn.flush().unwrap();
+                        sending = (at < bytes.len()).then_some((window, property, end));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Needs an X server (`moon-sandbox exec N` the test binary with
+    /// `--ignored clipboard`); never the phone's own (it takes CLIPBOARD).
+    #[test]
+    #[ignore]
+    fn clipboard_images_are_fetched_from_their_owner() {
+        let image = attachments::test_png(400, 300);
+        for mode in ["direct", "incr", "frozen"] {
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (bytes, flag) = (image.clone(), done.clone());
+            let thread = std::thread::spawn(move || owner(bytes, mode, flag));
+            std::thread::sleep(Duration::from_millis(300));
+            let started = Instant::now();
+            let got = clipboard_image();
+            eprintln!(
+                "{mode}: {:?} in {:?}",
+                got.as_ref().map(Vec::len),
+                started.elapsed()
+            );
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            thread.join().unwrap();
+            match mode {
+                "frozen" => assert_eq!(got.unwrap_err(), NOT_ANSWERING),
+                _ => assert_eq!(got.unwrap(), image),
+            }
+        }
+    }
+
+    /// Owns CLIPBOARD with a test PNG for 30 s, for pasting it into the app
+    /// by hand in a sandbox (`moon-sandbox exec N` the test binary with
+    /// `--ignored --exact …serve_a_clipboard_image`).
+    #[test]
+    #[ignore]
+    fn serve_a_clipboard_image() {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let thread =
+            std::thread::spawn(move || owner(attachments::test_png(640, 480), "incr", flag));
+        std::thread::sleep(Duration::from_secs(30));
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        thread.join().unwrap();
     }
 }
