@@ -27,7 +27,8 @@ parse).
 
 The app declares `targeted-unwind`, `sidebar-reorder-delta`,
 `sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`
-and `sidebar-incremental` (with a navigate-view `sidebarView`), then `ping`s.
+and `sidebar-incremental` (with a tree `sidebarView` naming the folders open
+on the list), then `ping`s.
 Its bootstrap, and every reconnection's, is that, with `load_conversation`
 for the conversation on screen before the `ping`, in the same write, so its
 window comes ahead of the list. A window or an older page the daemon has not
@@ -36,19 +37,33 @@ lands), and scrolling up asks for the older page again.
 
 | Screen | Daemon traffic |
 | --- | --- |
-| The list | `conversations_list` (first page, then the rest), kept current by `conversation_updated`, `conversation_deleted`, `sidebar_items_reordered`, `sidebar_state_patched`, `conversation_moved` |
+| The list | `conversations_list` (first page, then the rest), kept current by `conversation_updated`, `conversation_deleted`, `sidebar_items_reordered`, `sidebar_state_patched`, `conversation_moved`, `queue_updated` (queued counts) |
+| List commands | `pin_conversation`, `mark_conversation`, `mute_conversation`, `delete_conversation`, `pin_folder`, `mute_folder`, `delete_folder`, each followed by a `ping` with its reqId (`updateStatusOnly`); `rename_conversation`, `create_folder`, `rename_folder` (acked); `undo_delete`, `redo_delete` (answered by `conversation_restored` or a state patch); `list_conversations` to start over |
 | A conversation | `load_conversation` with `turns`, the `viewport` and an `initialBackfill` (which subscribes and marks it read): a window of about two screens, then the older page behind it from the same snapshot; older pages (15 turns) with `load_conversation_history` as the user scrolls up, joined where a page ends inside an entry; the stream (`streaming_started`, `block_start`, `text_chunk`, `thinking_chunk`, `streaming_sync`, `tool_call`, `tool_result`, `message_complete`, `streaming_stopped`, `user_message`, `system_message`, `history_updated`, whose `pendingAI: null` ends the live reply); after each stop the newest page again, so the history settles on the daemon's copy. Leaving it `unsubscribe`s. |
-| Sending | `send_message` (shown at once, matched to the daemon's `user_message` by `startedAt`); while it works, `queue_message` with `message-end` (shown as Queued until delivered); a new conversation is `new_conversation` with its first message and the chosen provider, model and effort (in the folder the list showed) |
+| Sending | `send_message` (shown at once, matched to the daemon's `user_message` by `startedAt`); while it works, `queue_message` with `message-end` (shown as Queued until delivered); a new conversation is `new_conversation` with its first message and the chosen provider, model and effort (in the folder whose "+" was tapped) |
 | Stop | `abort` with the stream's `expectedStartedAt` |
 | Model sheet | `tools_available`'s signed-in providers and their models and efforts; `set_model`, `set_effort` |
 | A tool row opened | `load_tool_outputs` for that call (history leaves outputs out) |
 
 The app has three pages, left to right as on the iPhone: Settings, the
 list, a conversation. Back (the top bar's chevron, Moon's Back, a swipe from
-the left edge) goes a page left, up a folder first; the list's ⋯ menu opens
+the left edge) goes a page left, ending a search on the list first; the
+list's ⋯ menu opens
 Settings too. Everything is drawn in the Whale theme and JetBrains Mono
 (roadmap §3); sheets, menus, dialogs, toasts and the reader open over the
 pages.
+
+The list is the iPhone's (`real-01-sidebar`): pinned rows under a PINNED
+header and a divider, folders opening in place (the open ones kept in
+`ui.json`'s `list.expanded`), each row with the TUI's activity dot (accent
+streaming, warning waiting, success unread; a muted folder mutes what is in
+it) and badges (◆ subagents, $ background commands, ◷ Chrono), a folder with
+its count, unread badge and "+" for a new chat in it. The search field
+filters titles and folder names (results 160 ms after the last key). A long
+press opens a row's menu; deleting offers Undo. Most list commands answer
+nothing, so each is followed by a `ping` with its reqId: the daemon handles a
+client's commands in order, so a change the list does not show by the `pong`
+was not made, and the app says so and asks for the list again.
 
 Tool calls show as one row each (label as the TUI styles it, summary, ERR
 when it failed); a run of three or more folds into one row ("7 tool calls ·
@@ -103,6 +118,14 @@ are discarded.
   are visited. The reader's place, when not following the newest message, is
   a piece (entry stamp and index) and its distance from the top; it is kept
   when anything changes above it (older history, a fresh window).
+- **The list's rows.** The rows (`sidebar::Layout`) are rebuilt only when
+  rows may come, go or move (a pin, a sort order, a folder opened, the
+  search), and folder activity is added up once per change
+  (`Sidebar::aggregates`). A list frame records, for each row on screen, a
+  hash of what it draws (`Look`): the next frame moves the rows a scroll
+  moved and draws again only the rows whose look changed, a pulsing dot only
+  its own rows, a relative time turning over (a frame each minute) only its
+  row. Only rows on screen are looked at, however many there are.
 - **A fast core.** While in front, the UI thread asks for a minimum
   utilization clamp (`sched_setattr`, `UTIL_CLAMP_MIN`), so energy-aware
   scheduling runs its short bursts on a fast core at a high clock: on a slow
@@ -139,7 +162,7 @@ the interfaces below. Every file's header says whose it is.
 | `view/mod.rs`, `view/frame.rs`, `view/ops.rs` | A | page composition and hit testing, the frame pipeline, laid-out pieces |
 | `model/mod.rs` | A | `Model`, `Action`, the pages, the connection, the event fan-out, `Ui` |
 | `proto/mod.rs`, `proto/fixtures.jsonl` | A | `Event`, `parse_event`, the bootstrap |
-| `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs` | B | the list, folders, search |
+| `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands, menus and prompts (`list/actions.rs`) |
 | `view/markdown_layout.rs`, `markdown.rs`, `reader.rs` | C1 | markdown as pieces, code, tables; the reader (A's is minimal) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
 | `view/composer.rs`, `model/composer.rs`, `proto/composer.rs` | D | the composer, sending, the queue |
