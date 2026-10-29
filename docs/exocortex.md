@@ -254,8 +254,9 @@ are discarded.
   draws it again only there (`FrameDamage::areas`, also where a page move
   carried its old pixels) and sends rows and areas in one upload
   (`Presenter::present_rows_and_areas`). Their shadow is compact, as the
-  jump button's. Measured scrolling a tool-heavy chat with the usage chip
-  showing: median 2.5-2.9 ms a frame, main without it 2.6-2.8 ms.
+  jump button's. Measured dragging a tool-heavy chat with the usage chip
+  showing, draw and present: median 2.0-2.2 ms a frame, p95 6.7-8.4 ms;
+  without it 1.8-1.9 ms, p95 5.2-7.3 ms.
 - **The list's rows.** The rows (`sidebar::Layout`) are rebuilt only when
   rows may come, go or move (a pin, a sort order, a folder opened, the
   search), and folder activity is added up once per change
