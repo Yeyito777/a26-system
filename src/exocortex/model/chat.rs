@@ -335,6 +335,9 @@ pub struct Chat {
     pub instructions: Vec<String>,
     /// It was unread when opened: it opens at its latest response (PAR-105).
     pub opened_unread: bool,
+    /// Notices that came while a reply streams (PAR-161), with their
+    /// stamps: shown after it, into the history when it ends.
+    pub tail: Vec<(Entry, u64)>,
     /// Tool outputs fetched on demand (history leaves them out).
     pub outputs: HashMap<String, String>,
     pub outputs_requested: HashSet<String>,
@@ -450,8 +453,14 @@ impl Chat {
 
     /// The entry (or the live reply's blocks) with this stamp.
     pub fn by_stamp(&self, stamp: u64) -> Option<&Entry> {
-        let index = self.stamps.iter().rposition(|s| *s == stamp)?;
-        self.entries.get(index)
+        match self.stamps.iter().rposition(|s| *s == stamp) {
+            Some(index) => self.entries.get(index),
+            None => self
+                .tail
+                .iter()
+                .find(|(_, s)| *s == stamp)
+                .map(|(entry, _)| entry),
+        }
     }
 
     /// Replaces the entries (and where they start), keeping the stamp of
@@ -672,6 +681,32 @@ impl Chat {
         }
     }
 
+    /// A notice (the daemon's, or the app's own): after a reply that is
+    /// streaming, in the tail (PAR-161); else at the end.
+    pub(crate) fn push_notice(&mut self, entry: Entry) {
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|live| any_visible(&live.blocks))
+        {
+            self.tail.push((entry, next_stamp()));
+        } else {
+            self.commit_segment();
+            self.push(entry);
+        }
+        self.touch();
+    }
+
+    /// The reply ended: the notices that waited after it join the history.
+    pub(crate) fn settle_tail(&mut self) {
+        if self.live.is_none() && !self.tail.is_empty() {
+            for (entry, stamp) in std::mem::take(&mut self.tail) {
+                self.push_with(entry, stamp);
+            }
+            self.touch();
+        }
+    }
+
     /// Something joins the running turn (a message, a notice): what the
     /// reply showed so far becomes its own segment, and the turn goes on
     /// in a fresh live reply.
@@ -703,6 +738,7 @@ impl Chat {
     /// only a live subscription keeps current.
     pub(crate) fn shelved(mut self) -> Self {
         self.live = None;
+        self.settle_tail();
         self.status = Status::default();
         self.load_request = None;
         self.older_request = None;
@@ -784,7 +820,10 @@ impl Shelf {
 pub fn plain_text(chat: &Chat, entry: &Entry, label: &dyn Fn(&str) -> String) -> String {
     match entry {
         Entry::User { text, images, .. } => {
-            let mut parts = vec![text.trim().to_owned()];
+            // Documents as `[file: name]` (the iPhone's `plainUserText`).
+            let (typed, files) = super::super::attachments::split(text);
+            let mut parts = vec![typed.trim().to_owned()];
+            parts.extend(files.iter().map(|file| format!("[file: {}]", file.name)));
             if !images.is_empty() {
                 let s = if images.len() == 1 { "" } else { "s" };
                 parts.push(format!("{} image attachment{s}", images.len()));
@@ -1220,10 +1259,15 @@ impl Model {
             ActionItem::new("Copy message", Action::Ui(UiAct::Copy(text.clone()))).icon(Icon::Copy),
         ];
         if user {
+            // What was typed (its documents are not attached again).
+            let typed = match self.chat.by_stamp(stamp) {
+                Some(Entry::User { text, .. }) => super::super::attachments::split(text).0,
+                _ => text.clone(),
+            };
             items.push(
                 ActionItem::new(
                     "Edit in composer",
-                    Action::Composer(composer::Act::Insert(text.clone())),
+                    Action::Composer(composer::Act::Insert(typed)),
                 )
                 .icon(Icon::Pencil),
             );
@@ -1338,7 +1382,13 @@ impl Model {
     }
 
     /// The open conversation's events (and deletions of any).
-    pub(super) fn apply_chat(&mut self, event: Event, _now: Instant) -> Vec<Value> {
+    pub(super) fn apply_chat(&mut self, event: Event, now: Instant) -> Vec<Value> {
+        let commands = self.apply_chat_event(event, now);
+        self.chat.settle_tail();
+        commands
+    }
+
+    fn apply_chat_event(&mut self, event: Event, _now: Instant) -> Vec<Value> {
         match event {
             Event::ConversationDeleted { conv_id, .. } => {
                 self.shelf.forget(&conv_id);
@@ -1364,9 +1414,11 @@ impl Model {
                 if fresh {
                     self.chat.load_request = None;
                     // The live reply comes again with the window (its
-                    // identity kept when it is the same turn).
+                    // identity kept when it is the same turn); the window
+                    // holds the notices that waited after it.
                     if !streaming {
                         self.chat.live = None;
+                        self.chat.tail.clear();
                     }
                     self.chat.echoes.clear();
                     self.chat.error = None;
@@ -1422,13 +1474,16 @@ impl Model {
                     let pending = window.pending_ai.clone();
                     self.chat.splice(window, false);
                     match pending {
-                        // The daemon says the turn is over.
+                        // The daemon says the turn is over (its window
+                        // holds the notices that waited after it).
                         Some(None) => {
                             self.chat.live = None;
+                            self.chat.tail.clear();
                             self.chat.status = Status::default();
                         }
                         None if had_live && !self.open_summary().is_some_and(|s| s.streaming) => {
                             self.chat.live = None;
+                            self.chat.tail.clear();
                             self.chat.status = Status::default();
                         }
                         _ => {}
@@ -1790,13 +1845,20 @@ impl Model {
                     chat.live_mut();
                 }
             }
+            // An error splits the reply; another notice waits after it.
             Event::SystemMessage { text, color, .. } => {
-                chat.commit_segment();
-                chat.push(Entry::System {
+                let terminal = color.as_deref() == Some("error") || text.starts_with('✗');
+                let entry = Entry::System {
                     text,
                     color,
                     metadata: None,
-                });
+                };
+                if terminal {
+                    chat.commit_segment();
+                    chat.push(entry);
+                } else {
+                    chat.push_notice(entry);
+                }
             }
             Event::StreamRetry {
                 attempt,

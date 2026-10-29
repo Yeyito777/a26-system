@@ -13,6 +13,7 @@ use crate::gfx::{Canvas, RectF, Rgb};
 use crate::text::Weight;
 
 use super::super::anim;
+use super::super::attachments::{self, Kind};
 use super::super::footer;
 use super::super::markdown::{self, MdBlock, Style};
 use super::super::model::{Action, Model, UiAct, chat, rich::Rich};
@@ -245,8 +246,16 @@ pub(crate) enum Tone {
     Queued,
 }
 
+/// A file chip's widest, its height, its icon's box, the gap between chips.
+const CHIP_MAX: f32 = 665.0;
+const CHIP_PAD: f32 = 20.0;
+const CHIP_ICON: f32 = 83.0;
+const CHIP_GAP: f32 = 23.0;
+
 /// A user message's bubble, right-aligned and hugging its longest line,
-/// with the line under it (why it is there, or how it waits).
+/// with the line under it (why it is there, or how it waits). Documents
+/// sent with it are file chips under its words (PAR-114), each opening the
+/// text the model got in the reader.
 pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool) -> Piece {
     let p = theme::p();
     let c = theme::c();
@@ -285,20 +294,66 @@ pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool
     let mut laid = Laid::default();
     let ty = T_BODY;
     let inner = BUBBLE_MAX - 2.0 * HAIRLINE - 2.0 * BUBBLE_PAD_X;
-    let trimmed = text.trim();
-    let (lines, ink) = if trimmed.is_empty() {
+    let (typed, files) = if text.contains("<exocortex_file ") {
+        attachments::split(text)
+    } else {
+        (String::new(), Vec::new())
+    };
+    let trimmed = if files.is_empty() {
+        text.trim()
+    } else {
+        typed.trim()
+    };
+    let (lines, ink) = if trimmed.is_empty() && files.is_empty() {
         (wrap_text("(empty message)", ty, inner), p.muted)
+    } else if trimmed.is_empty() {
+        (Vec::new(), ink)
     } else {
         (wrap_text(trimmed, ty, inner), ink)
     };
+    // The chips: a name and its size, each as wide as it needs.
+    let name_ty = T_SMALL.weight(Weight::MonoSemiBold);
+    let text_x = HAIRLINE + CHIP_PAD + CHIP_ICON + 25.0;
+    let chips: Vec<(f32, String, String, bool)> = files
+        .iter()
+        .map(|file| {
+            let truncated = matches!(
+                file.kind,
+                Kind::File {
+                    truncated: true,
+                    ..
+                }
+            );
+            let size = attachments::size_text(file.size);
+            let detail_w = widgets::measure(&size, T_META)
+                + if truncated {
+                    widgets::measure(" · truncated", T_META)
+                } else {
+                    0.0
+                };
+            let room = CHIP_MAX.min(inner) - text_x - CHIP_PAD - HAIRLINE;
+            let name = widgets::fit(&file.name, name_ty, room);
+            let w = widgets::measure(&name, name_ty).max(detail_w).min(room);
+            (text_x + w + CHIP_PAD + HAIRLINE, name, size, truncated)
+        })
+        .collect();
     let widest = lines
         .iter()
         .map(|line| line_width(line))
+        .chain(chips.iter().map(|chip| chip.0))
         .fold(0.0, f32::max);
     let width = (widest + 2.0 * BUBBLE_PAD_X + 2.0 * HAIRLINE)
         .ceil()
         .min(BUBBLE_MAX);
-    let h = lines.len().max(1) as f32 * ty.line() + 2.0 * BUBBLE_PAD_Y + 2.0 * HAIRLINE;
+    let text_h = lines.len() as f32 * ty.line();
+    let n = chips.len() as f32;
+    let chips_h = (n * (TARGET + CHIP_GAP) - CHIP_GAP).max(0.0);
+    let between = if lines.is_empty() || chips.is_empty() {
+        0.0
+    } else {
+        CHIP_GAP
+    };
+    let h = text_h + between + chips_h + 2.0 * BUBBLE_PAD_Y + 2.0 * HAIRLINE;
     let x = (W - MARGIN - width).round();
     let bubble = RectF::new(x, 0.0, width, h);
     boxed(&mut laid.ops, bubble, fill, border);
@@ -322,6 +377,58 @@ pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool
             Some(ink),
             1.0,
         );
+    }
+    let mut top = HAIRLINE + BUBBLE_PAD_Y + text_h + between;
+    for ((w, name, size, truncated), file) in chips.iter().zip(&files) {
+        let chip = RectF::new(right - w, top, *w, TARGET);
+        let chip_fill = mix(p.text, 3, fill);
+        boxed(&mut laid.ops, chip, chip_fill, mix(p.border, 50, fill));
+        let icon = RectF::new(
+            chip.x + HAIRLINE + CHIP_PAD,
+            top + (TARGET - CHIP_ICON) / 2.0,
+            CHIP_ICON,
+            CHIP_ICON,
+        );
+        boxed(
+            &mut laid.ops,
+            icon,
+            mix(p.secondary_accent, 6, chip_fill),
+            mix(p.secondary_accent, 42, chip_fill),
+        );
+        laid.ops.push(icon_op(
+            Icon::FileText,
+            icon.x + CHIP_ICON / 2.0,
+            icon.y + CHIP_ICON / 2.0,
+            47.0,
+            p.secondary_accent,
+        ));
+        let tx = chip.x + text_x;
+        let block = name_ty.line() + 6.0 + T_META.line();
+        let name_top = top + (TARGET - block) / 2.0;
+        laid.ops
+            .push(text_op(tx, name_ty.baseline(name_top), name, name_ty, ink));
+        let meta_top = name_top + name_ty.line() + 6.0;
+        laid.ops
+            .push(text_op(tx, T_META.baseline(meta_top), size, T_META, meta));
+        if *truncated {
+            laid.ops.push(text_op(
+                tx + widgets::measure(size, T_META),
+                T_META.baseline(meta_top),
+                " · truncated",
+                T_META,
+                p.warning,
+            ));
+        }
+        if let Kind::File { text, .. } = &file.kind {
+            laid.hits.push((
+                chip,
+                Action::Ui(UiAct::Read {
+                    title: format!("{} · extracted text", file.name),
+                    text: text.clone(),
+                }),
+            ));
+        }
+        top += TARGET + CHIP_GAP;
     }
     laid.h = h;
     if let Some(label) = label {

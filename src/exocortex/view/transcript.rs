@@ -1392,6 +1392,25 @@ impl ViewState {
             });
             y += h + footer_h;
             gap = FOOTER_GAP;
+            // Notices that came while it streams (PAR-161).
+            for (entry, stamp) in &chat.tail {
+                let plan = self.plan(*stamp, entry);
+                let top = y + gap;
+                let placed = self.place(
+                    &mut layout,
+                    top,
+                    &plan,
+                    Some(entry),
+                    *stamp,
+                    &[],
+                    &context,
+                    Shown::default(),
+                );
+                if placed.any {
+                    y = top + placed.h;
+                    gap = placed.tail_gap;
+                }
+            }
         } else if !chat.echoes.is_empty() {
             y += BLOCK_GAP;
             y = single(
@@ -1599,7 +1618,8 @@ impl ViewState {
     /// Scrolls to an entry (its stamp), its top 8 pt below the
     /// transcript's top (the iPhone's `reveal`), and stops following (E: a
     /// Find in chat match). False when it isn't laid out.
-    pub fn reveal(&mut self, model: &Model, stamp: u64, height: f32) -> bool {
+    pub fn reveal(&mut self, model: &mut Model, stamp: u64, height: f32) -> bool {
+        self.open_fold_of(model, stamp);
         let max = self.chat_max(model, height);
         let Some(item) = self.layout.items.iter().find(|item| item.stamp == stamp) else {
             return false;
@@ -1608,6 +1628,27 @@ impl ViewState {
         self.chat_scroll.offset = (item.y - 22.0).clamp(0.0, max);
         self.follow = false;
         true
+    }
+
+    /// A folded message (a Find match): the fold holding it opens (the
+    /// iPhone's search).
+    fn open_fold_of(&mut self, model: &mut Model, stamp: u64) {
+        self.layout(model);
+        let Some(plan) = self.transcript.fold.as_ref().map(|f| f.plan.clone()) else {
+            return;
+        };
+        let Some(at) = model.chat.stamps.iter().position(|s| *s == stamp) else {
+            return;
+        };
+        let key = match (plan.gutter.get(&at), plan.merged.get(&at)) {
+            (Some(g), _) if !g.open && g.role != fold::Role::Host => Some(g.group.clone()),
+            (_, Some(m)) if !m.open => Some(m.turn.clone()),
+            _ => None,
+        };
+        if let Some(key) = key {
+            model.handle(Action::Chat(chat::Act::ToggleExpanded(key)));
+            self.layout(model);
+        }
     }
 
     /// A fold toggled from a tap: its first row where the tapped row was
@@ -3133,6 +3174,20 @@ mod tests {
     }
 
     #[test]
+    fn find_opens_the_fold_holding_its_match() {
+        let mut model = open_folded(
+            r#"{"type":"user","text":"start","metadata":{"startedAt":1,"model":"m","tokens":0}},{"type":"ai","blocks":[{"type":"text","text":"ok"}],"metadata":{"startedAt":2,"model":"m","tokens":0}},{"type":"user","text":"[chrono wake: chrono:x] Check the backups","metadata":{"startedAt":3,"model":"m","tokens":0,"automation":{"kind":"chrono_wake"}}},{"type":"ai","blocks":[{"type":"tool_call","toolCallId":"q","toolName":"bash","input":{},"summary":"ls"},{"type":"tool_result","toolCallId":"q","toolName":"bash","output":"","isError":false},{"type":"text","text":"Backups are fine."}],"metadata":{"startedAt":4,"model":"m","tokens":0}}"#,
+        );
+        let mut view = ViewState::new();
+        view.layout(&model);
+        let wake = model.chat.stamps[2];
+        assert!(!view.layout.items.iter().any(|item| item.stamp == wake));
+        assert!(view.reveal(&mut model, wake, HEIGHT));
+        assert!(model.chat.expanded.contains("group:u:3"));
+        assert!(view.layout.items.iter().any(|item| item.stamp == wake));
+    }
+
+    #[test]
     fn the_live_turn_shows_working_and_its_newest_step() {
         let mut model = open_folded(
             r#"{"type":"user","text":"Run the checks","metadata":{"startedAt":1000,"model":"m","tokens":0}}"#,
@@ -3181,6 +3236,88 @@ mod tests {
             .flat_map(|item| item.laid.hits.iter().map(|(_, a)| a.clone()))
             .collect();
         assert!(actions.contains(&Action::Chat(chat::Act::ToggleExpanded("tool:a".into()))));
+    }
+
+    #[test]
+    fn notices_during_a_stream_wait_after_it_and_errors_split_it() {
+        let mut model = open_with(r#"{"type":"user","text":"Go"}"#);
+        feed(
+            &mut model,
+            &[
+                START,
+                r#"{"type":"text_chunk","convId":"c","text":"Working on it."}"#,
+                r#"{"type":"system_message","convId":"c","text":"Claude account switched","color":"warning"}"#,
+            ],
+        );
+        assert_eq!(model.chat.tail.len(), 1);
+        assert_eq!(model.chat.entries.len(), 1);
+        let mut view = ViewState::new();
+        view.layout(&model);
+        // The prompt, the reply, its footer, then the notice.
+        let last = view.layout.items.last().unwrap();
+        assert_eq!(last.stamp, model.chat.tail[0].1);
+        let footer = &view.layout.items[view.layout.items.len() - 2];
+        assert_eq!(footer.index, u32::MAX);
+        // It ends: the notice follows the reply in the history.
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"message_complete","convId":"c","blocks":[{"type":"text","text":"Working on it."}],"endedAt":9000,"tokens":5}"#,
+                r#"{"type":"streaming_stopped","convId":"c"}"#,
+            ],
+        );
+        assert!(model.chat.tail.is_empty());
+        assert!(matches!(model.chat.entries[1], Entry::Ai { .. }));
+        assert!(
+            matches!(&model.chat.entries[2], Entry::System { text, .. } if text == "Claude account switched")
+        );
+        // An error splits the reply where it is.
+        feed(
+            &mut model,
+            &[
+                START,
+                r#"{"type":"text_chunk","convId":"c","text":"Again."}"#,
+                r#"{"type":"system_message","convId":"c","text":"✗ Provider error","color":"error"}"#,
+            ],
+        );
+        assert!(model.chat.tail.is_empty());
+        assert!(
+            matches!(&model.chat.entries[model.chat.entries.len() - 1], Entry::System { text, .. } if text.starts_with('✗'))
+        );
+    }
+
+    #[test]
+    fn documents_sent_with_a_message_are_file_chips() {
+        let envelope = r#"Please read this.\n\n<exocortex_file name_base64=\"bm90ZXMudHh0\" size_bytes=\"493568\" truncated=\"true\">\n[Attached file: notes.txt]\nhello world\n</exocortex_file>"#;
+        let model = open_with(&format!(r#"{{"type":"user","text":"{envelope}"}}"#));
+        let mut view = ViewState::new();
+        view.layout(&model);
+        let bubble = &view.layout.items[1].laid;
+        let texts: Vec<String> = bubble
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::exocortex::view::ops::Op::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "Please read this."), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "notes.txt"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == " · truncated"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("exocortex_file")),
+            "{texts:?}"
+        );
+        let [(_, action)] = &bubble.hits[..] else {
+            panic!("{:?}", bubble.hits);
+        };
+        let Action::Ui(crate::exocortex::model::UiAct::Read { title, text }) = action else {
+            panic!("{action:?}");
+        };
+        assert_eq!(title, "notes.txt · extracted text");
+        assert!(text.contains("hello world"));
+        let plain = chat::plain_text(&model.chat, &model.chat.entries[0], &|n| n.to_owned());
+        assert_eq!(plain, "Please read this.\n\n[file: notes.txt]");
     }
 
     #[test]
