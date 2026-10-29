@@ -186,7 +186,9 @@ pub fn send(command: &str) -> bool {
 
 #[cfg(test)]
 fn read_volume_from(path: &Path) -> Option<u8> {
-    parse_volume_response(&request(path, b"state\n")?)
+    // Moon answers within IO_TIMEOUT; the test's server thread may not even
+    // be scheduled that soon on a loaded machine.
+    parse_volume_response(&request_within(path, b"state\n", Duration::from_secs(10))?)
 }
 
 /// Moon keyboard layouts this app asks for.
@@ -216,9 +218,13 @@ pub fn hide_keyboard() {
 }
 
 fn request(path: &Path, command: &[u8]) -> Option<String> {
+    request_within(path, command, IO_TIMEOUT)
+}
+
+fn request_within(path: &Path, command: &[u8], timeout: Duration) -> Option<String> {
     let mut stream = UnixStream::connect(path).ok()?;
-    stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
     stream.write_all(command).ok()?;
     stream.shutdown(Shutdown::Write).ok()?;
 
