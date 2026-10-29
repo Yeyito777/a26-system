@@ -26,7 +26,7 @@ use super::super::markdown::{self, MdBlock};
 use super::super::model::chat::{
     COMPACTION_KIND, merged_thinking, order_queued, queue_label, thinking_key, visible,
 };
-use super::super::model::{Action, Chat, Model, Page, chat};
+use super::super::model::{Action, Chat, Model, Page, chat, rich::Rich};
 use super::super::proto::{Block, Entry, Metadata, ToolStyle};
 use super::super::theme::{
     self, BLOCK_GAP, JUMP, JUMP_INSET, ROW_GAP, TRANSCRIPT_BOTTOM, TRANSCRIPT_TOP, W,
@@ -40,6 +40,7 @@ use super::blocks::{
     notice_color, wall_ms,
 };
 use super::markdown_layout::md_gap;
+use super::media::{Strip, lay_strip};
 use super::ops::{Laid, draw_ops, px, quantized};
 use super::tools::{GROUP_MIN, Output, expandable, lay_group, lay_tool, output_state, tool_run};
 use super::{CHAT_TOP, ViewState, hash_of, transcript_bounds};
@@ -129,6 +130,8 @@ pub struct TranscriptView {
 pub(crate) struct Context<'a> {
     pub(crate) model: &'a Model,
     pub(crate) chat: &'a Chat,
+    /// Image previews and code blocks' state (C1).
+    pub(crate) rich: &'a Rich,
     pub(crate) styles: &'a HashMap<String, ToolStyle>,
     pub(crate) styles_version: u64,
     /// Laying out the live reply.
@@ -184,6 +187,9 @@ pub(crate) enum Segment {
         group: Option<(String, u64)>,
         gap: f32,
     },
+    /// A message's images (C1's `media.rs`): a reply's after it, the
+    /// user's under their bubble.
+    Images { strip: Strip, gap: f32 },
 }
 
 impl Plan {
@@ -343,7 +349,20 @@ fn plan_user(text: &str, metadata: Option<&Metadata>) -> Vec<Segment> {
 
 pub(crate) fn plan_entry(entry: &Entry) -> Plan {
     let segments = match entry {
-        Entry::User { text, metadata, .. } => plan_user(text, metadata.as_ref()),
+        Entry::User {
+            text,
+            metadata,
+            images,
+        } => {
+            let mut segments = plan_user(text, metadata.as_ref());
+            // The user's images under their bubble (C1's strip).
+            if matches!(segments.first(), Some(Segment::User { automated: None }))
+                && let Some(strip) = Strip::of_user(images)
+            {
+                segments.push(Segment::Images { strip, gap: 11.0 });
+            }
+            segments
+        }
         Entry::Ai { blocks, .. } => return plan_blocks(blocks),
         Entry::System { text, metadata, .. } => {
             let kind = metadata.as_ref().and_then(|m| m.kind.as_deref());
@@ -455,6 +474,10 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
             }
             _ => index += 1,
         }
+    }
+    if let Some(strip) = Strip::of_blocks(blocks) {
+        let gap = if segments.is_empty() { 0.0 } else { 25.0 };
+        segments.push(Segment::Images { strip, gap });
     }
     Plan { segments }
 }
@@ -586,6 +609,9 @@ impl ViewState {
                         }
                     };
                     match automated {
+                        // Images alone: their strip, no empty bubble.
+                        None if text.trim().is_empty()
+                            && matches!(entry, Some(Entry::User { images, .. }) if !images.is_empty()) => {}
                         None => {
                             let piece = self.piece(hash_of(("bubble", text, Tone::Own)), || {
                                 lay_bubble(text, Tone::Own, None, false)
@@ -710,6 +736,15 @@ impl ViewState {
                         put(layout, &mut h, piece);
                     }
                 }
+                Segment::Images { strip, gap } => {
+                    h += gap;
+                    let conv = context.chat.id.as_deref();
+                    let images = &context.rich.images;
+                    let piece = self.piece(strip.state_key(images, conv), || {
+                        lay_strip(strip, images, conv).into()
+                    });
+                    put(layout, &mut h, piece);
+                }
             }
         }
         EntryLaid { h, tail_gap }
@@ -726,6 +761,7 @@ impl ViewState {
             chat.id.as_deref(),
             chat.loaded,
             model.ops.styles_version,
+            model.rich.version(),
             self.generation,
             day,
             model.open_summary().map(|s| (&s.provider, &s.title)),
@@ -737,6 +773,7 @@ impl ViewState {
         let context = Context {
             model,
             chat,
+            rich: &model.rich,
             styles: &model.ops.tool_styles,
             styles_version: model.ops.styles_version,
             live: false,

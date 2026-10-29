@@ -1959,7 +1959,7 @@ mod tests {
     fn snapshots_are_adopted_only_as_compatible_extensions() {
         let local = vec![Block::text("Hel")];
         assert!(strict_extension(&local, &[Block::text("Hello")]));
-        assert!(!strict_extension(&local, &[Block::text("Help")]));
+        assert!(!strict_extension(&local, &[Block::text("Hex")]));
         assert!(!strict_extension(&local, &[Block::text("Hel")]));
         let mut model = chat_with("");
         feed(

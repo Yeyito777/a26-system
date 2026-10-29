@@ -157,6 +157,12 @@ pub trait Overlay {
     fn step(&mut self, _cx: &Cx) -> bool {
         false
     }
+
+    /// The image previews it shows, most wanted first (the viewer, C1):
+    /// fetched while it is open.
+    fn images(&self, _cx: &Cx) -> Vec<super::super::images::Want> {
+        Vec::new()
+    }
 }
 
 /// Overlays' ids and bodies, bottom up.
@@ -290,6 +296,16 @@ impl OverlayStack {
             moving |= shown.overlay.step(cx);
         }
         moving
+    }
+
+    /// The image previews the overlays show, the topmost's first.
+    pub fn images(&self, cx: &Cx) -> Vec<super::super::images::Want> {
+        self.modal
+            .iter()
+            .rev()
+            .filter(|shown| !shown.overlay.closing())
+            .flat_map(|shown| shown.overlay.images(cx))
+            .collect()
     }
 
     /// The modal overlays' and the floating ones' ids and bodies, bottom up.
