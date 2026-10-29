@@ -6,7 +6,7 @@
 //! line break, as chat apps show replies.
 #![allow(dead_code)]
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Style {
     Plain,
     Bold,
@@ -15,13 +15,13 @@ pub enum Style {
     Link,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Span {
     pub text: String,
     pub style: Style,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MdBlock {
     Paragraph(Vec<Span>),
     Heading(u8, Vec<Span>),

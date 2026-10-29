@@ -258,8 +258,22 @@ pub struct Window {
     pub history_total_entries: Option<u64>,
     pub has_older_history: Option<bool>,
     pub reset_history_window: bool,
-    #[serde(rename = "pendingAI")]
-    pub pending_ai: Option<PendingAi>,
+    /// The live tail: absent (`None`) leaves the client's own, `null`
+    /// (`Some(None)`) ends it (history_updated, PAR-098).
+    #[serde(rename = "pendingAI", deserialize_with = "present")]
+    pub pending_ai: Option<Option<PendingAi>>,
+    /// conversation_loaded: the older page asked for with `initialBackfill`
+    /// follows, answering this reqId.
+    pub initial_backfill_req_id: Option<String>,
+}
+
+/// A field that may be `null`: present (even as null) is `Some`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// The events the app and the bridge act on. Everything else is `Other`.
@@ -533,6 +547,11 @@ pub const APP_CAPABILITIES: [&str; 6] = [
 /// opening window to fill two of these).
 pub const VIEWPORT: (u32, u32) = (40, 44);
 
+/// Turns in the older page that follows an opening window, and in each page
+/// fetched as the user scrolls up (all within the daemon's byte budget).
+pub const BACKFILL_TURNS: u32 = 10;
+pub const OLDER_TURNS: u32 = 15;
+
 pub fn client_capabilities(capabilities: &[&str], incremental_rows: Option<u32>) -> Value {
     let mut command = json!({ "type": "client_capabilities", "capabilities": capabilities });
     if let Some(rows) = incremental_rows {
@@ -552,12 +571,18 @@ pub fn ping(req_id: &str) -> Value {
     json!({ "type": "ping", "reqId": req_id })
 }
 
-pub fn load_conversation(req_id: &str, conv_id: &str) -> Value {
+/// Opens a conversation: a window of about two screens (byte-budgeted;
+/// sending `turns` is what makes the daemon page at all, and pages its
+/// history_updated too), then the older page `backfill` asks for, from the
+/// same snapshot.
+pub fn load_conversation(req_id: &str, conv_id: &str, backfill: &str) -> Value {
     json!({
         "type": "load_conversation",
         "reqId": req_id,
         "convId": conv_id,
+        "turns": 10,
         "viewport": { "rows": VIEWPORT.0, "cols": VIEWPORT.1 },
+        "initialBackfill": { "reqId": backfill, "turns": BACKFILL_TURNS },
     })
 }
 
@@ -709,7 +734,20 @@ mod tests {
         );
         assert_eq!(blocks[4], Block::Other);
         assert_eq!(window.entries[4], Entry::Other);
-        assert_eq!(window.pending_ai.unwrap().blocks.len(), 1);
+        assert_eq!(window.pending_ai.unwrap().unwrap().blocks.len(), 1);
+        // A null live tail is not an absent one.
+        let Event::HistoryUpdated { window, .. } = parse_event(
+            r#"{"type":"history_updated","convId":"c1","entries":[],"pendingAI":null}"#,
+        ) else {
+            panic!("not updated");
+        };
+        assert_eq!(window.pending_ai, Some(None));
+        let Event::HistoryUpdated { window, .. } =
+            parse_event(r#"{"type":"history_updated","convId":"c1","entries":[]}"#)
+        else {
+            panic!("not updated");
+        };
+        assert_eq!(window.pending_ai, None);
         assert_eq!(reply_text(blocks), "**Done**");
     }
 
@@ -762,6 +800,9 @@ mod tests {
         assert_eq!(created["effort"], "low");
         assert_eq!(abort("c", Some(12.0))["expectedStartedAt"], 12);
         assert!(abort("c", None).get("expectedStartedAt").is_none());
+        let load = load_conversation("r", "c", "b");
+        assert_eq!(load["initialBackfill"]["reqId"], "b");
+        assert!(load["turns"].is_u64() && load["viewport"]["rows"].is_u64());
         let caps = client_capabilities(&APP_CAPABILITIES, Some(20));
         assert_eq!(caps["sidebarView"]["folderView"], "navigate");
     }

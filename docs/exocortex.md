@@ -26,13 +26,16 @@ and fields are ignored, missing ones take defaults.
 The app declares `targeted-unwind`, `sidebar-reorder-delta`,
 `sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`
 and `sidebar-incremental` (with a navigate-view `sidebarView`), then `ping`s.
-Its bootstrap, and every reconnection's, is that, plus `load_conversation`
-for the conversation on screen in the same write.
+Its bootstrap, and every reconnection's, is that, with `load_conversation`
+for the conversation on screen before the `ping`, in the same write, so its
+window comes ahead of the list. A window or an older page the daemon has not
+answered in 15 s is given up on: the chat says so (a late answer still
+lands), and scrolling up asks for the older page again.
 
 | Screen | Daemon traffic |
 | --- | --- |
 | The list | `conversations_list` (first page, then the rest), kept current by `conversation_updated`, `conversation_deleted`, `sidebar_items_reordered`, `sidebar_state_patched`, `conversation_moved` |
-| A conversation | `load_conversation` (a two-screen window, which subscribes and marks it read); older pages with `load_conversation_history` as the user scrolls up, joined where a page ends inside an entry; the stream (`streaming_started`, `block_start`, `text_chunk`, `thinking_chunk`, `streaming_sync`, `tool_call`, `tool_result`, `message_complete`, `streaming_stopped`, `user_message`, `system_message`, `history_updated`); after each stop the newest page again, so the history settles on the daemon's copy. Leaving it `unsubscribe`s. |
+| A conversation | `load_conversation` with `turns`, the `viewport` and an `initialBackfill` (which subscribes and marks it read): a window of about two screens, then the older page behind it from the same snapshot; older pages (15 turns) with `load_conversation_history` as the user scrolls up, joined where a page ends inside an entry; the stream (`streaming_started`, `block_start`, `text_chunk`, `thinking_chunk`, `streaming_sync`, `tool_call`, `tool_result`, `message_complete`, `streaming_stopped`, `user_message`, `system_message`, `history_updated`, whose `pendingAI: null` ends the live reply); after each stop the newest page again, so the history settles on the daemon's copy. Leaving it `unsubscribe`s. |
 | Sending | `send_message` (shown at once, matched to the daemon's `user_message` by `startedAt`); while it works, `queue_message` with `message-end` (shown as Queued until delivered); a new conversation is `new_conversation` with its first message and the chosen provider, model and effort (in the folder the list showed) |
 | Stop | `abort` with the stream's `expectedStartedAt` |
 | Model sheet | `tools_available`'s signed-in providers and their models and efforts; `set_model`, `set_effort` |
@@ -46,6 +49,12 @@ break), bullet, numbered and task lists, quotes, rules, fenced code and tables
 (monospaced, JetBrains Mono), with bold, italic (Inter Italic), code and link
 spans. Automated prompts (subagent reports, notifications) are one gray line.
 
+Sending `turns` matters: without it the daemon does not page at all. It
+sends the whole history on every open (790 KB for a long conversation) and
+treats the client as a legacy subscriber, whose every `history_updated`
+carries the whole history too. With it, windows and updates stay within the
+daemon's byte budget (128 KB), however long the conversation.
+
 All daemon I/O runs on the app's link thread (`src/exocortex/link.rs`), which
 also parses events, so a megabyte list never costs the UI a frame. It sleeps
 in `poll(2)` on the socket and an eventfd, and wakes the UI through another
@@ -56,24 +65,52 @@ read on its own thread too, once a second while the app is in front.
 
 Back in front after more than 20 s, the app reconnects: Moon froze it, so the
 daemon buffered the broadcasts it could not read, and a new connection drops
-them and brings the list up to date.
+them and brings the list up to date. Moon freezes the app right after hiding
+it, so the app reads `UnmapNotify` only once thawed: the time it was hidden is
+when its loop last went to sleep. The reconnection is quiet: what was on
+screen stays (no "Reconnecting…", the live reply kept) for up to 1.5 s while
+the new connection catches up, and events still queued from the dropped one
+are discarded.
 
-Drawing is the System app's CPU canvas and `Presenter`. Layout is cached per
-history entry, so a streaming reply lays out only itself, and every vertical
-position is snapped to 1/16 px so that moving drawn pixels by whole rows gives
-exactly what drawing them there would. A frame is drawn incrementally when
-the last one is known (`view::ChatFrame`, `ListFrame`): a scroll moves the
-transcript's (or list's) rows on the canvas and, with `Presenter::scroll`,
-in the server's pixmap, then draws only the uncovered strip; a reply that
-grows, a press, the working dots, the bar and the composer redraw only
-their rows (from the first op of the reply that changed). The presenter then
-compares and uploads only those rows (`Presenter::present_rows`); rows moved
-on the server are marked stale rather than moved in its shadow too, and are
-uploaded, not compared, when next drawn. Tests check each kind of
-incremental frame against a full redraw, pixel for pixel, and that nothing
-changed outside its damage. `EXOCORTEX_APP_VERIFY=1` makes the app check
-every incremental frame against a full redraw at run time and log any
-difference (development only: it costs a full draw per frame).
+## Opening, laying out and drawing fast
+
+- **Kept conversations.** The last eight conversations opened are kept
+  (`Model::shelve`). Reopening one shows it at once; the daemon's fresh window
+  then replaces only what it covers when the two agree where they meet (the
+  history before is the same: an unwind only cuts the end), or everything.
+  A conversation opened with nothing to show waits up to 110 ms for its window
+  before drawing "Loading…", so Moon's page slide (it holds for the first frame
+  up to 150 ms) shows its messages. The daemon is asked before Moon is asked
+  to snapshot the page.
+- **Entries have stamps.** Every history entry has a stamp (`Chat::stamps`)
+  that changes only when the entry does: a window that resends an entry
+  unchanged keeps its stamp. The view caches an entry's plan by stamp.
+- **Pieces.** The transcript is laid out as pieces: a markdown block, a tool
+  or thinking row (an opened run of tool calls is a row per call), a bubble,
+  a notice. Each is cached by a hash of what it shows (`ViewState::pieces`),
+  so a streamed chunk lays out only the paragraph that grew, and a reply that
+  is committed or settles on the daemon's copy reuses the live reply's pieces.
+  A piece knows the rows its glyphs reach (`Laid::ink`); only those on screen
+  are visited. The reader's place, when not following the newest message, is
+  a piece (entry stamp and index) and its distance from the top; it is kept
+  when anything changes above it (older history, a fresh window).
+- **A fast core.** While in front, the UI thread asks for a minimum
+  utilization clamp (`sched_setattr`, `UTIL_CLAMP_MIN`), so energy-aware
+  scheduling runs its short bursts on a fast core at a high clock: on a slow
+  one a full chat frame took 25-35 ms, on a fast one 4 ms. Off when hidden.
+- **Fonts** are parsed per face when first used (fontdue parses every glyph:
+  about 6 ms a face on a fast core), the ones the first frame does not use on
+  other threads at start.
+
+Measured on the A26 (Moon in a sandbox on a hidden Xorg, the user's real
+daemon and conversations; before, then after this work): opening the longest
+conversation (EXO, 82 entries, over 790 KB of history) 11.9 s, then 17 ms to
+its first frame with messages (10 ms reopened); a short one 84-94 ms, then
+13 ms (10 ms reopened). Drag-scrolling EXO, draw and present per frame: mean
+4.0 ms, p95 7.9 ms, then 2.4 ms, p95 3.7 ms. A streaming reply: mean 7.1 ms,
+p95 21.9 ms, then 3.5 ms, p95 15 ms. Back in front after 30 s frozen while a
+reply streamed: first frame in 14 ms, caught up in 27 ms. The list on a cold
+start: about 95 ms after the process starts, both.
 
 ## Notifications: `exocortex-notify`
 
@@ -160,7 +197,8 @@ soon as it is.
 | `A26_SHELL_SOCKET` | `/run/a26-shell/control.sock` | both (Moon's state, keyboard, transitions, leases) |
 | `MOON_NOTIFY_SOCKET` | `/run/moon-notify/notify.sock` | both |
 | `MOON_FONTS` | `/opt/a26-shell/share/fonts` | the app (fallback glyphs) |
-| `EXOCORTEX_APP_PROFILE` | unset | the app: logs each frame's draw and present time, and whether it was full or partial |
+| `EXOCORTEX_APP_PROFILE` | unset | the app: logs each frame's draw and present time, and whether it was full or partial; when the list first shows, how long an open took to draw, event batches over 2 ms, and coming back to the front |
+| `EXOCORTEX_APP_NO_BOOST` | unset | the app: no utilization clamp for its UI thread |
 | `EXOCORTEX_APP_VERIFY` | unset | the app: checks each partial frame against a full redraw (slow; development) |
 
 The bridge logs connections and the conversations it notifies for (never

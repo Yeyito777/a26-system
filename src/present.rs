@@ -11,8 +11,10 @@
 //! Moon's long-lived connection requires (see `X11-INPUT-DEADLOCK.md`).
 
 use std::error::Error;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use x11rb::connection::Connection;
+use x11rb::protocol::shm::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     ConnectionExt as _, CreateGCAux, Gcontext, ImageFormat, Pixmap, Window,
 };
@@ -23,6 +25,10 @@ use crate::gfx::Canvas;
 /// x11rb never needs BIG-REQUESTS (whose negotiation is a reply wait).
 const MAX_REQUEST_BYTES: usize = 200 * 1024;
 const BAND_ROWS: i32 = 16;
+/// A frame changing at least this much (a fifth of the screen) goes
+/// through the shared buffer (`Shared`); a smaller one (a scroll strip, a
+/// streamed line) through the socket, which never waits for the server.
+const SHM_FROM_BYTES: usize = 2 * 1024 * 1024;
 const CHUNK: usize = 64;
 
 pub struct Presenter {
@@ -40,6 +46,91 @@ pub struct Presenter {
     /// Rows the server holds that `shadow` does not (moved there by
     /// `scroll`): uploaded, not compared, when next presented.
     stale: Vec<bool>,
+    /// The MIT-SHM upload path, when enabled (`enable_shm`).
+    shared: Option<Shared>,
+    /// Areas of this frame to send from `shared` (`x0, y0, x1, y1`).
+    puts: Vec<(i32, i32, i32, i32)>,
+}
+
+/// A buffer the X server maps (MIT-SHM 1.2, a memfd passed over the
+/// socket): an upload is then a copy into it and one in the server, not the
+/// pixels through the X socket (a full 1080x2340 frame is 10 MB, which took
+/// 5-15 ms on the A26). Laid out like the canvas. An added fast path, not in
+/// Moon's copy.
+struct Shared {
+    seg: shm::Seg,
+    map: *mut u32,
+    len: usize,
+    /// The sequence number of the last frame's last ShmPutImage, until its
+    /// completion event says the server has read the buffer: it is not
+    /// written to before then.
+    in_flight: Option<u16>,
+}
+
+impl Shared {
+    fn create<C: Connection>(conn: &C, width: i32, height: i32) -> Result<Self, Box<dyn Error>> {
+        let version = conn.shm_query_version()?.reply()?;
+        if (version.major_version, version.minor_version) < (1, 2) {
+            return Err("MIT-SHM without file descriptors".into());
+        }
+        let len = (width * height) as usize;
+        let bytes = len * 4;
+        // SAFETY: a name and flags; returns a new fd or -1.
+        let fd = unsafe { libc::memfd_create(c"a26-present".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: a freshly created descriptor this value now owns.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: sizes our own memfd.
+        if unsafe { libc::ftruncate(fd.as_raw_fd(), bytes as libc::off_t) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: maps `bytes` of our memfd, shared; checked for failure.
+        let map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd.as_raw_fd(),
+                0,
+            )
+        };
+        if map == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let seg = conn.generate_id()?;
+        // Checked: a server that cannot map it says so now, rather than as a
+        // window that never updates.
+        let attached = conn
+            .shm_attach_fd(seg, fd, true)
+            .map_err(Box::<dyn Error>::from)
+            .and_then(|cookie| cookie.check().map_err(Box::<dyn Error>::from));
+        if let Err(error) = attached {
+            // SAFETY: unmaps exactly what was mapped above.
+            unsafe { libc::munmap(map, bytes) };
+            return Err(error);
+        }
+        Ok(Self {
+            seg,
+            map: map.cast(),
+            len,
+            in_flight: None,
+        })
+    }
+
+    fn pixels(&mut self) -> &mut [u32] {
+        // SAFETY: `map` is a live mapping of `len` pixels owned by this value
+        // (unmapped only in `destroy`), and the server only reads it.
+        unsafe { std::slice::from_raw_parts_mut(self.map, self.len) }
+    }
+
+    fn destroy<C: Connection>(&self, conn: &C) {
+        let _ = conn.shm_detach(self.seg);
+        // SAFETY: unmaps the mapping made in `create`, used no more.
+        unsafe { libc::munmap(self.map.cast(), self.len * 4) };
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +166,29 @@ impl Presenter {
             scratch: Vec::new(),
             moved: Vec::new(),
             stale: vec![false; height as usize],
+            shared: None,
+            puts: Vec::new(),
         })
+    }
+
+    /// Uploads through MIT-SHM from now on, if the server can; returns
+    /// whether it does. The caller then passes X events to `note_event`.
+    pub fn enable_shm<C: Connection>(&mut self, conn: &C) -> bool {
+        if self.shared.is_none() {
+            self.shared = Shared::create(conn, self.width, self.height).ok();
+        }
+        self.shared.is_some()
+    }
+
+    /// Sees an X event: a ShmPutImage's completion frees the buffer.
+    pub fn note_event(&mut self, event: &x11rb::protocol::Event) {
+        if let (Some(shared), x11rb::protocol::Event::ShmCompletion(done)) =
+            (&mut self.shared, event)
+            && done.shmseg == shared.seg
+            && shared.in_flight == Some(done.sequence)
+        {
+            shared.in_flight = None;
+        }
     }
 
     /// Forgets what the server holds, forcing the next frame to upload fully.
@@ -211,7 +324,7 @@ impl Presenter {
                 self.stale[band_y as usize..band_end as usize].fill(false);
                 let mut still_open = Vec::with_capacity(runs.len());
                 for &(x0, x1) in &runs {
-                    self.upload(conn, canvas, x0, band_y, x1, band_end)?;
+                    self.puts.push((x0, band_y, x1, band_end));
                     if let Some(position) = open
                         .iter()
                         .position(|d| d.x0 == x0 && d.x1 == x1 && d.y1 == band_y)
@@ -235,6 +348,7 @@ impl Presenter {
         }
         closed.append(&mut open);
         closed.append(&mut self.moved);
+        self.upload(conn, canvas)?;
         self.valid = true;
         let mut bounds: Option<Damage> = None;
         for damage in &closed {
@@ -293,7 +407,70 @@ impl Presenter {
         Ok(())
     }
 
-    fn upload<C: Connection>(
+    /// Sends this frame's changed areas (`puts`) and keeps them in the
+    /// shadow: a large frame through the shared buffer, if there is one
+    /// (the last area asking for a completion event: the buffer is not
+    /// written to again before it), the rest through the socket, which
+    /// never waits.
+    fn upload<C: Connection>(&mut self, conn: &C, canvas: &Canvas) -> Result<(), Box<dyn Error>> {
+        let bytes: usize = self
+            .puts
+            .iter()
+            .map(|&(x0, y0, x1, y1)| ((x1 - x0) * (y1 - y0) * 4) as usize)
+            .sum();
+        if let Some(shared) = &mut self.shared
+            && bytes >= SHM_FROM_BYTES
+        {
+            if shared.in_flight.is_some() {
+                // The server may still be reading the last one: a round
+                // trip makes sure it has.
+                conn.get_input_focus()?.reply()?;
+                shared.in_flight = None;
+            }
+            let pixels = shared.pixels();
+            for &(x0, y0, x1, y1) in &self.puts {
+                let span = (x1 - x0) as usize;
+                for row in y0..y1 {
+                    let start = (row * self.width + x0) as usize;
+                    let from = &canvas.pixels[start..start + span];
+                    self.shadow[start..start + span].copy_from_slice(from);
+                    pixels[start..start + span].copy_from_slice(from);
+                }
+            }
+            let last = self.puts.len().saturating_sub(1);
+            for (index, &(x0, y0, x1, y1)) in self.puts.iter().enumerate() {
+                let cookie = conn.shm_put_image(
+                    self.pixmap,
+                    self.gc,
+                    self.width as u16,
+                    self.height as u16,
+                    x0 as u16,
+                    y0 as u16,
+                    (x1 - x0) as u16,
+                    (y1 - y0) as u16,
+                    x0 as i16,
+                    y0 as i16,
+                    24,
+                    ImageFormat::Z_PIXMAP.into(),
+                    index == last,
+                    shared.seg,
+                    0,
+                )?;
+                if index == last {
+                    shared.in_flight = Some(cookie.sequence_number() as u16);
+                }
+            }
+            self.puts.clear();
+            return Ok(());
+        }
+        for (x0, y0, x1, y1) in std::mem::take(&mut self.puts) {
+            self.put(conn, canvas, x0, y0, x1, y1)?;
+        }
+        Ok(())
+    }
+
+    /// Sends one area through the socket, in requests under the core limit.
+    fn put<C: Connection>(
         &mut self,
         conn: &C,
         canvas: &Canvas,
@@ -332,6 +509,9 @@ impl Presenter {
     }
 
     pub fn destroy<C: Connection>(&self, conn: &C) {
+        if let Some(shared) = &self.shared {
+            shared.destroy(conn);
+        }
         let _ = conn.free_pixmap(self.pixmap);
         let _ = conn.free_gc(self.gc);
     }
