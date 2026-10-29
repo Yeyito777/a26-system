@@ -12,7 +12,7 @@
 //! piece, keyed per frame, and redrawn alone (`TranscriptFrame`), so a
 //! ticking second costs one line of rows, not a layout pass.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -21,10 +21,11 @@ use serde_json::Value;
 use crate::gfx::{Canvas, RectF};
 
 use super::super::anim::{self, Animator, Tween};
+use super::super::fold::{self, FoldPlan, MergedFold};
 use super::super::footer;
 use super::super::markdown::{self, MdBlock};
 use super::super::model::chat::{
-    COMPACTION_KIND, Disclosure, merged_thinking, thinking_key, visible,
+    COMPACTION_KIND, Disclosure, SavedAnchor, merged_thinking, thinking_key, visible,
 };
 use super::super::model::{Action, Chat, Model, Page, chat, composer, rich::Rich};
 use super::super::proto::{Block, Entry, Metadata, ToolStyle};
@@ -35,14 +36,14 @@ use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets;
 use super::blocks::{
     self, Edge, FOOTER_GAP, Mark, Piece, StatusKind, Tone, draw_mark, lay_bubble, lay_context,
-    lay_divider, lay_edge, lay_footer, lay_live_footer, lay_load_error, lay_md_piece, lay_notice,
-    lay_notification, lay_status, lay_thinking, lay_working, mark_frames, mark_key, notice_color,
-    wall_ms,
+    lay_divider, lay_edge, lay_footer, lay_instructions, lay_live_footer, lay_load_error,
+    lay_md_piece, lay_notice, lay_notification, lay_status, lay_thinking, lay_turn_fold,
+    lay_working, mark_frames, mark_key, notice_color, wall_ms,
 };
 use super::markdown_layout::{md_gap, state_key};
 use super::media::{Strip, lay_strip};
 use super::ops::{Laid, draw_ops, px, quantized};
-use super::tools::{GROUP_MIN, Output, expandable, lay_group, lay_tool, output_state, tool_run};
+use super::tools::{Output, expandable, lay_tool, output_state, subagent_child, tool_run};
 use super::{CHAT_TOP, ViewState, hash_of, transcript_bounds};
 
 /// What a placed piece belongs to (what a long press on it opens).
@@ -102,7 +103,82 @@ pub(crate) struct ChatLayout {
     /// Tool rows whose result came without its output (for prefetching):
     /// their top and id, in order.
     pub(crate) tools: Vec<(f32, String)>,
+    /// Fold marks at the left edge, in order (they never overlap).
+    pub(crate) gutters: Vec<Gutter>,
+    /// Where each fold's first row is (a group's, a turn's): where a
+    /// toggle keeps the tapped spot.
+    pub(crate) fold_tops: HashMap<String, f32>,
+    /// Each placed entry's index in the chat by its stamp, and its top
+    /// (the reader's place is kept by it).
+    pub(crate) entry_tops: Vec<(usize, f32)>,
     pub(crate) height: f32,
+}
+
+/// A fold's mark at the left edge (PAR-407): down a row that carries
+/// folded work (or every row of an opened group), or a short line in a gap
+/// where work folded with no reply to carry it. A tap opens or closes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Gutter {
+    pub(crate) y0: f32,
+    pub(crate) y1: f32,
+    pub(crate) key: String,
+    pub(crate) open: bool,
+    pub(crate) line: bool,
+}
+
+/// The mark's column (the transcript's left padding) and its line in it.
+const GUTTER_W: f32 = theme::TRANSCRIPT_PAD;
+const GUTTER_X: f32 = 14.0;
+const GUTTER_LINE: f32 = 6.0;
+/// A row's mark leaves this much of it at each end.
+const GUTTER_INSET: f32 = 9.0;
+/// A gap's line, and how far its target reaches beyond it.
+const GUTTER_GAP_LINE: f32 = 34.0;
+const GUTTER_GAP_REACH: f32 = 26.0;
+
+impl Gutter {
+    /// Rows it draws.
+    fn ink(&self) -> (f32, f32) {
+        if self.line {
+            (self.y0, self.y1)
+        } else {
+            (self.y0 + GUTTER_INSET, self.y1 - GUTTER_INSET)
+        }
+    }
+
+    /// Rows its target covers.
+    fn target(&self) -> (f32, f32) {
+        if self.line {
+            (self.y0 - GUTTER_GAP_REACH, self.y1 + GUTTER_GAP_REACH)
+        } else {
+            (self.y0, self.y1)
+        }
+    }
+
+    fn action(&self) -> Action {
+        Action::Chat(chat::Act::ToggleExpanded(self.key.clone()))
+    }
+
+    fn pressed(&self, pressed: Option<&Action>) -> bool {
+        matches!(pressed, Some(Action::Chat(chat::Act::ToggleExpanded(key))) if *key == self.key)
+    }
+
+    /// Its line on screen, `dy` from the transcript's coordinates.
+    fn draw(&self, canvas: &mut Canvas, dy: f32, pressed: bool) {
+        let c = theme::c();
+        let color = if pressed {
+            theme::p().muted
+        } else if self.open {
+            c.fold_mark_open
+        } else {
+            c.fold_mark
+        };
+        let (y0, y1) = self.ink();
+        let (y0, y1) = (px(dy + y0), px(dy + y1));
+        if y1 > y0 {
+            canvas.fill_rect(px(GUTTER_X), y0, px(GUTTER_LINE), y1 - y0, color, 1.0);
+        }
+    }
 }
 
 /// A cached piece and the layout pass that last used it.
@@ -133,6 +209,51 @@ pub struct TranscriptView {
     still_since: Option<Instant>,
     /// The transcript's rows at the last frame (for `animate`).
     bounds: (f32, f32),
+    /// The open chat's folding, while it shows the same.
+    fold: Option<Folding>,
+    /// A fold just tapped: its first row goes where the tapped row was.
+    pin: Option<Pin>,
+    /// The chat placed at its saved reading place (or its latest response,
+    /// or the bottom) once it loaded.
+    positioned: Option<String>,
+    /// Show all work as last seen (flipping it closes the folds).
+    show_all: Option<bool>,
+    /// The reading place last kept: the chat, its entry and that entry's
+    /// top below the transcript's (None: at the newest message).
+    kept: Option<(String, Option<(usize, i32)>)>,
+}
+
+impl TranscriptView {
+    /// A fold's toggle was touched at `row` (below the transcript's top):
+    /// once it opens or folds, its first row goes there.
+    fn pin_fold(&mut self, model: &Model, key: String, row: f32, now: Instant) {
+        let open = model.chat.expanded.contains(&key);
+        self.pin = Some(Pin {
+            key,
+            top: row,
+            open,
+            at: now,
+        });
+    }
+}
+
+/// A pin waits this long for its fold to toggle (a press that became a
+/// drag never does).
+const PIN_WAIT: Duration = Duration::from_secs(2);
+
+/// The fold plan of the open chat and what it was made from.
+pub(crate) struct Folding {
+    key: u64,
+    plan: Rc<FoldPlan>,
+}
+
+/// A fold toggle's tapped row: where (on screen) and whether the fold was
+/// open then.
+struct Pin {
+    key: String,
+    top: f32,
+    open: bool,
+    at: Instant,
 }
 
 pub(crate) struct Context<'a> {
@@ -152,13 +273,7 @@ pub(crate) struct Context<'a> {
 
 /// An automated prompt (PAR-112, 402): how it is labelled.
 pub(crate) struct Automated {
-    /// "Chrono", "Subagent completion", …
-    label: &'static str,
     kind: String,
-    /// The conversation it came from.
-    source: Option<String>,
-    /// An external notification's channel (its header's first words).
-    channel: Option<String>,
     preview: String,
 }
 
@@ -172,14 +287,24 @@ pub(crate) struct Plan {
 }
 
 pub(crate) enum Segment {
-    /// A user message: the user's own bubble, or an automated prompt.
-    User { automated: Option<Automated> },
+    /// A user message: the user's own bubble, or an automated prompt; or
+    /// the owner's own words a notification relays (`relay`: them and where
+    /// they came from).
+    User {
+        automated: Option<Automated>,
+        relay: Option<(String, String)>,
+    },
     /// A system notice (its key opens it).
     Notice { key: String, muted: bool },
     /// The compaction divider.
     Divider,
-    /// A block of a reply's markdown.
-    Markdown { block: MdBlock, hash: u64, gap: f32 },
+    /// A block of a reply's markdown (of its block `index`).
+    Markdown {
+        index: usize,
+        block: MdBlock,
+        hash: u64,
+        gap: f32,
+    },
     /// A `[Context:` text block.
     Context { index: usize, gap: f32 },
     /// Thinking blocks `index..end` (merged), which open to the thinking.
@@ -190,29 +315,11 @@ pub(crate) enum Segment {
         hash: u64,
         gap: f32,
     },
-    /// A run of tool calls: a row each, or one folded row (`group`: its
-    /// toggle key and what it shows) that opens to them.
-    Tools {
-        calls: Vec<ToolRef>,
-        group: Option<(String, u64)>,
-        gap: f32,
-    },
+    /// A run of tool calls, a row each.
+    Tools { calls: Vec<ToolRef>, gap: f32 },
     /// A message's images (C1's `media.rs`): a reply's after it, the
     /// user's under their bubble.
     Images { strip: Strip, gap: f32 },
-}
-
-impl Plan {
-    /// How far an entry's first row reaches up into the gap above it (a
-    /// notification row's 44 pt target).
-    fn lead(&self) -> f32 {
-        match self.segments.first() {
-            Some(Segment::User {
-                automated: Some(_), ..
-            }) => NOTIFICATION_TRIM,
-            _ => 0.0,
-        }
-    }
 }
 
 /// A notification row's target reaches this far into the gaps around it.
@@ -226,92 +333,8 @@ pub(crate) struct ToolRef {
     pub(crate) hash: u64,
 }
 
-const AUTOMATION_LABELS: [(&str, &str); 8] = [
-    ("external_notification", "Notification"),
-    ("background_task_completion", "Background completion"),
-    ("chrono_wake", "Chrono"),
-    ("chrono_hard_wake", "Chrono hard wake"),
-    ("exo_send", "Exo delegation"),
-    ("subagent_completion", "Subagent completion"),
-    ("goal_continuation", "Goal continuation"),
-    ("daemon_restart", "Daemon restart"),
-];
-
 /// Notices that keep the model up to date and are never shown (PAR-107).
 const MODEL_ONLY: [&str; 3] = ["client_host", "remote_host", "conversation_goal"];
-
-/// A prompt an older daemon wrote without `automation` (`[notification]
-/// …`, `[chrono wake: …]`, `[Discord Notification] …`).
-fn legacy_automated(text: &str) -> bool {
-    let Some(rest) = text.strip_prefix('[') else {
-        return false;
-    };
-    if rest.starts_with("notification]")
-        || rest.starts_with("chrono wake:")
-        || rest.starts_with("chrono wake]")
-        || rest.starts_with("chrono hard wake:")
-        || rest.starts_with("chrono hard wake]")
-    {
-        return true;
-    }
-    if let Some(after) = rest.strip_prefix("external notification") {
-        return !after
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_');
-    }
-    rest.find("Notification]").is_some_and(|end| {
-        rest[..end]
-            .chars()
-            .all(|c| c.is_ascii_alphabetic() || c == '/' || c == ' ')
-    })
-}
-
-/// The first meaningful words of a notification, on one line.
-fn notification_preview(text: &str) -> String {
-    let mut text = text.to_owned();
-    // The agent-facing tail.
-    for tail in ["\n\nAction:", "\n\nFilter output:"] {
-        if let Some(at) = text.find(tail) {
-            text.truncate(at);
-        }
-    }
-    let mut text = text.trim_start();
-    // The envelope.
-    if let Some(rest) = text.strip_prefix("[notification]") {
-        text = rest;
-    } else if let Some(rest) = text
-        .strip_prefix("[external notification")
-        .or_else(|| text.strip_prefix("[chrono wake:"))
-        .or_else(|| text.strip_prefix("[chrono hard wake:"))
-        && let Some((_, after)) = rest.split_once(']')
-    {
-        text = after;
-    }
-    let mut out = String::new();
-    for word in text.split_whitespace() {
-        // Channel and mention noise.
-        if (word.starts_with("[ch:")
-            || word.starts_with("[dm:")
-            || word.starts_with("[msg:")
-            || word.starts_with("[thread:")
-            || word.starts_with("[reply-to:")
-            || word.starts_with("<@"))
-            && (word.ends_with(']') || word.ends_with('>'))
-            || word == "↳"
-        {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(word);
-        if out.len() > 200 {
-            break;
-        }
-    }
-    out
-}
 
 fn plan_user(text: &str, metadata: Option<&Metadata>) -> Vec<Segment> {
     if metadata.is_some_and(|m| m.system) {
@@ -321,39 +344,45 @@ fn plan_user(text: &str, metadata: Option<&Metadata>) -> Vec<Segment> {
         }];
     }
     let automation = metadata.and_then(|m| m.automation.as_ref());
-    if automation.is_none() && !legacy_automated(text) {
-        return vec![Segment::User { automated: None }];
+    // The owner's own words, relayed: their bubble, where it came from.
+    if let Some(words) = fold::owner_relayed_text(text, automation) {
+        let header = text.split('\n').next().unwrap_or_default();
+        let source = fold::notification_preview(header);
+        return vec![Segment::User {
+            automated: None,
+            relay: Some((words, source)),
+        }];
     }
-    let kind = automation
-        .and_then(|a| a.get("kind"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    let label = AUTOMATION_LABELS
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map_or("Notification", |(_, label)| label);
-    let source = automation
-        .and_then(|a| a.get("sourceId"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let channel = (kind == "external_notification")
-        .then(|| {
-            text.strip_prefix("[notification]")
-                .and_then(|rest| rest.lines().next())
-                .map(|line| notification_preview(line.trim()))
-                .filter(|line| !line.is_empty())
-        })
-        .flatten();
+    if !fold::automated(text, automation) {
+        return vec![Segment::User {
+            automated: None,
+            relay: None,
+        }];
+    }
+    let field = |name: &str| {
+        automation
+            .and_then(|a| a.get(name))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
     vec![Segment::User {
         automated: Some(Automated {
-            label,
-            kind,
-            source,
-            channel,
-            preview: notification_preview(text),
+            kind: field("kind").unwrap_or_default(),
+            preview: fold::notification_preview(text),
         }),
+        relay: None,
     }]
+}
+
+/// Whether a notice folds with its turn's work (`isInformationalNotice`):
+/// compaction, provider notices, restarts, interruptions, retries.
+pub(crate) fn informational(text: &str, kind: Option<&str>) -> bool {
+    kind == Some(COMPACTION_KIND)
+        || kind == Some("provider_notice")
+        || text == chat::COMPACTION_TEXT
+        || text == "✗ Daemon restarted"
+        || text == "✗ Interrupted"
+        || text.starts_with("⟳ ")
 }
 
 pub(crate) fn plan_entry(entry: &Entry) -> Plan {
@@ -365,8 +394,13 @@ pub(crate) fn plan_entry(entry: &Entry) -> Plan {
         } => {
             let mut segments = plan_user(text, metadata.as_ref());
             // The user's images under their bubble (C1's strip).
-            if matches!(segments.first(), Some(Segment::User { automated: None }))
-                && let Some(strip) = Strip::of_user(images)
+            if matches!(
+                segments.first(),
+                Some(Segment::User {
+                    automated: None,
+                    ..
+                })
+            ) && let Some(strip) = Strip::of_user(images)
             {
                 segments.push(Segment::Images { strip, gap: 11.0 });
             }
@@ -412,6 +446,7 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
                     let parsed = markdown::parse_capped(text);
                     for (at, block) in parsed.iter().enumerate() {
                         segments.push(Segment::Markdown {
+                            index,
                             block: block.clone(),
                             hash: hash_of(("md", block)),
                             gap: if at == 0 {
@@ -438,7 +473,7 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
                 }
                 index = end.max(index + 1);
             }
-            Block::ToolCall { tool_call_id, .. } => {
+            Block::ToolCall { .. } => {
                 let (end, calls) = tool_run(blocks, index);
                 let calls: Vec<ToolRef> = calls
                     .into_iter()
@@ -479,13 +514,7 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
                         })
                     })
                     .collect();
-                let group = (calls.len() >= GROUP_MIN).then(|| {
-                    let key = format!("group:{tool_call_id}");
-                    let shown: Vec<u64> = calls.iter().map(|tool| tool.hash).collect();
-                    let hash = hash_of(("group", &key, shown));
-                    (key, hash)
-                });
-                segments.push(Segment::Tools { calls, group, gap });
+                segments.push(Segment::Tools { calls, gap });
                 index = end.max(index + 1);
             }
             _ => index += 1,
@@ -545,11 +574,89 @@ fn title_of(model: &Model, id: &str) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
-/// Where an entry's pieces went: its height (0: nothing shown) and the gap
-/// it leaves to the next row.
+/// Where an entry's pieces went: their bottom below where it was placed
+/// (a notification row reaches above it), the gap it leaves to the next
+/// row, and whether anything showed.
 struct EntryLaid {
     h: f32,
     tail_gap: f32,
+    any: bool,
+}
+
+/// What of an entry shows (`Shown::default()`: all of it, unfolded).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Shown<'a> {
+    /// Blocks folded away.
+    pub(crate) hidden: Option<&'a HashSet<usize>>,
+    /// Only this block (the live turn's newest step, already committed).
+    pub(crate) only: Option<usize>,
+    /// Folding is on: a notification is its row.
+    pub(crate) folding: bool,
+    /// A notification folded into a turn's work, shown while that is open.
+    pub(crate) merged: Option<&'a MergedFold>,
+    /// The turn's folded-work row above it: what folded, its key, open.
+    pub(crate) summary: Option<(&'a str, &'a str, bool)>,
+    /// The space above its first piece (something is above it).
+    pub(crate) gap: f32,
+}
+
+impl Shown<'_> {
+    fn block(&self, index: usize) -> bool {
+        self.only.is_none_or(|only| only == index)
+            && !self.hidden.is_some_and(|hidden| hidden.contains(&index))
+    }
+}
+
+/// Puts an entry's pieces one under the other.
+struct Placer<'a> {
+    layout: &'a mut ChatLayout,
+    y: f32,
+    h: f32,
+    index: u32,
+    stamp: u64,
+    /// The space above the first piece.
+    first_gap: f32,
+}
+
+impl Placer<'_> {
+    /// The space above a piece (none above the entry's first).
+    fn gap(&mut self, gap: f32) {
+        if self.index > 0 {
+            self.h += gap;
+        }
+    }
+
+    /// The entry's first row is a 44 pt target reaching into the gap above.
+    fn lead(&mut self) {
+        if self.index == 0 {
+            self.h -= NOTIFICATION_TRIM;
+        }
+    }
+
+    fn put(&mut self, (laid, marks): (Rc<Laid>, Rc<[Mark]>)) {
+        if laid.h <= 0.0 {
+            return;
+        }
+        if self.index == 0 {
+            self.h += self.first_gap;
+        }
+        let top = self.y + self.h;
+        for mark in marks.iter() {
+            self.layout.marks.push(PlacedMark {
+                top,
+                mark: mark.clone(),
+            });
+        }
+        self.layout.items.push(Placed {
+            y: top,
+            laid,
+            stamp: self.stamp,
+            index: self.index,
+            role: Role::Message,
+        });
+        self.index += 1;
+        self.h += self.layout.items.last().map_or(0.0, |item| item.laid.h);
+    }
 }
 
 impl ViewState {
@@ -582,7 +689,7 @@ impl ViewState {
         cached.plan.clone()
     }
 
-    /// Places a planned entry's pieces from `y`.
+    /// Places a planned entry's pieces from `y`, what `shown` shows of it.
     #[allow(clippy::too_many_arguments)]
     fn place(
         &mut self,
@@ -593,101 +700,109 @@ impl ViewState {
         stamp: u64,
         blocks: &[Block],
         context: &Context,
+        shown: Shown,
     ) -> EntryLaid {
-        let mut h = 0.0;
-        let mut index = 0;
+        let mut at = Placer {
+            layout,
+            y,
+            h: 0.0,
+            index: 0,
+            stamp,
+            first_gap: shown.gap,
+        };
         let mut tail_gap = ROW_GAP;
-        let mut put =
-            |layout: &mut ChatLayout, h: &mut f32, (laid, marks): (Rc<Laid>, Rc<[Mark]>)| {
-                if laid.h > 0.0 {
-                    let top = y + *h;
-                    for mark in marks.iter() {
-                        layout.marks.push(PlacedMark {
-                            top,
-                            mark: mark.clone(),
-                        });
-                    }
-                    layout.items.push(Placed {
-                        y: top,
-                        laid: laid.clone(),
-                        stamp,
-                        index,
-                        role: Role::Message,
-                    });
-                    index += 1;
-                    *h += laid.h;
-                }
-            };
         let chat = context.chat;
         let open_at = |key: &str| chat.is_open(key, context.disclosure);
         let model = context.model;
+        if let Some((label, key, open)) = shown.summary {
+            let piece = self.piece(hash_of(("turn fold", label, key, open)), || {
+                lay_turn_fold(Some(label), key, open, false)
+            });
+            at.put(piece);
+        }
         for segment in &plan.segments {
             match segment {
-                Segment::User { automated } => {
+                Segment::User { automated, relay } => {
                     let Some(Entry::User { text, .. }) = entry else {
                         continue;
                     };
-                    let bubble_label = |a: &Automated| {
-                        let source = match a.kind.as_str() {
-                            "exo_send" => Some(a.source.as_deref().map_or_else(
-                                || "another conversation".to_owned(),
-                                |id| title_of(model, id),
-                            )),
-                            "subagent_completion" => {
-                                a.source.as_deref().map(|id| title_of(model, id))
-                            }
-                            "external_notification" => a.channel.clone(),
-                            _ => None,
-                        };
-                        match source {
-                            Some(source) => format!("{} · from {source}", a.label),
-                            None => a.label.to_owned(),
-                        }
-                    };
-                    match automated {
+                    if let Some((words, source)) = relay {
+                        let label = format!("via {source}");
+                        let piece = self.piece(hash_of(("relay", words, &label)), || {
+                            lay_bubble(words, Tone::Own, Some(&label), false)
+                        });
+                        at.put(piece);
+                        continue;
+                    }
+                    let Some(a) = automated else {
                         // Images alone: their strip, no empty bubble.
-                        None if text.trim().is_empty()
-                            && matches!(entry, Some(Entry::User { images, .. }) if !images.is_empty()) =>
-                            {}
-                        None => {
-                            let piece = self.piece(hash_of(("bubble", text, Tone::Own)), || {
-                                lay_bubble(text, Tone::Own, None, false)
-                            });
-                            put(layout, &mut h, piece);
-                        }
-                        // A parent's delegation is this conversation's prompt.
-                        Some(a)
-                            if a.kind == "exo_send"
-                                && !a
-                                    .source
-                                    .as_deref()
-                                    .is_some_and(|id| own_subagent(model, id)) =>
+                        if text.trim().is_empty()
+                            && matches!(entry, Some(Entry::User { images, .. }) if !images.is_empty())
                         {
-                            let label = bubble_label(a);
-                            let piece = self.piece(hash_of(("auto", text, &label)), || {
-                                lay_bubble(text, Tone::Automated, Some(&label), true)
-                            });
-                            put(layout, &mut h, piece);
+                            continue;
                         }
-                        Some(a) => {
-                            let key = format!("u:{}", hash_of(text));
-                            let open = open_at(&key);
-                            let piece = self
-                                .piece(hash_of(("note", &key, a.label, &a.preview, open)), || {
-                                    lay_notification(a.label, &a.preview, &key, open)
-                                });
-                            put(layout, &mut h, piece);
-                            tail_gap = ROW_GAP - NOTIFICATION_TRIM;
-                            if open {
-                                let label = bubble_label(a);
-                                h -= NOTIFICATION_TRIM - 17.0;
-                                let piece = self.piece(hash_of(("auto", text, &label)), || {
-                                    lay_bubble(text, Tone::Automated, Some(&label), true)
-                                });
-                                put(layout, &mut h, piece);
-                                tail_gap = ROW_GAP;
-                            }
+                        let piece = self.piece(hash_of(("bubble", text, Tone::Own)), || {
+                            lay_bubble(text, Tone::Own, None, false)
+                        });
+                        at.put(piece);
+                        continue;
+                    };
+                    let source = |id: &str| title_of(model, id);
+                    let automation = match entry {
+                        Some(Entry::User { metadata, .. }) => {
+                            metadata.as_ref().and_then(|m| m.automation.as_ref())
                         }
+                        _ => None,
+                    };
+                    let own = |id: &str| own_subagent(model, id);
+                    // A parent's delegation is this conversation's prompt.
+                    let Some(label) = fold::notification_label(text, automation, &own) else {
+                        let label =
+                            fold::bubble_label(text, automation, fold::label_of(&a.kind), &source);
+                        let piece = self.piece(hash_of(("auto", text, &label)), || {
+                            lay_bubble(text, Tone::Automated, Some(&label), true)
+                        });
+                        at.put(piece);
+                        continue;
+                    };
+                    let bubble = |view: &mut Self, at: &mut Placer| {
+                        let label = fold::bubble_label(text, automation, label, &source);
+                        let piece = view.piece(hash_of(("auto", text, &label)), || {
+                            lay_bubble(text, Tone::Automated, Some(&label), true)
+                        });
+                        at.put(piece);
+                    };
+                    // Opened with its turn's work: the row it opened leads.
+                    if let Some(merged) = shown.merged
+                        && let Some(lead) = &merged.lead
+                    {
+                        at.lead();
+                        let piece = self.piece(hash_of(("turn fold", lead, &merged.turn)), || {
+                            lay_turn_fold(Some(lead), &merged.turn, true, false)
+                        });
+                        at.put(piece);
+                        at.h -= NOTIFICATION_TRIM - 17.0;
+                    }
+                    // Shown in full (all work shown, or its fold open).
+                    if !shown.folding || shown.merged.is_some_and(|m| m.open) {
+                        bubble(self, &mut at);
+                        continue;
+                    }
+                    let key = format!("u:{}", hash_of(text));
+                    let open = open_at(&key);
+                    if at.index == 0 {
+                        at.lead();
+                    }
+                    let piece = self
+                        .piece(hash_of(("note", &key, label, &a.preview, open)), || {
+                            lay_notification(label, &a.preview, &key, open)
+                        });
+                    at.put(piece);
+                    tail_gap = ROW_GAP - NOTIFICATION_TRIM;
+                    if open {
+                        at.h -= NOTIFICATION_TRIM - 17.0;
+                        bubble(self, &mut at);
+                        tail_gap = ROW_GAP;
                     }
                 }
                 Segment::Notice { key, muted } => {
@@ -703,27 +818,38 @@ impl ViewState {
                         hash_of(("notice", key, text, color, *muted, open, stamp)),
                         || lay_notice(text, color, *muted, key, stamp, open),
                     );
-                    put(layout, &mut h, piece);
+                    at.put(piece);
                 }
                 Segment::Divider => {
                     let piece =
                         self.piece(hash_of("divider"), || lay_divider("Compaction finished"));
-                    put(layout, &mut h, piece);
+                    at.put(piece);
                 }
-                Segment::Markdown { block, hash, gap } => {
-                    h += gap;
+                Segment::Markdown {
+                    index,
+                    block,
+                    hash,
+                    gap,
+                } => {
+                    if !shown.block(*index) {
+                        continue;
+                    }
+                    at.gap(*gap);
                     let rich = context.rich;
                     let key = hash_of((hash, state_key(block, Some(rich))));
                     let piece = self.piece(key, || lay_md_piece(block, rich));
-                    put(layout, &mut h, piece);
+                    at.put(piece);
                 }
                 Segment::Context { index, gap } => {
                     let Some(Block::Text { text }) = blocks.get(*index) else {
                         continue;
                     };
-                    h += gap;
+                    if !shown.block(*index) {
+                        continue;
+                    }
+                    at.gap(*gap);
                     let piece = self.piece(hash_of(("context", text)), || lay_context(text));
-                    put(layout, &mut h, piece);
+                    at.put(piece);
                 }
                 Segment::Thinking {
                     index,
@@ -732,7 +858,10 @@ impl ViewState {
                     hash,
                     gap,
                 } => {
-                    h += gap;
+                    if !shown.block(*index) {
+                        continue;
+                    }
+                    at.gap(*gap);
                     let open = open_at(key);
                     let growing = context.live && *end == blocks.len();
                     // Its text merged only when laid out (a cached piece
@@ -741,66 +870,150 @@ impl ViewState {
                         let (_, text) = merged_thinking(blocks, *index);
                         lay_thinking(&text, key, stamp, open, growing)
                     });
-                    put(layout, &mut h, piece);
+                    at.put(piece);
                 }
-                Segment::Tools { calls, group, gap } => {
-                    h += gap;
-                    let indent = match group {
-                        Some((key, hash)) => {
-                            let open = open_at(key);
-                            let piece = self
-                                .piece(hash_of((hash, open, context.styles_version)), || {
-                                    lay_group(blocks, calls, key, open, context)
-                                });
-                            put(layout, &mut h, piece);
-                            if !open {
-                                continue;
-                            }
-                            0.0
+                Segment::Tools { calls, gap } => {
+                    let mut first = true;
+                    for tool in calls {
+                        if !shown.block(tool.call) {
+                            continue;
                         }
-                        None => 0.0,
-                    };
-                    for (at, tool) in calls.iter().enumerate() {
-                        if at > 0 || group.is_some() {
-                            h += 17.0;
+                        if first {
+                            at.gap(*gap);
+                            first = false;
+                        } else {
+                            at.h += 17.0;
                         }
                         let output = output_state(chat, tool, blocks, context.live);
                         let open = open_at(&tool.key) && expandable(&output);
                         if matches!(output, Output::Unknown) {
                             let id = tool.key.trim_start_matches("tool:").to_owned();
-                            layout.tools.push((y + h, id));
+                            at.layout.tools.push((at.y + at.h, id));
                         }
+                        let child = match &blocks[tool.call] {
+                            Block::ToolCall { tool_name, .. } => subagent_child(tool_name, &output)
+                                .filter(|id| model.sidebar.conversations.contains_key(id)),
+                            _ => None,
+                        };
                         let key = hash_of((
                             tool.hash,
                             open,
-                            indent as i32,
                             context.styles_version,
                             open.then(|| output.key()),
                             (!open).then(|| expandable(&output)),
                             matches!(output, Output::Running) && context.live,
+                            &child,
                         ));
                         let piece = self.piece(key, || {
-                            lay_tool(blocks, tool, indent, open, &output, context)
+                            lay_tool(blocks, tool, open, &output, child.as_deref(), context)
                         });
-                        put(layout, &mut h, piece);
+                        at.put(piece);
                     }
                 }
                 Segment::Images { strip, gap } => {
-                    h += gap;
+                    if shown.only.is_some() {
+                        continue;
+                    }
+                    at.gap(*gap);
                     let conv = context.chat.id.as_deref();
                     let images = &context.rich.images;
                     let piece = self.piece(strip.state_key(images, conv), || {
                         lay_strip(strip, images, conv).into()
                     });
-                    put(layout, &mut h, piece);
+                    at.put(piece);
                 }
             }
         }
-        EntryLaid { h, tail_gap }
+        EntryLaid {
+            h: at.h,
+            tail_gap,
+            any: at.index > 0,
+        }
+    }
+
+    /// The open chat's fold plan (none while all work shows), made again
+    /// only when what it is made from changed: the entries, the live
+    /// reply's steps, the folds toggled, the fold marks setting, the
+    /// sidebar (whose subagents a conversation has).
+    fn folding(&mut self, model: &Model, disclosure: Disclosure) -> Option<Rc<FoldPlan>> {
+        use std::hash::{Hash, Hasher};
+        if disclosure.show_all {
+            self.transcript.fold = None;
+            return None;
+        }
+        let chat = &model.chat;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (chat.id.as_deref(), chat.start, &chat.stamps).hash(&mut hasher);
+        if let Some(live) = &chat.live {
+            live.started_at.to_bits().hash(&mut hasher);
+            for block in &live.blocks {
+                let step = match block {
+                    Block::Text { text } => 1 + u8::from(!text.trim().is_empty()),
+                    Block::Thinking { .. } => 3,
+                    Block::ToolCall { .. } => 4,
+                    Block::ToolResult { .. } => 5,
+                    Block::Other => 6,
+                };
+                step.hash(&mut hasher);
+            }
+        }
+        // The folds toggled open (any order).
+        let toggled = chat
+            .expanded
+            .iter()
+            .filter(|key| key.starts_with("turn:") || key.starts_with("group:"))
+            .fold(0u64, |sum, key| sum ^ hash_of(key));
+        (toggled, disclosure.marks, model.sidebar.version).hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some(folding) = &self.transcript.fold
+            && folding.key == key
+        {
+            return Some(folding.plan.clone());
+        }
+        let msgs: Vec<fold::Msg> = chat
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::User { text, metadata, .. } => {
+                    let meta = metadata.as_ref();
+                    fold::Msg::User {
+                        text,
+                        system: meta.is_some_and(|m| m.system),
+                        automation: meta.and_then(|m| m.automation.as_ref()),
+                        queue_entry_id: meta.and_then(|m| m.queue_entry_id.as_deref()),
+                        started_at: meta.map_or(0.0, |m| m.started_at),
+                    }
+                }
+                Entry::Ai { blocks, .. } => fold::Msg::Assistant { blocks },
+                Entry::System { text, metadata, .. } => fold::Msg::System {
+                    informational: informational(
+                        text,
+                        metadata.as_ref().and_then(|m| m.kind.as_deref()),
+                    ),
+                },
+                _ => fold::Msg::Other,
+            })
+            .collect();
+        let keys = fold::keys(&chat.entries, chat.start);
+        let plan = Rc::new(fold::plan(
+            &msgs,
+            &keys,
+            chat.live.as_ref().map(|live| live.blocks.as_slice()),
+            &|key| chat.expanded.contains(key),
+            disclosure.marks,
+            chat.live.as_ref().map(|live| live.started_at),
+            &|id| own_subagent(model, id),
+        ));
+        self.transcript.fold = Some(Folding {
+            key,
+            plan: plan.clone(),
+        });
+        Some(plan)
     }
 
     /// Lays the open chat out if it changed since the last frame: every
-    /// entry's pieces, from the cache unless what they show is new.
+    /// entry's pieces, from the cache unless what they show is new; folded
+    /// (`fold.rs`) unless Show all work is on.
     pub(crate) fn layout(&mut self, model: &Model) {
         self.check_generation();
         let chat = &model.chat;
@@ -821,6 +1034,8 @@ impl ViewState {
             return;
         }
         self.pass += 1;
+        let fold = self.folding(model, disclosure);
+        let folding = fold.is_some();
         let context = Context {
             model,
             chat,
@@ -877,11 +1092,55 @@ impl ViewState {
                 &|| lay_edge(&edge),
             );
             gap = ROW_GAP;
+            // The System Instructions box, pinned at the top (PAR-132).
+            for (n, text) in chat.instructions.iter().enumerate() {
+                let key = match n {
+                    0 => "instructions".to_owned(),
+                    n => format!("instructions#{}", n + 1),
+                };
+                let open = chat.is_open(&key, disclosure);
+                y += gap;
+                let toggle = Action::Chat(chat::Act::ToggleExpanded(key.clone()));
+                y = single(
+                    self,
+                    &mut layout,
+                    y,
+                    hash_of(("instructions", text, &key, open)),
+                    Role::Other,
+                    &|| lay_instructions("System Instructions", text, toggle.clone(), open),
+                );
+            }
         }
         let live_follows = chat.live.is_some() && chat.echoes.is_empty();
         let (footers, live_base) = footer::footers(&chat.entries, live_follows);
         let now = wall_ms(Instant::now());
+        // Whether the run of replies so far shows anything (else no lone
+        // footer under folded work).
+        let mut run_shows = false;
         for (at, (entry, stamp)) in chat.entries.iter().zip(&chat.stamps).enumerate() {
+            let reply = matches!(entry, Entry::Ai { .. });
+            if !reply {
+                run_shows = false;
+            }
+            if let Some(fold) = &fold {
+                // Work folded with no reply to carry its mark: a line in
+                // the gap, where it was.
+                if let Some(line) = fold.line(at) {
+                    let y1 = y + gap - 3.0;
+                    let y0 = y1 - GUTTER_GAP_LINE;
+                    layout.fold_tops.entry(line.group.clone()).or_insert(y0);
+                    layout.gutters.push(Gutter {
+                        y0,
+                        y1,
+                        key: line.group.clone(),
+                        open: false,
+                        line: true,
+                    });
+                }
+                if fold.hides(at) {
+                    continue;
+                }
+            }
             let plan = self.plan(*stamp, entry);
             if plan.segments.is_empty() {
                 continue;
@@ -890,7 +1149,20 @@ impl ViewState {
                 Entry::Ai { blocks, .. } => blocks.as_slice(),
                 _ => &[],
             };
-            let top = y + gap - plan.lead();
+            let folded = fold.as_ref().and_then(|f| f.by_msg.get(&at));
+            let shown = Shown {
+                hidden: folded.and_then(|f| f.hidden.as_ref()),
+                folding,
+                merged: fold.as_ref().and_then(|f| f.merged.get(&at)),
+                summary: folded.and_then(|f| {
+                    f.summary
+                        .as_deref()
+                        .map(|label| (label, f.turn.as_str(), f.open))
+                }),
+                ..Shown::default()
+            };
+            let top = y + gap;
+            let first = layout.items.len();
             let placed = self.place(
                 &mut layout,
                 top,
@@ -899,13 +1171,18 @@ impl ViewState {
                 *stamp,
                 blocks,
                 &context,
+                shown,
             );
-            if placed.h <= 0.0 && footers[at].is_none() {
+            run_shows |= placed.any && reply;
+            let footer = footers[at]
+                .as_ref()
+                .filter(|_| !folding || (run_shows && !folded.is_some_and(|f| f.meta_hidden)));
+            if !placed.any && footer.is_none() {
                 continue;
             }
             y = top + placed.h;
             gap = placed.tail_gap;
-            if let Some(meta) = &footers[at] {
+            if let Some(meta) = footer {
                 let line = footer::text(meta, now, false);
                 let suspended = chat.suspended == Some(*stamp);
                 let key = hash_of(("footer", &line, *stamp, suspended));
@@ -922,6 +1199,35 @@ impl ViewState {
                 y += h;
                 gap = FOOTER_GAP;
             }
+            let entry_top = layout.items.get(first).map_or(top, |item| item.y);
+            layout.entry_tops.push((at, entry_top));
+            if let Some(summary) = shown.summary {
+                layout
+                    .fold_tops
+                    .entry(summary.1.to_owned())
+                    .or_insert(entry_top);
+            }
+            if let Some(merged) = shown.merged {
+                layout
+                    .fold_tops
+                    .entry(merged.turn.clone())
+                    .or_insert(entry_top);
+            }
+            // The mark down a row that carries folded work, and down every
+            // row of an opened group.
+            if let Some(mark) = fold.as_ref().and_then(|f| f.mark(at)) {
+                layout
+                    .fold_tops
+                    .entry(mark.group.clone())
+                    .or_insert(entry_top);
+                layout.gutters.push(Gutter {
+                    y0: entry_top,
+                    y1: y,
+                    key: mark.group.clone(),
+                    open: mark.open,
+                    line: false,
+                });
+            }
         }
         for echo in &chat.echoes {
             y += gap;
@@ -936,18 +1242,87 @@ impl ViewState {
                 live: true,
                 ..context
             };
+            let live_fold = fold.as_ref().and_then(|f| f.live.as_ref());
+            let status = &chat.status;
             y += gap;
+            let mut h = 0.0;
+            // The space above the next piece (none above the first).
+            let mut next_gap = 0.0;
+            // Folded, the live turn leads with WORKING and what folded of
+            // it (a tap opens it), then its newest step (PAR-404).
+            if let Some(lf) = live_fold
+                && !status.any()
+            {
+                let (laid, marks) = self.piece(
+                    hash_of(("working fold", &lf.summary, &lf.turn, lf.open)),
+                    || lay_turn_fold(lf.summary.as_deref(), &lf.turn, lf.open, true),
+                );
+                let top = y - NOTIFICATION_TRIM;
+                for mark in marks.iter() {
+                    layout.marks.push(PlacedMark {
+                        top,
+                        mark: mark.clone(),
+                    });
+                }
+                h = laid.h - NOTIFICATION_TRIM;
+                layout.items.push(Placed {
+                    y: top,
+                    laid,
+                    stamp: live.stamp,
+                    index: u32::MAX - 2,
+                    role: Role::Message,
+                });
+                layout.fold_tops.entry(lf.turn.clone()).or_insert(top);
+                next_gap = BLOCK_GAP - NOTIFICATION_TRIM;
+            }
+            if let Some((msg, block)) = live_fold.and_then(|lf| lf.revealed)
+                && let (Some(entry), Some(stamp)) = (chat.entries.get(msg), chat.stamps.get(msg))
+            {
+                let plan = self.plan(*stamp, entry);
+                let blocks = match entry {
+                    Entry::Ai { blocks, .. } => blocks.as_slice(),
+                    _ => &[],
+                };
+                let shown = Shown {
+                    only: Some(block),
+                    gap: next_gap,
+                    ..Shown::default()
+                };
+                let placed = self.place(
+                    &mut layout,
+                    y + h,
+                    &plan,
+                    Some(entry),
+                    *stamp,
+                    blocks,
+                    &live_context,
+                    shown,
+                );
+                if placed.any {
+                    h += placed.h;
+                    next_gap = BLOCK_GAP;
+                }
+            }
             let plan = plan_blocks(&live.blocks);
+            let shown = Shown {
+                hidden: live_fold.and_then(|lf| lf.hidden.as_ref()),
+                folding,
+                gap: next_gap,
+                ..Shown::default()
+            };
             let placed = self.place(
                 &mut layout,
-                y,
+                y + h,
                 &plan,
                 None,
                 live.stamp,
                 &live.blocks,
                 &live_context,
+                shown,
             );
-            let mut h = placed.h;
+            if placed.any {
+                h += placed.h;
+            }
             let push = |view: &mut Self,
                         layout: &mut ChatLayout,
                         h: &mut f32,
@@ -973,8 +1348,7 @@ impl ViewState {
                 });
                 *h += piece_h;
             };
-            let status = &chat.status;
-            if !live.blocks.iter().any(visible) && !status.any() {
+            if live_fold.is_none() && !live.blocks.iter().any(visible) && !status.any() {
                 push(self, &mut layout, &mut h, hash_of("working"), &lay_working);
             }
             for (on, kind) in [
@@ -1067,6 +1441,7 @@ impl ViewState {
         }
         layout.marks.sort_by(|a, b| a.top.total_cmp(&b.top));
         layout.tools.sort_by(|a, b| a.0.total_cmp(&b.0));
+        layout.gutters.sort_by(|a, b| a.y0.total_cmp(&b.y0));
         layout.key = key;
         layout.height = y + TRANSCRIPT_BOTTOM;
         self.layout = layout;
@@ -1176,9 +1551,16 @@ impl ViewState {
     /// fling.
     pub fn settle(&mut self, model: &Model, before: Before, height: f32, now: Instant) {
         if model.page != Page::Chat {
+            self.transcript.positioned = None;
             return;
         }
         let same = before.id == model.chat.id && before.id.is_some();
+        // Another conversation: from its own place.
+        if before.id.is_some() && before.id != model.chat.id {
+            self.chat_scroll.reset();
+            self.follow = true;
+            self.transcript.positioned = None;
+        }
         let height_now = self.content_height(model);
         let older_added = same && (model.chat.start, model.chat.start_block) < before.start;
         let kept = same
@@ -1190,6 +1572,18 @@ impl ViewState {
         if older_added && !self.follow && !kept {
             self.chat_scroll.shift(height_now - before.height);
         }
+        // Loaded: where it was read, or its latest response, or the end
+        // (unless it was scrolled already).
+        if model.chat.loaded
+            && !model.chat.entries.is_empty()
+            && self.transcript.positioned != model.chat.id
+        {
+            self.transcript.positioned = model.chat.id.clone();
+            if self.follow && !self.chat_scroll.dragging() {
+                self.place_opened(model, height);
+            }
+        }
+        self.keep_pinned(model, height, now);
         let max = self.chat_max(model, height);
         if self.follow && !self.chat_scroll.dragging() {
             self.chat_scroll.reset();
@@ -1216,6 +1610,138 @@ impl ViewState {
         true
     }
 
+    /// A fold toggled from a tap: its first row where the tapped row was
+    /// (what opened reads below it, in order).
+    fn keep_pinned(&mut self, model: &Model, height: f32, now: Instant) {
+        let Some(pin) = self.transcript.pin.take() else {
+            return;
+        };
+        if model.chat.expanded.contains(&pin.key) == pin.open {
+            if now.saturating_duration_since(pin.at) < PIN_WAIT {
+                self.transcript.pin = Some(pin);
+            }
+            return;
+        }
+        let max = self.chat_max(model, height);
+        if let Some(y) = self.layout.fold_tops.get(&pin.key) {
+            self.follow = false;
+            self.chat_scroll.reset();
+            self.chat_scroll.offset = (y - pin.top).clamp(0.0, max);
+        }
+    }
+
+    /// Where a chat opens (PAR-104, 105): at its saved reading place; an
+    /// unread one at its latest response (when that is taller than the
+    /// screen); else following the newest message.
+    fn place_opened(&mut self, model: &Model, height: f32) {
+        let chat = &model.chat;
+        let Some(conv) = chat.id.as_deref() else {
+            return;
+        };
+        let max = self.chat_max(model, height);
+        let (top, bottom) = transcript_bounds(model, height, self.keyboard);
+        let saved = model.saved_anchor(conv);
+        let mut target = None;
+        if let Some(SavedAnchor {
+            key: Some(key),
+            offset,
+            ..
+        }) = &saved
+        {
+            let keys = fold::keys(&chat.entries, chat.start);
+            target = keys
+                .iter()
+                .position(|k| k == key)
+                .and_then(|at| self.entry_top(at))
+                .map(|y| y - offset);
+        }
+        if target.is_none()
+            && saved.is_none()
+            && chat.opened_unread
+            && let Some(y) = latest_response(chat).and_then(|at| self.entry_top(at))
+            && self.layout.height - y > bottom - top
+        {
+            target = Some(y - 22.0);
+        }
+        match target {
+            Some(offset) => {
+                self.follow = false;
+                self.chat_scroll.reset();
+                self.chat_scroll.offset = offset.clamp(0.0, max);
+            }
+            None => self.follow = true,
+        }
+        self.kept_at(chat, target.is_none());
+    }
+
+    /// Where entry `at` (or the first shown after it) begins.
+    fn entry_top(&self, at: usize) -> Option<f32> {
+        let tops = &self.layout.entry_tops;
+        let from = tops.partition_point(|(index, _)| *index < at);
+        tops.get(from).map(|(_, y)| *y)
+    }
+
+    /// Records the reading place as kept (`bottom`: at the newest message).
+    fn kept_at(&mut self, chat: &Chat, bottom: bool) {
+        if let Some(id) = &chat.id {
+            let place = (!bottom).then(|| self.reading_place()).flatten();
+            self.transcript.kept = Some((id.clone(), place));
+        }
+    }
+
+    /// The entry at the top of the screen and its top below the
+    /// transcript's (whole pixels).
+    fn reading_place(&self) -> Option<(usize, i32)> {
+        let offset = self.chat_scroll.offset;
+        let tops = &self.layout.entry_tops;
+        let at = tops.partition_point(|(_, y)| *y <= offset + 1.0);
+        let (index, y) = tops.get(at.saturating_sub(1))?;
+        Some((*index, (y - offset).round() as i32))
+    }
+
+    /// Keeps where the open chat is read (PAR-104) once the transcript has
+    /// been still a moment, when it changed.
+    fn keep_reading_place(&mut self, model: &mut Model, now: Instant) {
+        let Some(id) = model.chat.id.clone() else {
+            return;
+        };
+        let still = self
+            .transcript
+            .still_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= KEEP_AFTER);
+        if !still
+            || self.chat_scroll.dragging()
+            || self.transcript.positioned.as_ref() != Some(&id)
+            || !model.chat.loaded
+        {
+            return;
+        }
+        let place = if self.follow {
+            None
+        } else {
+            self.reading_place()
+        };
+        if self.transcript.kept.as_ref() == Some(&(id.clone(), place)) {
+            return;
+        }
+        let anchor = match place {
+            None => SavedAnchor {
+                conv: id.clone(),
+                key: None,
+                offset: 0.0,
+            },
+            Some((at, rel)) => SavedAnchor {
+                conv: id.clone(),
+                key: fold::keys(&model.chat.entries, model.chat.start)
+                    .get(at)
+                    .cloned(),
+                offset: rel as f32,
+            },
+        };
+        model.save_anchor(anchor);
+        self.transcript.kept = Some((id, place));
+    }
+
     /// The transcript is scrolled near its oldest loaded message.
     pub fn near_top(&self, now: Instant) -> bool {
         self.chat_scroll.value(now) < 1500.0
@@ -1231,6 +1757,17 @@ impl ViewState {
 
 /// Tool outputs are fetched once the transcript has been still this long.
 const PREFETCH_AFTER: Duration = Duration::from_millis(300);
+/// The reading place is kept once it has been still this long.
+const KEEP_AFTER: Duration = Duration::from_millis(400);
+
+/// The latest response: the first reply after the last user message.
+fn latest_response(chat: &Chat) -> Option<usize> {
+    let last = chat
+        .entries
+        .iter()
+        .rposition(|entry| matches!(entry, Entry::User { .. }))?;
+    (last + 1..chat.entries.len()).find(|&at| matches!(chat.entries[at], Entry::Ai { .. }))
+}
 
 /// Folded tool rows on screen (and half a screen around) whose output is
 /// not here yet, once the transcript is still.
@@ -1275,7 +1812,18 @@ pub fn requests(model: &mut Model, view: &mut ViewState, height: f32, now: Insta
     if view.near_top(now) {
         commands.extend(model.load_older());
     }
+    // Show all work flipped: the folds opened one by one close.
+    let show_all = Disclosure::of(&model.persist).show_all;
+    if view
+        .transcript
+        .show_all
+        .replace(show_all)
+        .is_some_and(|was| was != show_all)
+    {
+        model.close_folds();
+    }
     view.layout(model);
+    view.keep_reading_place(model, now);
     let near = prefetchable(model, view, height, now);
     if !near.is_empty() {
         let near: Vec<&str> = near.iter().map(String::as_str).collect();
@@ -1291,6 +1839,9 @@ pub fn requests(model: &mut Model, view: &mut ViewState, height: f32, now: Insta
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TranscriptFrame {
     marks: Vec<(i32, i32, u64)>,
+    /// Fold marks on screen: their rows and how they show (closed, open,
+    /// pressed).
+    gutters: Vec<(i32, i32, u8)>,
     /// The jump button's opacity in 32nds (0: not drawn).
     jump: u32,
     jump_rows: (i32, i32),
@@ -1327,6 +1878,7 @@ pub(crate) fn frame(
     view: &mut ViewState,
     (top, bottom): (f32, f32),
     offset: f32,
+    pressed: Option<&Action>,
     now: Instant,
 ) -> TranscriptFrame {
     view.transcript.bounds = (top, bottom);
@@ -1385,8 +1937,27 @@ pub(crate) fn frame(
             )
         })
         .collect();
+    let gutters = view
+        .layout
+        .gutters
+        .iter()
+        .filter(|g| {
+            let (y0, y1) = g.ink();
+            y1 > lo && y0 < hi
+        })
+        .map(|g| {
+            let (y0, y1) = g.ink();
+            let state = if g.pressed(pressed) {
+                2
+            } else {
+                u8::from(g.open)
+            };
+            (y0.floor() as i32, y1.ceil() as i32, state)
+        })
+        .collect();
     TranscriptFrame {
         marks,
+        gutters,
         jump,
         jump_rows,
     }
@@ -1415,6 +1986,17 @@ pub(crate) fn mark_damage(
     }
     for (y0, y1, key) in &old.marks {
         if !new.marks.contains(&(*y0, *y1, *key)) {
+            rows.push(screen((*y0, *y1)));
+        }
+    }
+    // Fold marks that came, went or changed (a press, Fold markers).
+    for (y0, y1, state) in &new.gutters {
+        if !old.gutters.contains(&(*y0, *y1, *state)) {
+            rows.push(screen((*y0, *y1)));
+        }
+    }
+    for (y0, y1, state) in &old.gutters {
+        if !new.gutters.contains(&(*y0, *y1, *state)) {
             rows.push(screen((*y0, *y1)));
         }
     }
@@ -1487,6 +2069,15 @@ pub fn animate(model: &Model, view: &ViewState, now: Instant, animator: &mut Ani
     if view.transcript.held {
         let since = view.transcript.still_since.unwrap_or(now);
         animator.request((since + JUMP_SETTLE).max(now + anim::FRAME));
+    }
+    // The reading place is kept once still: a frame to see it still, a
+    // pass when it has been.
+    match view.transcript.still_since {
+        None if !view.chat_scroll.dragging() => animator.request(now + KEEP_AFTER),
+        Some(since) if now.saturating_duration_since(since) < KEEP_AFTER => {
+            animator.request(since + KEEP_AFTER);
+        }
+        _ => {}
     }
     // Outputs to fetch once still: a pass of the loop then.
     if let Some(since) = view.transcript.still_since
@@ -1561,6 +2152,17 @@ pub(crate) fn draw_transcript(
                 canvas.fill_rect(x0, y0, x1 - x0, y1 - y0, text, 0.06);
             }
         }
+    }
+    let dy = area_top - offset;
+    for gutter in &view.layout.gutters {
+        let (y0, y1) = gutter.ink();
+        if dy + y1 < top {
+            continue;
+        }
+        if dy + y0 > bottom {
+            break;
+        }
+        gutter.draw(canvas, dy, gutter.pressed(pressed));
     }
     let marks = &view.layout.marks;
     let first = marks.partition_point(|m| area_top + m.rows().1 - offset < top - 400.0);
@@ -1828,6 +2430,17 @@ pub(crate) fn hit(
     }
     view.layout(model);
     let offset = view.chat_scroll.value(now);
+    // A fold mark at the left edge.
+    if x < GUTTER_W
+        && let Some(gutter) = view.layout.gutters.iter().find(|g| {
+            let (t0, t1) = g.target();
+            y >= top + t0 - offset && y < top + t1 - offset
+        })
+    {
+        let (key, row) = (gutter.key.clone(), gutter.y0 - offset);
+        view.transcript.pin_fold(model, key, row, now);
+        return Some(gutter.action());
+    }
     let items = &view.layout.items;
     let first = items.partition_point(|item| top + item.y + item.laid.h - offset <= y);
     for item in &items[first..] {
@@ -1840,6 +2453,15 @@ pub(crate) fn hit(
         }
         for (rect, action) in &item.laid.hits {
             if x >= rect.x && x < rect.x + rect.w && y >= iy + rect.y && y < iy + rect.y + rect.h {
+                // A turn's row keeps its spot as it opens or folds.
+                if let Action::Chat(chat::Act::ToggleExpanded(key)) = action
+                    && (key.starts_with("turn:") || key.starts_with("group:"))
+                {
+                    let (key, row) = (key.clone(), item.y - offset);
+                    let action = action.clone();
+                    view.transcript.pin_fold(model, key, row, now);
+                    return Some(action);
+                }
                 return Some(action.clone());
             }
         }
@@ -1918,6 +2540,14 @@ mod tests {
             )),
             Instant::now(),
         );
+        model.persist.update_settings(|s| s.show_all_work = true);
+        model
+    }
+
+    /// The same, folded (the default).
+    fn open_folded(entries: &str) -> Model {
+        let mut model = open_with(entries);
+        model.persist.update_settings(|s| s.show_all_work = false);
         model
     }
 
@@ -2386,38 +3016,336 @@ mod tests {
 
     #[test]
     fn notifications_fold_notices_show_and_model_only_ones_do_not() {
-        let mut model = open_with(
-            r#"{"type":"user","text":"[notification] Discord/main · dm\nHello there from Discord","metadata":{"startedAt":1,"model":"","tokens":0,"automation":{"kind":"external_notification"}}},{"type":"system","text":"Claude account switched from main to max2","color":"warning","metadata":{"startedAt":2,"model":"","tokens":0,"kind":"provider_notice"}},{"type":"system","text":"client host info","metadata":{"startedAt":3,"model":"","tokens":0,"kind":"client_host"}},{"type":"system","text":"--- Compaction finished ---","metadata":{"startedAt":4,"model":"","tokens":0,"kind":"context_compaction_finished","system":true}}"#,
+        const ENTRIES: &str = r#"{"type":"user","text":"[notification] Discord/main · dm\nHello there from Discord","metadata":{"startedAt":1,"model":"","tokens":0,"automation":{"kind":"external_notification"}}},{"type":"system","text":"Claude account switched from main to max2","color":"warning","metadata":{"startedAt":2,"model":"","tokens":0,"kind":"provider_notice"}},{"type":"system","text":"client host info","metadata":{"startedAt":3,"model":"","tokens":0,"kind":"client_host"}},{"type":"system","text":"Usage limit reached","color":"error","metadata":{"startedAt":4,"model":"","tokens":0}},{"type":"system","text":"--- Compaction finished ---","metadata":{"startedAt":5,"model":"","tokens":0,"kind":"context_compaction_finished","system":true}}"#;
+        let texts = |laid: &Laid| -> Vec<String> {
+            laid.ops
+                .iter()
+                .filter_map(|op| match op {
+                    crate::exocortex::view::ops::Op::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // All work shown: the notification in full, the notices.
+        let model = open_with(ENTRIES);
+        let mut view = ViewState::new();
+        view.layout(&model);
+        // The edge, the automated bubble, the provider notice, the error,
+        // the divider (not the model-only notice).
+        assert_eq!(view.layout.items.len(), 5);
+        let bubble = texts(&view.layout.items[1].laid);
+        assert!(
+            bubble
+                .iter()
+                .any(|t| t.contains("Notification · from Discord/main · dm")),
+            "{bubble:?}"
+        );
+        assert!(view.layout.items[2].laid.h >= super::super::blocks::HEAD);
+        assert!(view.layout.gutters.is_empty());
+        // Folded: what nothing answered leaves a line in the gap; the error
+        // stays (only informational notices fold).
+        let mut model = open_folded(ENTRIES);
+        let mut view = ViewState::new();
+        view.layout(&model);
+        assert_eq!(view.layout.items.len(), 2, "the edge and the error");
+        assert!(
+            texts(&view.layout.items[1].laid)
+                .iter()
+                .any(|t| t.contains("Usage limit"))
+        );
+        let [line] = &view.layout.gutters[..] else {
+            panic!("{:?}", view.layout.gutters);
+        };
+        let line = line.clone();
+        assert!(line.line && !line.open);
+        // A tap on it opens them all, in full.
+        let (top, bottom) = transcript_bounds(&model, HEIGHT, false);
+        let now = Instant::now();
+        let y = top + (line.y0 + line.y1) / 2.0;
+        let action = hit(&mut view, &model, (top, bottom), 10.0, y, now).unwrap();
+        assert_eq!(action, line.action());
+        model.handle(action);
+        view.layout(&model);
+        assert_eq!(view.layout.items.len(), 5);
+        assert!(
+            texts(&view.layout.items[1].laid)
+                .iter()
+                .any(|t| t.contains("Hello there"))
+        );
+        assert!(view.layout.gutters.iter().all(|g| g.open && !g.line));
+    }
+
+    #[test]
+    fn a_folded_turn_shows_its_reply_under_a_mark_that_opens_its_work() {
+        let calls: Vec<String> = (0..4)
+            .map(|i| format!(r#"{{"type":"tool_call","toolCallId":"t{i}","toolName":"Bash","input":{{"command":"ls {i}"}},"summary":"ls {i}"}},{{"type":"tool_result","toolCallId":"t{i}","toolName":"Bash","output":"ok","isError":false}}"#))
+            .collect();
+        let mut model = open_folded(&format!(
+            r#"{{"type":"user","text":"Please list","metadata":{{"startedAt":1000,"model":"m","tokens":0}}}},{{"type":"ai","blocks":[{{"type":"thinking","text":"Listing."}},{},{{"type":"text","text":"Done."}}],"metadata":{{"startedAt":1001,"endedAt":2000,"model":"claude-opus-5-5","tokens":10}}}}"#,
+            calls.join(",")
+        ));
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        view.layout(&model);
+        // The edge, the prompt, the reply, its footer: no thinking, no calls.
+        assert_eq!(view.layout.items.len(), 4);
+        let reply = view.layout.items[2].laid.clone();
+        let [mark] = &view.layout.gutters[..] else {
+            panic!("{:?}", view.layout.gutters);
+        };
+        assert_eq!(mark.key, "group:u:1000");
+        assert!(!mark.line && !mark.open);
+        assert_eq!(mark.y0, view.layout.items[2].y);
+        assert_eq!(
+            mark.y1,
+            view.layout.items[3].y + view.layout.items[3].laid.h
+        );
+        // The mark opens the work; the first opened row comes where the
+        // reply was.
+        let (top, bottom) = transcript_bounds(&model, HEIGHT, false);
+        let before = view.before(&model, now);
+        let at = view.layout.items[2].y - view.chat_scroll.value(now);
+        let action = hit(&mut view, &model, (top, bottom), 12.0, top + at + 30.0, now).unwrap();
+        assert_eq!(
+            action,
+            Action::Chat(chat::Act::ToggleExpanded("group:u:1000".into()))
+        );
+        model.handle(action);
+        view.follow = false;
+        view.settle(&model, before, HEIGHT, now);
+        // The thinking, four calls, the same reply piece, the footer.
+        assert_eq!(view.layout.items.len(), 2 + 1 + 4 + 1 + 1);
+        assert!(Rc::ptr_eq(&view.layout.items[7].laid, &reply));
+        let first = view.layout.items[2].y - view.chat_scroll.value(now);
+        assert!(
+            (first - at).abs() < 1.0 || view.chat_scroll.value(now) == 0.0,
+            "{first} {at}"
+        );
+        assert!(view.layout.gutters.iter().all(|g| g.open));
+        // Show all work flipped: the fold closes again.
+        view.transcript.show_all = Some(false);
+        model.persist.update_settings(|s| s.show_all_work = true);
+        requests(&mut model, &mut view, HEIGHT, now);
+        assert!(!model.chat.expanded.contains("group:u:1000"));
+        model.persist.update_settings(|s| s.show_all_work = false);
+        view.layout(&model);
+        assert_eq!(view.layout.items.len(), 4);
+    }
+
+    #[test]
+    fn the_live_turn_shows_working_and_its_newest_step() {
+        let mut model = open_folded(
+            r#"{"type":"user","text":"Run the checks","metadata":{"startedAt":1000,"model":"m","tokens":0}}"#,
+        );
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"streaming_started","convId":"c","model":"claude-opus-5-5","startedAt":1001}"#,
+                r#"{"type":"tool_call","convId":"c","toolCallId":"a","toolName":"Bash","input":{"command":"uptime"},"summary":"uptime"}"#,
+                r#"{"type":"tool_result","convId":"c","toolCallId":"a","toolName":"Bash","output":"up","isError":false}"#,
+                r#"{"type":"tool_call","convId":"c","toolCallId":"b","toolName":"Bash","input":{"command":"df -h"},"summary":"df -h"}"#,
+            ],
         );
         let mut view = ViewState::new();
         view.layout(&model);
-        // The edge, the notification row, the notice, the divider.
-        assert_eq!(view.layout.items.len(), 4);
+        let actions: Vec<Action> = view
+            .layout
+            .items
+            .iter()
+            .flat_map(|item| item.laid.hits.iter().map(|(_, a)| a.clone()))
+            .collect();
+        // WORKING · 1 tool call opens the turn; only `df -h` shows.
+        assert!(actions.contains(&Action::Chat(chat::Act::ToggleExpanded(
+            "turn:u:1000".into()
+        ))));
+        let tools: Vec<&PlacedMark> = view
+            .layout
+            .marks
+            .iter()
+            .filter(|m| matches!(m.mark.kind, blocks::MarkKind::Spinner { .. }))
+            .collect();
+        assert_eq!(
+            tools.len(),
+            2,
+            "the working row's spinner and the running call's"
+        );
+        assert!(!actions.contains(&Action::Chat(chat::Act::ToggleExpanded("tool:a".into()))));
+        model.handle(Action::Chat(chat::Act::ToggleExpanded(
+            "turn:u:1000".into(),
+        )));
+        view.layout(&model);
+        let actions: Vec<Action> = view
+            .layout
+            .items
+            .iter()
+            .flat_map(|item| item.laid.hits.iter().map(|(_, a)| a.clone()))
+            .collect();
+        assert!(actions.contains(&Action::Chat(chat::Act::ToggleExpanded("tool:a".into()))));
+    }
+
+    #[test]
+    fn the_system_instructions_box_sits_at_the_top_and_opens() {
+        let mut model = open_with(
+            r#"{"type":"system_instructions","text":"Be brief.\nAlways test."},{"type":"user","text":"Hi"}"#,
+        );
+        let mut view = ViewState::new();
+        view.layout(&model);
+        assert_eq!(model.chat.instructions, ["Be brief.\nAlways test."]);
+        // The edge, the box, the prompt.
+        assert_eq!(view.layout.items.len(), 3);
+        let folded = view.layout.items[1].laid.h;
         let toggle = view.layout.items[1].laid.hits[0].1.clone();
-        let Action::Chat(chat::Act::ToggleExpanded(key)) = &toggle else {
-            panic!("{toggle:?}");
-        };
-        assert!(key.starts_with("u:"));
-        let notice = view.layout.items[2].laid.h;
-        assert!(notice >= super::super::blocks::HEAD);
+        assert_eq!(
+            toggle,
+            Action::Chat(chat::Act::ToggleExpanded("instructions".into()))
+        );
         model.handle(toggle);
         view.layout(&model);
-        // Opened: the automated bubble under its row.
-        assert_eq!(view.layout.items.len(), 5);
-        let text: Vec<String> = view.layout.items[2]
-            .laid
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                crate::exocortex::view::ops::Op::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            text.iter()
-                .any(|t| t.contains("Notification · from Discord/main · dm")),
-            "{text:?}"
+        let open = &view.layout.items[1].laid;
+        assert!(open.h > folded);
+        assert!(open.hits.iter().any(|(_, a)| *a
+            == Action::Ui(crate::exocortex::model::UiAct::Copy(
+                "Be brief.\nAlways test.".into()
+            ))));
+        // Cleared: gone.
+        feed(
+            &mut model,
+            &[r#"{"type":"system_instructions_updated","convId":"c","text":""}"#],
         );
+        view.layout(&model);
+        assert_eq!(view.layout.items.len(), 2);
+    }
+
+    #[test]
+    fn a_subagent_call_opens_its_conversation_and_long_calls_fold() {
+        let summary = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\\n");
+        let script = (0..6)
+            .map(|i| format!("echo {i}"))
+            .collect::<Vec<_>>()
+            .join("\\n");
+        let model_with = |child_known: bool| {
+            let mut model = open_with(&format!(
+                r#"{{"type":"user","text":"Go"}},{{"type":"ai","blocks":[{{"type":"tool_call","toolCallId":"x","toolName":"exo","input":{{"subagent":"Do the thing"}},"summary":"subagent"}},{{"type":"tool_result","toolCallId":"x","toolName":"exo","output":"{{\"conversation_id\":\"kid\"}}","isError":false}},{{"type":"tool_call","toolCallId":"r","toolName":"Read","input":{{}},"summary":"{summary}"}},{{"type":"tool_result","toolCallId":"r","toolName":"Read","output":"","isError":false}},{{"type":"tool_call","toolCallId":"s","toolName":"bash","input":{{"command":"x"}},"summary":"{script}"}},{{"type":"tool_result","toolCallId":"s","toolName":"bash","output":"","isError":false}}]}}"#
+            ));
+            if child_known {
+                feed(
+                    &mut model,
+                    &[
+                        r#"{"type":"conversation_updated","summary":{"id":"kid","provider":"anthropic","model":"m","effort":"low","title":"Kid","pinned":false,"sortOrder":1,"streaming":false,"unread":false,"parentConversationId":"c"}}"#,
+                    ],
+                );
+            }
+            model
+        };
+        let texts = |laid: &Laid| -> Vec<String> {
+            laid.ops
+                .iter()
+                .filter_map(|op| match op {
+                    crate::exocortex::view::ops::Op::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let model = model_with(true);
+        let mut view = ViewState::new();
+        view.layout(&model);
+        let exo = &view.layout.items[2].laid;
+        assert!(
+            texts(exo)
+                .iter()
+                .any(|t| t.trim() == "subagent: Do the thing"),
+            "{:?}",
+            texts(exo)
+        );
+        assert!(
+            exo.hits
+                .iter()
+                .any(|(_, a)| *a == Action::Nav(Nav::OpenConversation("kid".into())))
+        );
+        // Twenty lines: eight and the rest counted (PAR-126).
+        let read = texts(&view.layout.items[3].laid);
+        assert!(read.iter().any(|t| t == "line 7"), "{read:?}");
+        assert!(!read.iter().any(|t| t == "line 8"));
+        assert!(read.iter().any(|t| t == "… +12 more lines"), "{read:?}");
+        // A shell script folds to three rows.
+        let bash = texts(&view.layout.items[4].laid);
+        assert!(bash.iter().any(|t| t == "… +3 more lines"), "{bash:?}");
+        // Not in the list: no way to open it.
+        let model = model_with(false);
+        let mut view = ViewState::new();
+        view.layout(&model);
+        assert!(
+            !view.layout.items[2]
+                .laid
+                .hits
+                .iter()
+                .any(|(_, a)| matches!(a, Action::Nav(_)))
+        );
+    }
+
+    #[test]
+    fn disclosures_and_the_reading_place_are_kept_and_restored() {
+        let mut model = open_with(&long_entries(16));
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let before = view.before(&model, now);
+        view.settle(&model, before, HEIGHT, now);
+        assert!(view.follow, "no place kept: the newest message");
+        model.handle(Action::Chat(chat::Act::ToggleExpanded("tool:t1".into())));
+        let kept = model.kept();
+        assert_eq!(kept.disclosures, ["c\u{0}tool:t1"]);
+        // Read somewhere, still: kept.
+        view.follow = false;
+        view.chat_scroll.offset = 900.0;
+        chat_frame(&model, &mut view, None, HEIGHT, now);
+        chat_frame(&model, &mut view, None, HEIGHT, now + KEEP_AFTER);
+        requests(&mut model, &mut view, HEIGHT, now + KEEP_AFTER);
+        let anchor = model.saved_anchor("c").expect("kept");
+        let key = anchor.key.clone().expect("an entry");
+        assert!(key.starts_with("u:") || key.starts_with("a:"), "{key}");
+        // Reopened: the same toggles, the same place.
+        model.handle(Action::Nav(Nav::Back));
+        let mut fresh = ViewState::new();
+        model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        assert!(model.chat.expanded.contains("tool:t1"));
+        let before = fresh.before(&model, now);
+        fresh.settle(&model, before, HEIGHT, now);
+        assert!(!fresh.follow);
+        assert!(
+            (fresh.chat_scroll.offset - 900.0).abs() <= 1.0,
+            "{}",
+            fresh.chat_scroll.offset
+        );
+    }
+
+    #[test]
+    fn an_unread_conversation_opens_at_its_latest_response() {
+        let mut model = open_with(&format!(
+            r#"{},{{"type":"user","text":"And now?"}},{{"type":"ai","blocks":[{{"type":"text","text":"{}"}}]}}"#,
+            long_entries(10),
+            "A long answer. ".repeat(400)
+        ));
+        model.handle(Action::Nav(Nav::Back));
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"conversation_updated","summary":{"id":"c","provider":"anthropic","model":"claude-opus-5-5","effort":"high","title":"Test","pinned":false,"sortOrder":0,"streaming":false,"unread":true}}"#,
+            ],
+        );
+        model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        assert!(model.chat.opened_unread);
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let before = view.before(&model, now);
+        view.settle(&model, before, HEIGHT, now);
+        assert!(!view.follow);
+        let response = view.entry_top(21).unwrap();
+        let max = view.chat_max(&model, HEIGHT);
+        assert!(max > response, "taller than the screen");
+        assert_eq!(view.chat_scroll.offset, (response - 22.0).clamp(0.0, max));
     }
 
     #[test]
@@ -2472,6 +3400,7 @@ mod tests {
 
     #[test]
     fn legacy_prompts_and_previews() {
+        use fold::{legacy_automated, notification_preview};
         assert!(legacy_automated("[notification] x"));
         assert!(legacy_automated("[chrono wake: deploy] check"));
         assert!(legacy_automated("[Discord Notification] hi"));

@@ -15,7 +15,7 @@ use crate::text::Weight;
 use super::super::anim;
 use super::super::footer;
 use super::super::markdown::{self, MdBlock, Style};
-use super::super::model::{Action, Model, chat, rich::Rich};
+use super::super::model::{Action, Model, UiAct, chat, rich::Rich};
 use super::super::proto::Metadata;
 use super::super::theme::{
     self, BUBBLE_PAD_X, BUBBLE_PAD_Y, HAIRLINE, RAIL, T_BODY, T_CAPTION, T_EDGE, T_EYEBROW,
@@ -408,6 +408,207 @@ pub(crate) fn lay_notification(label: &str, preview: &str, key: &str, open: bool
         Action::Chat(chat::Act::ToggleExpanded(key.to_owned())),
     ));
     laid.h = HEAD;
+    laid.into()
+}
+
+/// A turn's folded-work row (PAR-403–405): a chevron and what folded
+/// ("5 tool calls, 1 message"); the live turn's leads with a spinner and
+/// WORKING, shimmering. A tap opens (or folds) the turn's work.
+pub(crate) fn lay_turn_fold(label: Option<&str>, key: &str, open: bool, working: bool) -> Piece {
+    let p = theme::p();
+    let mut piece = Piece::default();
+    let cy = HEAD / 2.0;
+    let mut x = MARGIN;
+    if working {
+        let size = STATUS_SPINNER;
+        piece.marks.push(Mark {
+            y: cy - size / 2.0 - 2.0,
+            h: size + 4.0,
+            kind: MarkKind::Spinner {
+                cx: x + size / 2.0,
+                cy,
+                size,
+                color: p.muted,
+                background: p.app_background,
+            },
+        });
+        x += size + 23.0;
+        let baseline = T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0);
+        piece
+            .laid
+            .ops
+            .push(text_op(x, baseline, "Working", T_EYEBROW, p.muted));
+        piece.marks.push(Mark {
+            y: cy - T_EYEBROW.line() / 2.0,
+            h: T_EYEBROW.line(),
+            kind: MarkKind::Shimmer {
+                x,
+                baseline,
+                text: "WORKING".into(),
+                ty: T_EYEBROW,
+            },
+        });
+        x += widgets::measure("Working", T_EYEBROW) + 23.0;
+    }
+    if let Some(label) = label {
+        piece.laid.ops.push(icon_op(
+            if open {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            },
+            x + 16.0,
+            cy,
+            33.0,
+            p.muted,
+        ));
+        x += 33.0 + 23.0;
+        let shown = widgets::fit(label, T_EYEBROW, W - MARGIN - x);
+        piece.laid.ops.push(text_op(
+            x,
+            T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0),
+            &shown,
+            T_EYEBROW,
+            p.muted,
+        ));
+    }
+    if label.is_some() || !working {
+        piece.laid.hits.push((
+            RectF::new(0.0, 0.0, W, HEAD),
+            Action::Chat(chat::Act::ToggleExpanded(key.to_owned())),
+        ));
+    }
+    piece.laid.h = HEAD;
+    piece
+}
+
+// ----- System instructions -----------------------------------------------------------
+
+/// The System Instructions box (§3.6.8, PAR-132), and C1's folder draft's
+/// inherited instructions (`draft.rs`): full width in `instructions_border`;
+/// its head a chevron, `title` in the accent and a line of the text (the
+/// first that is not a heading); a tap is `head`. `open`: under a rule the
+/// text, then Copy and Open (the reader).
+pub(crate) fn lay_instructions(title: &str, text: &str, head: Action, open: bool) -> Piece {
+    let p = theme::p();
+    let c = theme::c();
+    let mut laid = Laid::default();
+    let x0 = MARGIN;
+    let width = W - 2.0 * MARGIN;
+    let cy = TARGET / 2.0;
+    laid.ops.push(icon_op(
+        if open {
+            Icon::ChevronDown
+        } else {
+            Icon::ChevronRight
+        },
+        x0 + 40.0,
+        cy,
+        40.0,
+        p.muted,
+    ));
+    let label_x = x0 + 80.0;
+    laid.ops.push(text_op(
+        label_x,
+        T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0),
+        title,
+        T_EYEBROW,
+        p.accent,
+    ));
+    let label_w = widgets::measure(title, T_EYEBROW);
+    if !open {
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .unwrap_or_default();
+        let preview_x = label_x + label_w + 22.0;
+        let room = x0 + width - 28.0 - preview_x;
+        if room > 60.0 {
+            let preview = widgets::fit(line, T_SMALL, room);
+            laid.ops.push(text_op(
+                preview_x,
+                T_SMALL.baseline(cy - T_SMALL.line() / 2.0),
+                &preview,
+                T_SMALL,
+                p.muted,
+            ));
+        }
+    }
+    laid.hits.push((RectF::new(x0, 0.0, width, TARGET), head));
+    let mut h = TARGET;
+    if open {
+        laid.ops.push(Op::Rect {
+            rect: RectF::new(
+                x0 + HAIRLINE,
+                h - HAIRLINE,
+                width - 2.0 * HAIRLINE,
+                HAIRLINE,
+            ),
+            radius: 0.0,
+            color: c.instructions_rule,
+            alpha: 1.0,
+        });
+        h += 17.0;
+        let inner = width - 2.0 * HAIRLINE - 68.0;
+        let lines = wrap_text(text.trim(), T_NOTE, inner);
+        h = push_runs(
+            &mut laid.ops,
+            &lines,
+            x0 + HAIRLINE + 34.0,
+            h,
+            T_NOTE,
+            Some(p.muted),
+            1.0,
+        );
+        h += 6.0;
+        // Copy, Open.
+        let mut x = x0 + HAIRLINE + 34.0;
+        for (label, icon, action) in [
+            ("Copy", Some(Icon::Copy), UiAct::Copy(text.to_owned())),
+            (
+                "Open",
+                None,
+                UiAct::Read {
+                    title: "System Instructions".into(),
+                    text: text.to_owned(),
+                },
+            ),
+        ] {
+            let mut w = widgets::measure(label, T_SMALL);
+            let mut tx = x;
+            if let Some(icon) = icon {
+                laid.ops.push(icon_op(
+                    icon,
+                    x + 19.5,
+                    h + TARGET / 2.0,
+                    39.0,
+                    p.secondary_accent,
+                ));
+                tx += 53.0;
+                w += 53.0;
+            }
+            laid.ops.push(text_op(
+                tx,
+                T_SMALL.baseline(h + (TARGET - T_SMALL.line()) / 2.0),
+                label,
+                T_SMALL,
+                p.secondary_accent,
+            ));
+            laid.hits.push((
+                RectF::new(x - 17.0, h, w + 34.0, TARGET),
+                Action::Ui(action),
+            ));
+            x += w + 56.0;
+        }
+        h += TARGET + 6.0;
+    }
+    laid.ops.push(Op::Border {
+        rect: RectF::new(x0, 0.0, width, h),
+        width: HAIRLINE,
+        color: c.instructions_border,
+    });
+    laid.h = h;
     laid.into()
 }
 

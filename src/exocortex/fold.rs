@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use super::proto::Block;
+use super::proto::{Block, Entry};
 
 /// A message as folding sees it.
 #[derive(Debug, Clone, Copy)]
@@ -148,11 +148,42 @@ fn automation_source(automation: Option<&Value>) -> Option<&str> {
     automation?.get("sourceId")?.as_str()
 }
 
-fn label_of(kind: &str) -> &'static str {
+/// An automation kind's label ("Chrono", "Subagent completion", …).
+pub fn label_of(kind: &str) -> &'static str {
     AUTOMATION_LABELS
         .iter()
         .find(|(k, _)| *k == kind)
         .map_or("Notification", |(_, label)| label)
+}
+
+/// Each entry's key (`u:1793…`, `a:1793…`: its kind and start, else its
+/// place in the history, `#2` on a repeat): what fold toggles and reading
+/// places are kept by, across loads.
+pub fn keys(entries: &[Entry], start: u64) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let (kind, metadata) = match entry {
+                Entry::User { metadata, .. } => ("u", metadata.as_ref()),
+                Entry::Ai { metadata, .. } => ("a", metadata.as_ref()),
+                Entry::System { metadata, .. } => ("s", metadata.as_ref()),
+                Entry::SystemInstructions { .. } => ("i", None),
+                Entry::Other => ("o", None),
+            };
+            let base = match metadata
+                .map(|m| m.started_at)
+                .filter(|at| *at > 0.0 && at.is_finite())
+            {
+                Some(at) => format!("{kind}:{at}"),
+                None => format!("{kind}:e{}", start + index as u64),
+            };
+            let n = seen.entry(base.clone()).or_default();
+            *n += 1;
+            if *n == 1 { base } else { format!("{base}#{n}") }
+        })
+        .collect()
 }
 
 /// A prompt an older daemon wrote without `automation` (`[notification]
@@ -228,15 +259,18 @@ pub fn owner_relayed_text(text: &str, automation: Option<&Value>) -> Option<Stri
     if !owner {
         return None;
     }
-    let mut words = vec![trigger[colon + 1..].trim_start_matches([' ', '\t']).to_owned()];
+    let mut words = vec![
+        trigger[colon + 1..]
+            .trim_start_matches([' ', '\t'])
+            .to_owned(),
+    ];
     for (index, line) in lines[at + 1..].iter().enumerate() {
         let trimmed = line.trim();
         if trimmed.starts_with("[msg:") && trimmed.ends_with(']') {
             break;
         }
         let next = lines.get(at + 2 + index).copied().unwrap_or("");
-        if trimmed.is_empty()
-            && (next.starts_with("Action:") || next.starts_with("Filter output:"))
+        if trimmed.is_empty() && (next.starts_with("Action:") || next.starts_with("Filter output:"))
         {
             break;
         }
@@ -415,8 +449,7 @@ pub fn bubble_label(
 ) -> String {
     let source = match automation_kind(automation) {
         Some("exo_send") => Some(
-            automation_source(automation)
-                .map_or_else(|| "another conversation".to_owned(), title),
+            automation_source(automation).map_or_else(|| "another conversation".to_owned(), title),
         ),
         Some("subagent_completion") => automation_source(automation).map(title),
         Some("external_notification") => text
@@ -641,7 +674,8 @@ pub fn plan(
                     break;
                 }
             }
-            let last_tool_at = last_tool.and_then(|(msg, _)| assistants.iter().position(|&a| a == msg));
+            let last_tool_at =
+                last_tool.and_then(|(msg, _)| assistants.iter().position(|&a| a == msg));
             let (mut tool_calls, mut texts) = (0, 0);
             let mut host: Option<usize> = None;
             let mut hidden_of: HashMap<usize, HashSet<usize>> = HashMap::new();
@@ -678,7 +712,9 @@ pub fn plan(
             for &j in &run_before {
                 let blocks = view.blocks(j).unwrap_or_default();
                 for (bi, block) in blocks.iter().enumerate() {
-                    if !hidden_by.get(&j).is_some_and(|h| h.contains(&bi)) || reveal == Some((j, bi)) {
+                    if !hidden_by.get(&j).is_some_and(|h| h.contains(&bi))
+                        || reveal == Some((j, bi))
+                    {
                         continue;
                     }
                     if matches!(block, Block::ToolCall { .. }) {
@@ -783,11 +819,7 @@ pub fn plan(
                 out.by_msg.insert(
                     j,
                     AssistantFold {
-                        hidden: if open {
-                            None
-                        } else {
-                            hidden_of.remove(&j)
-                        },
+                        hidden: if open { None } else { hidden_of.remove(&j) },
                         summary: (!in_progress && lead.is_none() && Some(j) == host)
                             .then(|| summary.clone())
                             .flatten(),
@@ -893,42 +925,22 @@ fn plan_gutter(
             host,
         }
     };
-    let members = |out: &mut FoldPlan, list: &[Stretch], group: &str, open: bool, keep: Option<usize>| {
-        for (index, seg) in list.iter().enumerate() {
-            for j in seg.from..seg.to {
-                let is_note = view.is_user(j) && view.note(j).is_some();
-                if is_note || view.is_notice(j) {
-                    if open {
-                        out.merged.insert(
-                            j,
-                            MergedFold {
-                                turn: group.to_owned(),
-                                open: true,
-                                lead: None,
-                            },
-                        );
-                    }
-                    out.gutter.insert(
-                        j,
-                        GutterEntry {
-                            group: group.to_owned(),
-                            open,
-                            role: Role::Hidden,
-                            mark: marks,
-                        },
-                    );
-                } else if view.blocks(j).is_some() {
-                    let Some(fold) = out.by_msg.get_mut(&j) else {
-                        continue;
-                    };
-                    if open {
-                        fold.hidden = None;
-                        fold.summary = None;
-                        fold.meta_hidden = false;
-                    } else if Some(index) == keep {
-                        fold.summary = None;
-                    }
-                    if open || Some(index) != keep {
+    let members =
+        |out: &mut FoldPlan, list: &[Stretch], group: &str, open: bool, keep: Option<usize>| {
+            for (index, seg) in list.iter().enumerate() {
+                for j in seg.from..seg.to {
+                    let is_note = view.is_user(j) && view.note(j).is_some();
+                    if is_note || view.is_notice(j) {
+                        if open {
+                            out.merged.insert(
+                                j,
+                                MergedFold {
+                                    turn: group.to_owned(),
+                                    open: true,
+                                    lead: None,
+                                },
+                            );
+                        }
                         out.gutter.insert(
                             j,
                             GutterEntry {
@@ -938,11 +950,32 @@ fn plan_gutter(
                                 mark: marks,
                             },
                         );
+                    } else if view.blocks(j).is_some() {
+                        let Some(fold) = out.by_msg.get_mut(&j) else {
+                            continue;
+                        };
+                        if open {
+                            fold.hidden = None;
+                            fold.summary = None;
+                            fold.meta_hidden = false;
+                        } else if Some(index) == keep {
+                            fold.summary = None;
+                        }
+                        if open || Some(index) != keep {
+                            out.gutter.insert(
+                                j,
+                                GutterEntry {
+                                    group: group.to_owned(),
+                                    open,
+                                    role: Role::Hidden,
+                                    mark: marks,
+                                },
+                            );
+                        }
                     }
                 }
             }
-        }
-    };
+        };
     let anchored = |out: &mut FoldPlan, list: &[Stretch]| {
         if !list.iter().any(|seg| seg.folded) {
             for seg in list {
@@ -1066,7 +1099,11 @@ mod tests {
         Notice(&'static str, bool),
     }
 
-    fn plan_of(list: &[M], live: Option<&[Block]>, open: &dyn Fn(&str) -> bool) -> (FoldPlan, Vec<String>) {
+    fn plan_of(
+        list: &[M],
+        live: Option<&[Block]>,
+        open: &dyn Fn(&str) -> bool,
+    ) -> (FoldPlan, Vec<String>) {
         plan_with(list, live, open, true, None, &|_| false)
     }
 
@@ -1170,7 +1207,10 @@ mod tests {
         ];
         let (plan, keys) = plan_of(&list, None, CLOSED);
         let fold = &plan.by_msg[&at(&keys, "a:1")];
-        assert_eq!(fold.hidden.clone().unwrap().into_iter().collect::<Vec<_>>(), [0]);
+        assert_eq!(
+            fold.hidden.clone().unwrap().into_iter().collect::<Vec<_>>(),
+            [0]
+        );
         assert!(!plan.gutter.contains_key(&at(&keys, "a:1")));
     }
 
@@ -1197,7 +1237,12 @@ mod tests {
         ];
         let (plan, keys) = plan_of(&list, Some(&[]), CLOSED);
         let a1 = at(&keys, "a:1");
-        let mut hidden: Vec<usize> = plan.by_msg[&a1].hidden.clone().unwrap().into_iter().collect();
+        let mut hidden: Vec<usize> = plan.by_msg[&a1]
+            .hidden
+            .clone()
+            .unwrap()
+            .into_iter()
+            .collect();
         hidden.sort_unstable();
         assert_eq!(hidden, [0, 1, 2]);
         let live = plan.live.unwrap();
@@ -1246,9 +1291,15 @@ mod tests {
             owner_relayed_text(relay, Some(&automation)).as_deref(),
             Some("fix it")
         );
-        assert_eq!(notification_label(relay, Some(&automation), &|_| false), None);
         assert_eq!(
-            owner_relayed_text("quoting\n→ Yeyito <@3> [owner]:\nhi", Some(&json!({"kind": "exo_send"}))),
+            notification_label(relay, Some(&automation), &|_| false),
+            None
+        );
+        assert_eq!(
+            owner_relayed_text(
+                "quoting\n→ Yeyito <@3> [owner]:\nhi",
+                Some(&json!({"kind": "exo_send"}))
+            ),
             None
         );
         let attach = "[notification] Discord/x\n→ Me <@1> [owner]: [message]\n[attachment:9] IMG_1181.png\n[msg:1]";
@@ -1292,7 +1343,11 @@ mod tests {
             "Notification · from Discord/paramount · DM"
         );
         assert_eq!(
-            label("check", json!({"kind": "chrono_wake", "sourceId": "chrono:abc"}), "Chrono"),
+            label(
+                "check",
+                json!({"kind": "chrono_wake", "sourceId": "chrono:abc"}),
+                "Chrono"
+            ),
             "Chrono"
         );
         assert_eq!(
@@ -1326,7 +1381,13 @@ mod tests {
             assert!(plan.hides(at(&keys, key)));
         }
         assert_eq!(plan.gutter[&at(&keys, "a:2")].role, Role::Host);
-        assert!(!plan.by_msg[&at(&keys, "a:2")].hidden.as_ref().unwrap().is_empty());
+        assert!(
+            !plan.by_msg[&at(&keys, "a:2")]
+                .hidden
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
         assert!(!plan.gutter.contains_key(&at(&keys, "a:0")));
         // Opened: every member shows, and carries the mark.
         let (open, keys) = plan_of(&list, None, &|key| key == "group:u:1");
@@ -1468,7 +1529,10 @@ mod tests {
     #[test]
     fn a_message_delivered_into_the_run_does_not_start_a_new_turn() {
         // u:1 started the run at 1000; u:2 was queued into it at 5000.
-        let keys: Vec<String> = ["u:1", "a:1", "u:2"].iter().map(|k| (*k).to_owned()).collect();
+        let keys: Vec<String> = ["u:1", "a:1", "u:2"]
+            .iter()
+            .map(|k| (*k).to_owned())
+            .collect();
         let a1 = cat(vec![call("t1"), call("t2")]);
         let msgs = [
             Msg::User {
@@ -1487,11 +1551,28 @@ mod tests {
                 started_at: 5000.0,
             },
         ];
-        let plan = plan(&msgs, &keys, Some(&[]), CLOSED, true, Some(1000.0), &|_| false);
+        let plan = plan(&msgs, &keys, Some(&[]), CLOSED, true, Some(1000.0), &|_| {
+            false
+        });
         let live = plan.live.unwrap();
         assert_eq!(live.summary.as_deref(), Some("1 tool call"));
         assert_eq!(live.revealed, Some((1, 2)));
         assert_eq!(plan.by_msg[&1].summary, None);
+    }
+
+    #[test]
+    fn keys_are_kind_and_start_repeats_numbered() {
+        let entries: Vec<Entry> = serde_json::from_value(json!([
+            {"type": "user", "text": "a", "metadata": {"startedAt": 1000, "model": "m", "tokens": 0}},
+            {"type": "ai", "blocks": [], "metadata": {"startedAt": 1000, "model": "m", "tokens": 0}},
+            {"type": "ai", "blocks": [], "metadata": {"startedAt": 1000, "model": "m", "tokens": 0}},
+            {"type": "system", "text": "x"}
+        ]))
+        .unwrap();
+        assert_eq!(
+            keys(&entries, 40),
+            ["u:1000", "a:1000", "a:1000#2", "s:e43"]
+        );
     }
 
     #[test]

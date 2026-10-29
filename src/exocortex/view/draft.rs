@@ -5,12 +5,15 @@
 //! (roadmap §3.6.8). A tap opens them in the reader. The TUI shows them the
 //! same way in a blank chat in a folder.
 
+use std::collections::HashMap;
+
 use crate::gfx::{Canvas, RectF};
 
 use super::super::model::{Action, Model, UiAct};
-use super::super::theme::{self, HAIRLINE, T_EYEBROW, T_SMALL, TARGET, TRANSCRIPT_PAD, W};
-use super::super::ui::icons::{self, Icon};
+use super::super::theme::{self, TARGET, TRANSCRIPT_PAD, W};
 use super::super::ui::widgets;
+use super::blocks;
+use super::ops::draw_ops;
 
 const TITLE: &str = "Instructions (inherited)";
 /// The reader's title (the box's does not fit its bar).
@@ -51,57 +54,19 @@ fn action(text: &str) -> Action {
     })
 }
 
-/// Draws the box, if the draft inherits instructions.
+/// Draws the box, if the draft inherits instructions (C2's System
+/// Instructions box, folded: `blocks::lay_instructions`).
 pub fn draw(canvas: &mut Canvas, model: &Model, top: f32, pressed: Option<&Action>) {
     let Some(text) = inherited(model) else {
         return;
     };
-    let p = theme::p();
-    let c = theme::c();
     let r = rect(top);
     if pressed == Some(&action(text)) {
-        widgets::fill(canvas, r, c.row_pressed);
+        widgets::fill(canvas, r, theme::c().row_pressed);
     }
-    widgets::border(canvas, r, HAIRLINE, c.instructions_border);
-    let cy = r.y + r.h / 2.0;
-    icons::draw(
-        canvas,
-        Icon::ChevronRight,
-        r.x + 40.0,
-        cy,
-        40.0,
-        p.muted,
-        1.0,
-    );
-    let label_x = r.x + 80.0;
-    let label_w = widgets::text(
-        canvas,
-        TITLE,
-        label_x,
-        T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0),
-        T_EYEBROW,
-        p.accent,
-        1.0,
-    );
-    // A line of it: the first that is not a heading.
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .unwrap_or_default();
-    let room = r.x + r.w - 28.0 - (label_x + label_w + 22.0);
-    if room > 60.0 {
-        let preview = widgets::fit(line, T_SMALL, room);
-        widgets::text(
-            canvas,
-            &preview,
-            label_x + label_w + 22.0,
-            T_SMALL.baseline(cy - T_SMALL.line() / 2.0),
-            T_SMALL,
-            p.muted,
-            1.0,
-        );
-    }
+    let piece = blocks::lay_instructions(TITLE, text, action(text), false);
+    let clip = (r.y, r.y + piece.laid.h);
+    draw_ops(canvas, &piece.laid.ops, r.y, clip, &HashMap::new());
 }
 
 #[cfg(test)]
