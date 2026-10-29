@@ -264,6 +264,8 @@ pub fn update(
     let mut bands: Vec<(i32, i32)> = Vec::new();
     // Floating overlays redrawn in their own columns only (x0, y0, x1, y1).
     let mut areas: Vec<(i32, i32, i32, i32)> = Vec::new();
+    // What layers painted again themselves.
+    let mut painted: Vec<(i32, i32, i32, i32)> = Vec::new();
     if new.modal.is_empty() {
         // The page's own path.
         let page = match (&old.page_frame, &new.page_frame) {
@@ -292,6 +294,22 @@ pub fn update(
                     .iter()
                     .any(|(_, y0, _, y1)| rows.1 > *y0 && rows.0 < *y1)
         };
+        // Layers (`ui/layer.rs`, the chips) that did not change put the page
+        // back where the move carried them and paint themselves over it
+        // again, without the page being drawn there again.
+        let mut layered: Vec<u64> = Vec::new();
+        for (id, body) in &new.floating {
+            let unchanged = old.floating.iter().any(|(i, b)| i == id && b == body);
+            if unchanged
+                && under(body.rows)
+                && let Some(changed) =
+                    view.overlays
+                        .repaint(*id, canvas, page.moved, &page.rows, &page.areas)
+            {
+                painted.extend(changed);
+                layered.push(*id);
+            }
+        }
         // Overlays that say which columns they draw in are redrawn there
         // only: the page drew the rest of their rows right.
         let mut redraw = |id: u64, rows: (i32, i32)| match view.overlays.columns(id) {
@@ -299,7 +317,7 @@ pub fn update(
             None => bands.push(rows),
         };
         for (id, body) in &new.floating {
-            if under(body.rows) {
+            if !layered.contains(id) && under(body.rows) {
                 redraw(*id, body.rows);
             }
         }
@@ -308,7 +326,7 @@ pub fn update(
         if let Some((y0, y1, dy)) = page.moved {
             for (id, body) in &old.floating {
                 let (a, b) = body.rows;
-                if b > a && b > y0 && a < y1 {
+                if !layered.contains(id) && b > a && b > y0 && a < y1 {
                     redraw(*id, ((a + dy).max(y0), (b + dy).min(y1)));
                 }
             }
@@ -396,6 +414,7 @@ pub fn update(
             damage.areas.push((x0, y0, x1, y1));
         }
     }
+    damage.areas.extend(painted);
     damage.rows = merge(damage.rows.into_iter().chain(bands).collect());
     Some(damage)
 }

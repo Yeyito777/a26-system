@@ -930,7 +930,7 @@ impl Model {
 /// The Chrono panel's rows.
 pub fn build(model: &Model, conv: &str, now: Instant) -> Built {
     let p = theme::p();
-    let now_ms = now_ms() as f64;
+    let now_ms = clock::wall_ms(model, now);
     let list = model.ops.chrono.lists.get(conv);
     let loading = model.ops.chrono.busy.values().any(|c| c == conv);
     let mut rows = vec![Row::Section {

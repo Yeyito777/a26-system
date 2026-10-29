@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 
-use super::super::model::{Action, Model, Nav, UiAct, now_ms, ops};
+use super::super::model::{Action, Model, Nav, UiAct, ops};
 use super::super::proto::{self, Event, TaskSummary};
 use super::super::requests::{self, Owner};
 use super::super::theme;
@@ -94,7 +94,7 @@ impl Model {
 
     /// The activity rows of a conversation (the TUI's order).
     pub fn activity_items(&self, conv: &str, now: Instant) -> Vec<Item> {
-        let now_ms = now_ms() as f64;
+        let now_ms = clock::wall_ms(self, now);
         let mut items = Vec::new();
         if let Some(goal) = self.goal_of(conv).filter(|g| g.status != "complete") {
             let active = goal.status == "active";
@@ -221,6 +221,55 @@ impl Model {
             });
         }
         items
+    }
+
+    /// What the chat's tasks chip shows, without building the rows (it
+    /// asks every frame): the kinds of work, in `activity_items`' order and
+    /// colours (the goal ◆ or ◇, subagents ◆, Chrono ◷, commands $), and how
+    /// many rows the panel has.
+    pub fn activity_glance(&self, conv: &str) -> (Vec<(&'static str, u32)>, usize) {
+        let mut glyphs = Vec::new();
+        let mut count = 0;
+        let summary = self.sidebar.conversations.get(conv);
+        let goal = match self.ops.goal.goals.get(conv) {
+            Some(goal) => goal.as_ref(),
+            None => summary.and_then(|s| s.goal.as_ref()),
+        };
+        if let Some(goal) = goal.filter(|g| g.status != "complete") {
+            count += 1;
+            let glyph = if goal.status == "active" {
+                "◆"
+            } else {
+                "◇"
+            };
+            glyphs.push((glyph, self.tool_color("goal", GOAL)));
+        }
+        let (mut agents, mut chrono, mut bash) = (false, false, false);
+        for task in summary
+            .map_or(&[][..], |s| &s.tasks[..])
+            .iter()
+            .filter(|t| shown(t))
+        {
+            count += 1;
+            if task.kind == "subagent" || agent(task) {
+                agents = true;
+            } else if task.kind == "chrono" {
+                chrono = true;
+            } else {
+                bash = true;
+            }
+        }
+        count += summary.map_or(0, |s| s.integrations.len());
+        if agents {
+            glyphs.push(("◆", self.tool_color("exo", EXO)));
+        }
+        if chrono {
+            glyphs.push(("◷", self.tool_color("chrono", CHRONO)));
+        }
+        if bash {
+            glyphs.push(("$", self.tool_color("bash", BASH)));
+        }
+        (glyphs, count)
     }
 
     /// How many rows the panel has (the chat menu's detail).
@@ -519,7 +568,28 @@ pub fn build(model: &Model, conv: &str, now: Instant) -> Built {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exocortex::model::now_ms;
     use crate::exocortex::proto::parse_event;
+
+    #[test]
+    fn times_come_from_the_frames_clock() {
+        let mut model = Model::new();
+        let t0 = Instant::now();
+        // The wall clock as the event loop read it at t0: a task started
+        // 59.5 s before.
+        model.sidebar.clock = Some((t0, 1_000_000_000));
+        model.apply(
+            parse_event(r#"{"type":"conversation_updated","summary":{"id":"c","title":"T","tasks":[{"id":"b1","kind":"background","toolName":"bash","title":"make","startedAt":999940500}]}}"#),
+            t0,
+        );
+        let time = |now: Instant| model.activity_items("c", now)[0].time.clone();
+        assert_eq!(time(t0), time(t0), "the same now, the same time");
+        assert_ne!(
+            time(t0),
+            time(t0 + std::time::Duration::from_secs(1)),
+            "a minute turns at the frame's now, not the real clock's"
+        );
+    }
 
     #[test]
     fn rows_come_in_the_tuis_order_and_stop_exactly() {

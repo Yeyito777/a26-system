@@ -321,13 +321,16 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
             .icon(Icon::FileText)
             .detail("Read the effective prompt"),
     );
-    let usage = sheets::usage::compact(model.usage_of(&resolved.provider))
-        .map(|(five, week)| {
-            let pct =
-                |v: Option<f64>| v.map_or_else(|| "?".to_owned(), |v| format!("{}", v.round()));
-            format!("5h {}% · weekly {}% left", pct(five), pct(week))
-        })
-        .unwrap_or_else(|| "Provider limits".into());
+    // Read once, as the menu opens.
+    let usage = sheets::usage::compact(
+        model.usage_of(&resolved.provider),
+        super::super::model::now_ms() as f64,
+    )
+    .map(|(five, week)| {
+        let pct = |v: Option<f64>| v.map_or_else(|| "?".to_owned(), |v| format!("{}", v.round()));
+        format!("5h {}% · weekly {}% left", pct(five), pct(week))
+    })
+    .unwrap_or_else(|| "Provider limits".into());
     let (usage_label, usage_action) = if model.accounts_likely() {
         ("Accounts & usage", ops::Act::OpenAccounts)
     } else {

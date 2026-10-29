@@ -483,7 +483,10 @@ impl Presenter {
                 for row in y0..y1 {
                     let start = (row * self.width + x0) as usize;
                     let from = &canvas.pixels[start..start + span];
-                    self.shadow[start..start + span].copy_from_slice(from);
+                    // A stale row's copy is not compared (it is sent whole).
+                    if !self.stale[row as usize] {
+                        self.shadow[start..start + span].copy_from_slice(from);
+                    }
                     pixels[start..start + span].copy_from_slice(from);
                 }
             }
@@ -538,7 +541,10 @@ impl Presenter {
             for row in y..y + rows {
                 let start = (row * self.width + x0) as usize;
                 let pixels = &canvas.pixels[start..start + span];
-                self.shadow[start..start + span].copy_from_slice(pixels);
+                // A stale row's copy is not compared (it is sent whole).
+                if !self.stale[row as usize] {
+                    self.shadow[start..start + span].copy_from_slice(pixels);
+                }
                 self.scratch.extend_from_slice(pixels);
             }
             conn.put_image(

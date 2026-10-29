@@ -6,6 +6,7 @@
 //! to a thread of its own so the UI thread never waits on Moon.
 
 pub mod icons;
+pub mod layer;
 pub mod menu;
 pub mod overlay;
 pub mod sheet;

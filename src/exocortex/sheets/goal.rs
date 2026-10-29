@@ -225,7 +225,7 @@ impl Model {
 /// The Goal panel's rows.
 pub fn build(model: &Model, conv: &str, _width: f32, now: Instant) -> Built {
     let p = theme::p();
-    let now_ms = now_ms() as f64;
+    let now_ms = clock::wall_ms(model, now);
     let mut rows = Vec::new();
     let goal = model.goal_of(conv);
     let busy = model.ops.goal.busy.contains_key(conv);

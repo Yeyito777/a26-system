@@ -125,6 +125,20 @@ pub trait Overlay {
         None
     }
 
+    /// A layer (`ui/layer.rs`) the page moved `moved` (`y0, y1, dy`) or drew
+    /// `rows` under, unchanged itself: paints itself again over the page
+    /// without the page being drawn there again. The areas it changed, or
+    /// None to be drawn again with the page under it instead.
+    fn repaint(
+        &self,
+        _canvas: &mut Canvas,
+        _moved: Option<(i32, i32, i32)>,
+        _rows: &[(i32, i32)],
+        _areas: &[(i32, i32, i32, i32)],
+    ) -> Option<Vec<(i32, i32, i32, i32)>> {
+        None
+    }
+
     /// Lays itself out for this frame (cheap when nothing changed).
     fn layout(&mut self, _cx: &Cx) {}
 
@@ -316,6 +330,21 @@ impl OverlayStack {
             .iter()
             .find(|shown| shown.id == id)
             .and_then(|shown| shown.overlay.columns())
+    }
+
+    /// `Overlay::repaint` of a floating overlay.
+    pub fn repaint(
+        &self,
+        id: u64,
+        canvas: &mut Canvas,
+        moved: Option<(i32, i32, i32)>,
+        rows: &[(i32, i32)],
+        areas: &[(i32, i32, i32, i32)],
+    ) -> Option<Vec<(i32, i32, i32, i32)>> {
+        self.floating
+            .iter()
+            .find(|shown| shown.id == id)
+            .and_then(|shown| shown.overlay.repaint(canvas, moved, rows, areas))
     }
 
     /// The farewells of overlays `sweep` removed.

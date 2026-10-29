@@ -17,8 +17,9 @@ use crate::gfx::{Canvas, RectF};
 use crate::text::Weight;
 
 use super::super::anim::{Animator, Tween};
-use super::super::model::{Action, Model, Nav, now_ms, ops};
+use super::super::model::{Action, Model, Nav, ops};
 use super::super::proto;
+use super::super::sheets::clock;
 use super::super::sheets::{panel, usage};
 use super::super::store;
 use super::super::theme::{
@@ -216,7 +217,7 @@ fn cached(model: &Model, now: Instant) -> (Rc<Vec<(f32, Row)>>, u64) {
         format!("{:?}", model.persist.settings()),
         model.sidebar.version,
         model.persist.problems().len(),
-        now_ms() / 60_000,
+        clock::wall_ms(model, now) as u64 / 60_000,
     )
         .hash(&mut hasher);
     let key = hasher.finish();
@@ -300,7 +301,7 @@ fn build_rows(model: &Model, now: Instant) -> Vec<(f32, Row)> {
     list.push(Row::End);
     list.push(Row::Section("Connection"));
     list.extend(
-        usage::connection_rows(model, false)
+        usage::connection_rows(model, false, now)
             .into_iter()
             .map(panel_row),
     );

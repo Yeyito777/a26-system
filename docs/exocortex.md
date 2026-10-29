@@ -326,14 +326,28 @@ are discarded.
   transcript moves (a floating button over moving rows would cost its rows
   in every frame of a scroll) and fades back in once it is still.
 - **Chips** (E, `sheets/chips.rs`: usage at 20 % or less, the aside, tasks)
-  stay under the chat header while the transcript moves: a page-level
-  floating overlay that says its columns (`Overlay::columns`), so a frame
-  draws it again only there (`FrameDamage::areas`, also where a page move
-  carried its old pixels) and sends rows and areas in one upload
-  (`Presenter::present_rows_and_areas`). Their shadow is compact, as the
-  jump button's. Measured dragging a tool-heavy chat with the usage chip
-  showing, draw and present: median 2.0-2.2 ms a frame, p95 6.7-8.4 ms;
-  without it 1.8-1.9 ms, p95 5.2-7.3 ms.
+  stay under the chat header while the transcript moves, at no cost to it.
+  They are a layer (`ui/layer.rs`): drawn once into a `Sprite` (per pixel,
+  its colour and how much of the page shows through, from a render over
+  black and one over white), with the page's pixels under them kept in the
+  `Layer`. When the page moves or draws under them, the frame calls
+  `Overlay::repaint` instead of drawing the page there again: the layer
+  puts the page's pixels back where the move carried its own (from what it
+  kept), turns what it keeps with the page (a rotation, not a copy), takes
+  the rows the page drew, and blends the sprite again only in rows whose
+  look changed (a row like the one the move brought there is already
+  right, in the canvas and in the window). It sends those rows in its
+  columns (`FrameDamage::areas`, one upload with the page's rows:
+  `Presenter::present_rows_and_areas`, which keeps no copy of rows it will
+  send whole). A layer that cannot (only part of it painted, the page
+  drawing in columns near it) is drawn again as before. The chips have no
+  shadow: the iPhone's barely shows on the dark themes, and every pixel it
+  reaches is blended again in every frame of a scroll. Measured on EXO's
+  scroll (the exo-bench scenario in sandbox 6, UI-thread instructions per
+  frame, p50): ce234bd 4.91 M; with the chips drawn as a floating overlay
+  7.46 M; as a layer 4.99-5.01 M (main without chips then: 4.91 M). After
+  C2's 64-byte row moves (5112ab0): 1.19 M, without chips 1.12 M; EXO's
+  open 30.1 M, without chips 28.8 M (the chips' first sprite).
 - **The list's rows.** The rows (`sidebar::Layout`) are rebuilt only when
   rows may come, go or move (a pin, a sort order, a folder opened, the
   search), and folder activity is added up once per change
@@ -496,7 +510,10 @@ additions are the only shared edits.
   `widgets::shows(canvas, y0, y1)`; place things at whole pixels (`ops::px`,
   snapped piece positions) and draw shapes through icons or the ops, so a
   piece moved by a scroll draws the same pixels; animate in quantized steps
-  (`anim::pulse_percent`, alpha in 1/32), so two frames of one state agree.
+  (`anim::pulse_percent`, alpha in 1/32), so two frames of one state agree;
+  read times from the frame's `now` (`sheets::clock::wall_ms(model, now)`,
+  the wall clock the event loop took this pass, `Sidebar::clock`), never
+  from the wall clock while drawing.
 - **Overlays** (`ui/overlay.rs`). An `Overlay` lays itself out, describes
   its `Body` each frame (rows, the solid rows that only move, a scroller,
   a key of everything else) and draws it; the pipeline then moves rows for
@@ -520,7 +537,10 @@ additions are the only shared edits.
   stack collects them, the event loop performs them; the Accounts panel
   stops watching so). A floating overlay that belongs to the page
   (`page_level()`: E's chips) is hidden under a modal one and takes no
-  touches then. E's panels are `sheets::panel`: rows (sections,
+  touches then; one drawn as a layer (`ui::layer::{Sprite, Layer}`:
+  `Sprite::render(rect, draw)`, `layer.paint(canvas, &sprite)` in `draw`,
+  `layer.repaint(..)` in `Overlay::repaint`) costs a scroll only its own
+  changed rows. E's panels are `sheets::panel`: rows (sections,
   key/value, navigation, task rows, rail cards, bars, buttons, rules,
   leads, fields, plain actions, the connection card `Status`, the
   accounts grid `GridHead` / `Account`, the token heatmap `Heat`) built from

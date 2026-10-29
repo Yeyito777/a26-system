@@ -5,7 +5,19 @@
 
 use std::time::{Duration, Instant};
 
+use super::super::model::{Model, now_ms};
 use super::super::proto::Goal;
+
+/// The wall clock (epoch ms) at a frame's `now`, as the list reads it
+/// (`Sidebar::clock`, set each pass of the event loop): a frame and its
+/// redraw show the same times whatever the real clock does meanwhile.
+pub fn wall_ms(model: &Model, now: Instant) -> f64 {
+    match model.sidebar.clock {
+        Some((at, ms)) if now >= at => ms as f64 + now.duration_since(at).as_millis() as f64,
+        Some((at, ms)) => ms as f64 - at.duration_since(now).as_millis() as f64,
+        None => now_ms() as f64,
+    }
+}
 
 const GOAL_UNITS: [(&str, u64); 4] = [
     ("d", 86_400_000),
