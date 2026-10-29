@@ -10,11 +10,12 @@ use std::time::Instant;
 use crate::gfx::Canvas;
 
 use super::super::markdown::{self, MdBlock};
-use super::super::model::{Action, Chat, Model, Page, composer};
+use super::super::model::{Action, Chat, Model, Page, composer, rich::Rich};
 use super::super::proto::{Block, Entry, ToolStyle};
 use super::super::theme::{self, TRANSCRIPT_PAD};
 use super::blocks::{lay_md_piece, lay_notice, lay_thinking, lay_user, lay_whole};
 use super::markdown_layout::{PARAGRAPH_GAP, md_gap};
+use super::media::{Strip, lay_strip};
 use super::ops::{Laid, draw_ops, quantized};
 use super::tools::{GROUP_MIN, lay_group, lay_tool, tool_run};
 use super::{CHAT_TOP, ViewState, W, hash_of, transcript_bounds};
@@ -64,6 +65,8 @@ pub(crate) struct CachedPlan {
 
 pub(crate) struct Context<'a> {
     pub(crate) chat: &'a Chat,
+    /// Image previews and code blocks' state (C1).
+    pub(crate) rich: &'a Rich,
     pub(crate) styles: &'a HashMap<String, ToolStyle>,
     pub(crate) styles_version: u64,
 }
@@ -109,6 +112,9 @@ pub(crate) enum Segment {
         group: Option<(String, u64)>,
         gap: f32,
     },
+    /// A message's images (C1's `media.rs`): a reply's after it, the
+    /// user's under their bubble.
+    Images { strip: Strip, gap: f32 },
 }
 
 pub(crate) struct ToolRef {
@@ -124,11 +130,19 @@ pub(crate) fn plan_entry(entry: &Entry) -> Plan {
         segments: vec![Segment::Whole { hash }],
     };
     match entry {
-        Entry::User { text, metadata, .. } => {
+        Entry::User {
+            text,
+            metadata,
+            images,
+        } => {
             let automated = metadata
                 .as_ref()
                 .is_some_and(|m| m.automation.is_some() || m.system);
-            whole(hash_of(("user", text, automated)))
+            let mut plan = whole(hash_of(("user", text, automated)));
+            if let Some(strip) = Strip::of_user(images) {
+                plan.segments.push(Segment::Images { strip, gap: 11.0 });
+            }
+            plan
         }
         Entry::Ai { blocks, .. } => plan_blocks(blocks),
         Entry::System { text, color, .. } => whole(hash_of(("system", text, color))),
@@ -235,6 +249,10 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
             }
             _ => index += 1,
         }
+    }
+    if let Some(strip) = Strip::of_blocks(blocks) {
+        let gap = if segments.is_empty() { 0.0 } else { 25.0 };
+        segments.push(Segment::Images { strip, gap });
     }
     Plan { segments }
 }
@@ -359,6 +377,15 @@ impl ViewState {
                         push(items, &mut h, laid);
                     }
                 }
+                Segment::Images { strip, gap } => {
+                    h += gap;
+                    let conv = context.chat.id.as_deref();
+                    let images = &context.rich.images;
+                    let laid = self.piece(strip.state_key(images, conv), || {
+                        lay_strip(strip, images, conv)
+                    });
+                    push(items, &mut h, laid);
+                }
             }
         }
         if h > 0.0 { y + h + 30.0 } else { y }
@@ -376,6 +403,7 @@ impl ViewState {
             queued.len(),
             chat.loaded,
             model.ops.styles_version,
+            model.rich.version(),
             self.generation,
         ));
         if self.layout.key == key && !self.layout.items.is_empty() {
@@ -384,6 +412,7 @@ impl ViewState {
         self.pass += 1;
         let context = Context {
             chat,
+            rich: &model.rich,
             styles: &model.ops.tool_styles,
             styles_version: model.ops.styles_version,
         };

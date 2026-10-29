@@ -16,6 +16,7 @@
 pub mod chat;
 pub mod composer;
 pub mod ops;
+pub mod rich;
 pub mod sidebar;
 
 use std::time::{Duration, Instant};
@@ -56,6 +57,8 @@ pub enum Action {
     Composer(composer::Act),
     /// Models, settings and the operations panels (E, `ops::Act`).
     Ops(ops::Act),
+    /// Rich content: images, code blocks (C1, `rich::Act`).
+    Rich(rich::Act),
     /// The interface itself (A).
     Ui(UiAct),
 }
@@ -164,6 +167,8 @@ pub struct Model {
     pub shelf: Shelf,
     pub composer: Composer,
     pub ops: Ops,
+    /// Image previews and code blocks' state (C1).
+    pub rich: rich::Rich,
     /// A conversation to open once connected (a notification's target).
     pub pending_open: Option<String>,
 }
@@ -204,6 +209,7 @@ impl Model {
             shelf: Shelf::default(),
             composer: Composer::default(),
             ops: Ops::default(),
+            rich: rich::Rich::default(),
             pending_open: None,
         }
     }
@@ -309,6 +315,7 @@ impl Model {
             Action::Chat(act) => self.handle_chat(act),
             Action::Composer(act) => self.handle_composer(act),
             Action::Ops(act) => self.handle_ops(act),
+            Action::Rich(act) => self.handle_rich(act),
             Action::Ui(act) => {
                 self.handle_ui(act);
                 Vec::new()
@@ -429,6 +436,10 @@ impl Model {
             }
             _ => {}
         }
+        let event = match self.take_rich(event, now) {
+            Ok(rich) => return rich,
+            Err(event) => event,
+        };
         commands.extend(self.apply_list(&event, now));
         commands.extend(self.apply_ops(&event, now));
         commands.extend(self.apply_composer(&event, now));
@@ -453,6 +464,7 @@ impl Model {
             Some(Owner::Sidebar) => self.list_error(id, message),
             Some(Owner::Composer) => self.composer_error(id, message),
             Some(Owner::Ops) => self.ops_error(id, message),
+            Some(Owner::Rich) => self.rich_error(id, message),
             Some(Owner::App) => false,
         }
     }
@@ -467,6 +479,7 @@ impl Model {
                 Owner::Sidebar => self.list_timeout(&id, &pending),
                 Owner::Composer => self.composer_timeout(&id, &pending),
                 Owner::Ops => self.ops_timeout(&id, &pending),
+                Owner::Rich => self.rich_timeout(&id, &pending),
                 // The connection answers nothing: it shows as connecting.
                 Owner::App => false,
             };
@@ -476,11 +489,16 @@ impl Model {
 
     /// When `expire` next has something to do.
     pub fn answer_deadline(&self) -> Option<Instant> {
-        let drafts = self.composer_deadline();
-        match (self.requests.deadline(), drafts) {
+        // An image preview asked again after a backoff (C1) too, and the
+        // drafts written once typing pauses (D).
+        let soonest = |a: Option<Instant>, b: Option<Instant>| match (a, b) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
-        }
+        };
+        soonest(
+            soonest(self.requests.deadline(), self.rich.images.deadline()),
+            self.composer_deadline(),
+        )
     }
 
     /// A request of an area that did not handle its timeout itself: say so

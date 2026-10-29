@@ -22,6 +22,7 @@ use crate::gfx::Canvas;
 use crate::keys::{KeyInput, KeyMap};
 use crate::present::Presenter;
 
+use super::anim;
 use super::clipboard;
 use super::gesture::{Axis, Gesture, Recognizer};
 use super::handoff;
@@ -585,6 +586,17 @@ impl Context<'_> {
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
+    PROFILE.store(
+        std::env::var_os("EXOCORTEX_APP_PROFILE").is_some(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    // SAFETY: the handler only flips an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(
+            libc::SIGUSR2,
+            toggle_profile as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
+    }
     // Launched into the front, the first frames get a fast core; the faces
     // they do not use are parsed meanwhile on other cores (the first frame
     // parses its own: Mono and MonoMedium).
@@ -636,6 +648,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let mut running = true;
     let mut redraw = true;
     let mut was_flinging = false;
+    // When the next fling frame is due.
+    let mut fling_due: Option<Instant> = None;
     let started = Instant::now();
     let mut list_shown = false;
     // A conversation opened and when, until it is drawn (profiling).
@@ -645,6 +659,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let mut back: Option<(Instant, bool, bool)> = None;
     // Until when the first frame of a conversation opened empty waits.
     let mut hold_until: Option<Instant> = None;
+    // The finger's last screen row (profiling).
+    let mut finger: Option<i16> = None;
     // An X event already read from the connection, not yet handled.
     let mut queued_x: Option<XEvent> = None;
 
@@ -821,6 +837,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 XEvent::ButtonPress(event) if event.event == window && event.detail == 1 => {
+                    if env_flag("EXOCORTEX_APP_PROFILE") {
+                        eprintln!(
+                            "exocortex: press at {:.3} y {}",
+                            monotonic_ms(),
+                            event.root_y
+                        );
+                    }
                     let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
                     if y < touch_height - BOTTOM_GESTURE_RESERVE {
                         for gesture in recognizer.down(x, y, now) {
@@ -829,6 +852,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 XEvent::MotionNotify(event) if event.event == window => {
+                    finger = Some(event.root_y);
+                    if env_flag("EXOCORTEX_APP_PROFILE") {
+                        eprintln!(
+                            "exocortex: motion at {:.3} y {} time {}",
+                            monotonic_ms(),
+                            event.root_y,
+                            event.time
+                        );
+                    }
                     let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
                     for gesture in recognizer.moved(x, y, now) {
                         redraw |= cx.gesture(gesture, now);
@@ -954,9 +986,29 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // asking for a frame: draw it.
         redraw |= was_flinging && !flinging;
         was_flinging = flinging;
+        // A fling is drawn on a steady cadence, one panel refresh after the
+        // last frame was due whatever that frame took, so its steps stay
+        // even (8 ms after each frame's end averaged 8.6 ms and beat against
+        // the 120 Hz panel).
+        let fling_frame = flinging && fling_due.is_none_or(|due| now >= due);
+        if !flinging {
+            fling_due = None;
+        } else if fling_frame {
+            fling_due = Some(match fling_due {
+                Some(due) if now < due + anim::FRAME => due + anim::FRAME,
+                _ => now + anim::FRAME,
+            });
+        }
         redraw |= model.tick(now);
         redraw |= model.expire(now);
         redraw |= view.take_ui(&mut model, now);
+        // Image previews near the screen (C1), asked for nearest first.
+        if mapped && model.connected {
+            let wants = view.image_wants(&model, height, now);
+            for command in model.want_images(&wants, now) {
+                link.send(command);
+            }
+        }
         let dots = mapped && model.page == Page::Chat && model.streaming();
         if dots && now >= next_dots {
             view.dots = view.dots.wrapping_add(1);
@@ -975,7 +1027,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let animating = next_frame.is_some_and(|at| now >= at);
         // Hidden (in the background, perhaps leased awake), nothing is drawn:
         // MapNotify draws what changed meanwhile.
-        if (redraw || flinging || animating) && running && mapped && !holding {
+        if (redraw || fling_frame || animating) && running && mapped && !holding {
             draw_frame(
                 &conn,
                 &mut renderer,
@@ -990,6 +1042,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             });
             redraw = false;
             if env_flag("EXOCORTEX_APP_PROFILE") {
+                eprintln!(
+                    "exocortex: shown at {:.3} finger {}",
+                    monotonic_ms(),
+                    finger.map_or(-1, i32::from)
+                );
                 if !list_shown && model.sidebar.loaded {
                     list_shown = true;
                     eprintln!(
@@ -1043,8 +1100,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 soonest(at);
             }
         }
-        if flinging {
-            soonest(now + Duration::from_millis(8));
+        if let Some(due) = fling_due {
+            soonest(due);
         }
         if dots {
             soonest(next_dots);
@@ -1095,19 +1152,34 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// A development switch from the environment, read once.
+/// CLOCK_MONOTONIC in milliseconds, to line profiles up with other
+/// processes (the touchscreen's evdev reports, Moon, moon-compositor).
+fn monotonic_ms() -> f64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: writes the time into a live timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as f64 * 1000.0 + now.tv_nsec as f64 / 1e6
+}
+
+/// Profiling: `EXOCORTEX_APP_PROFILE` at start, toggled at run time by
+/// SIGUSR2 (measuring the app on the phone without restarting it).
+static PROFILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn toggle_profile(_: libc::c_int) {
+    PROFILE.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A development switch: profiling (above), or `EXOCORTEX_APP_VERIFY` read
+/// once from the environment.
 fn env_flag(name: &'static str) -> bool {
     use std::sync::OnceLock;
-    static FLAGS: OnceLock<(bool, bool)> = OnceLock::new();
-    let (profile, verify) = FLAGS.get_or_init(|| {
-        (
-            std::env::var_os("EXOCORTEX_APP_PROFILE").is_some(),
-            std::env::var_os("EXOCORTEX_APP_VERIFY").is_some(),
-        )
-    });
+    static VERIFY: OnceLock<bool> = OnceLock::new();
     match name {
-        "EXOCORTEX_APP_PROFILE" => *profile,
-        _ => *verify,
+        "EXOCORTEX_APP_PROFILE" => PROFILE.load(std::sync::atomic::Ordering::Relaxed),
+        _ => *VERIFY.get_or_init(|| std::env::var_os("EXOCORTEX_APP_VERIFY").is_some()),
     }
 }
 

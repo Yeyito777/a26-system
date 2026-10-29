@@ -9,7 +9,7 @@
 //! C1), so dragging one draws only its rows.
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::gfx::{Canvas, Image, Path, RectF, Rgb};
 use crate::text::{self, Weight};
@@ -18,19 +18,30 @@ use super::super::model::Action;
 use super::super::theme;
 use super::super::ui::icons::{self, Icon};
 
-/// An image an op draws, compared by identity.
+/// An image an op draws, compared by identity. Weak: the image cache
+/// (`images.rs`) alone keeps previews in memory; one it dropped is no
+/// longer laid out (its pieces' keys change), and draws nothing.
 #[derive(Clone)]
-pub struct ImageHandle(pub Rc<Image>);
+pub struct ImageHandle(pub Weak<Image>);
+
+impl ImageHandle {
+    pub fn new(image: &Rc<Image>) -> Self {
+        Self(Rc::downgrade(image))
+    }
+}
 
 impl PartialEq for ImageHandle {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        Weak::ptr_eq(&self.0, &other.0)
     }
 }
 
 impl std::fmt::Debug for ImageHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Image({}x{})", self.0.width, self.0.height)
+        match self.0.upgrade() {
+            Some(image) => write!(f, "Image({}x{})", image.width, image.height),
+            None => write!(f, "Image(gone)"),
+        }
     }
 }
 
@@ -181,6 +192,8 @@ pub struct Laid {
     pub ink: (f32, f32),
     /// Its horizontal scrollers' keys (`Op::Clip`).
     pub xkeys: Vec<u64>,
+    /// The image previews it shows (fetched while it is near the screen).
+    pub images: Vec<super::super::images::Want>,
 }
 
 /// Rows an op may touch, relative to its piece (generous: glyphs, emoji
@@ -315,11 +328,18 @@ fn draw_ops_at(
                 color,
                 alpha,
             } => icons::draw(canvas, *icon, cx + dx, cy + dy, *size, *color, *alpha),
-            Op::Image { rect, image } => canvas.draw_image_scaled(
-                &image.0,
-                RectF::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
-                1.0,
-            ),
+            Op::Image { rect, image } => {
+                if let Some(image) = image.0.upgrade() {
+                    let r = RectF::new(rect.x + dx, rect.y + dy, rect.w, rect.h);
+                    let (x, y) = (px(r.x), px(r.y));
+                    if image.width == px(r.x + r.w) - x && image.height == px(r.y + r.h) - y {
+                        // Its own size: copied, pixel for pixel.
+                        canvas.draw_image(&image, x, y, 1.0);
+                    } else {
+                        canvas.draw_image_scaled(&image, r, 1.0);
+                    }
+                }
+            }
             Op::Chevron { x, cy, open } => small_chevron(canvas, x + dx, cy + dy, *open),
             Op::Clip {
                 rect,
