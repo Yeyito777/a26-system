@@ -175,6 +175,17 @@ pub fn page_drawn(synced: impl FnOnce()) {
     }
 }
 
+/// Sends one command to Moon and returns its `result` when Moon accepted it
+/// (`clipboard get`).
+pub fn query(command: &str) -> Option<serde_json::Value> {
+    let response = request(&socket(), format!("{command}\n").as_bytes())?;
+    let mut document: serde_json::Value = serde_json::from_str(&response).ok()?;
+    if !document.get("ok")?.as_bool()? {
+        return None;
+    }
+    Some(document.get_mut("result")?.take())
+}
+
 /// Sends one command to Moon (`brightness set 40`, `settings set ...`).
 /// Returns whether Moon accepted it.
 pub fn send(command: &str) -> bool {
@@ -193,10 +204,16 @@ fn read_volume_from(path: &Path) -> Option<u8> {
 
 /// Moon keyboard layouts this app asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Multiline and Search are the Exocortex packages' (D, B).
 pub enum KeyboardPurpose {
     Text,
+    /// A text area: Return types a newline and the keyboard stays up
+    /// (OSS-Phone-V1 `docs/app-services.md`).
+    Multiline,
     Url,
     Password,
+    /// A search field.
+    Search,
 }
 
 /// Asks Moon to show its system keyboard. Returns whether the keyboard is
@@ -204,7 +221,9 @@ pub enum KeyboardPurpose {
 pub fn show_keyboard(purpose: KeyboardPurpose) -> bool {
     let command: &[u8] = match purpose {
         KeyboardPurpose::Text => b"keyboard show text\n",
+        KeyboardPurpose::Multiline => b"keyboard show multiline\n",
         KeyboardPurpose::Url => b"keyboard show url\n",
+        KeyboardPurpose::Search => b"keyboard show search\n",
         KeyboardPurpose::Password => b"keyboard show password\n",
     };
     request(&socket(), command)

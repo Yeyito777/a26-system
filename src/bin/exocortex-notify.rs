@@ -26,7 +26,7 @@ mod handoff;
 mod line;
 #[path = "../exocortex/markdown.rs"]
 mod markdown;
-#[path = "../exocortex/proto.rs"]
+#[path = "../exocortex/proto/mod.rs"]
 mod proto;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -151,7 +151,7 @@ impl<F: FnMut(&str) -> bool> Bridge<F> {
                 stream_stop_reason,
                 owner_turn_finished,
             } => self.on_update(summary, stream_stop_reason, owner_turn_finished),
-            Event::ConversationDeleted { conv_id } => {
+            Event::ConversationDeleted { conv_id, .. } => {
                 self.known.remove(&conv_id);
                 self.streaming.remove(&conv_id);
                 vec![Effect::Withdraw(conv_id)]
@@ -301,6 +301,7 @@ fn reply_body(entries: &[Entry]) -> String {
             Entry::System {
                 text: notice,
                 color,
+                ..
             } => {
                 if color.as_deref() == Some("error") {
                     text = notice.clone();
@@ -829,11 +830,13 @@ mod tests {
         let error = reply_body(&[
             Entry::User {
                 text: "q".into(),
+                images: Vec::new(),
                 metadata: None,
             },
             Entry::System {
                 text: "Rate limited".into(),
                 color: Some("error".into()),
+                metadata: None,
             },
         ]);
         assert_eq!(error, "Rate limited");

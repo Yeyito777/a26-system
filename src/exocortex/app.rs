@@ -1,7 +1,10 @@
-//! The Exocortex app's event loop: X input, the daemon link and Moon's
-//! state, one `poll(2)` for all of them. It draws only when something
-//! changed (or a fling, the working dots, a notice ends), and never waits
-//! on the daemon: that is the link thread's job.
+//! The Exocortex app's event loop (A): X input, the daemon link and Moon's
+//! state, one `poll(2)` for all of them. Touches become gestures
+//! (`gesture.rs`), offered to the overlays first and then to the page; what
+//! the model asks for (overlays, haptics, the clipboard, the keyboard) is
+//! taken after every change; the kept files are written in the background.
+//! It draws only when something changed or animates (`Animator`), and never
+//! waits on the daemon: that is the link thread's job.
 
 use std::error::Error;
 use std::os::fd::AsRawFd;
@@ -19,15 +22,19 @@ use crate::gfx::Canvas;
 use crate::keys::{KeyInput, KeyMap};
 use crate::present::Presenter;
 
+use super::clipboard;
+use super::gesture::{Axis, Gesture, Recognizer};
 use super::handoff;
 use super::line::{self, Waker};
 use super::link::{DaemonLink, LinkEvent};
-use super::model::{Action, Model, Page};
+use super::model::{Action, Effect, Model, Nav, Page, chat, composer};
 use super::proto;
-use super::view::{self, Hit, ScrollArea, ViewState};
+use super::store::{self, Store};
+use super::theme;
+use super::ui::overlay::Response;
+use super::ui::{self, Haptic};
+use super::view::{self, Frame, Hit, ScrollArea, ViewState, frame};
 
-/// How long a notice ("Message not sent") stays.
-const NOTICE_FOR: Duration = Duration::from_secs(4);
 /// While in front, Moon's state (a tapped notification's target) is read
 /// this often.
 const SHELL_POLL: Duration = Duration::from_secs(1);
@@ -44,16 +51,17 @@ const DOTS_EVERY: Duration = Duration::from_millis(420);
 const HOLD_FOR_WINDOW: Duration = Duration::from_millis(110);
 /// At most this long is spent on queued X input before a frame is drawn.
 const INPUT_BUDGET: Duration = Duration::from_millis(6);
+/// Moon owns the bottom of the screen for its home gesture: touches there
+/// are its.
+const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
 
 struct Renderer {
     window: Window,
     depth: u8,
     canvas: Canvas,
     presenter: Presenter,
-    /// What the last chat frame showed (view::chat_frame), so the next one
-    /// redraws only what changed.
-    chat_frame: Option<view::ChatFrame>,
-    list_frame: Option<view::ListFrame>,
+    /// What the last frame showed, so the next one draws only what changed.
+    frame: Option<Frame>,
 }
 
 impl Renderer {
@@ -71,8 +79,7 @@ impl Renderer {
             depth,
             canvas: Canvas::new(i32::from(width), i32::from(height)),
             presenter,
-            chat_frame: None,
-            list_frame: None,
+            frame: None,
         })
     }
 
@@ -87,8 +94,7 @@ impl Renderer {
         self.presenter.destroy(conn);
         self.presenter = presenter;
         self.canvas = Canvas::new(i32::from(width), i32::from(height));
-        self.chat_frame = None;
-        self.list_frame = None;
+        self.frame = None;
         Ok(())
     }
 
@@ -205,31 +211,355 @@ fn withdraw_notification(conversation: String) {
         });
 }
 
-/// The height taps are judged against: Moon keeps the bottom of the screen
-/// for its home gesture, but with its keyboard up the window ends above it.
-fn tap_height(renderer: &Renderer, view: &ViewState) -> u16 {
-    renderer.size().1 + if view.keyboard { 400 } else { 0 }
-}
-
+/// How deep a page is, for Moon's transitions: deeper pushes, shallower
+/// pops. Settings sits left of the list (it opens with the pop look).
 fn page_depth(model: &Model) -> usize {
     match model.page {
-        Page::List => model.folders.len(),
+        Page::Settings => 0,
+        Page::List => 1 + model.sidebar.path.len(),
         Page::Chat => 100,
+    }
+}
+
+/// The app's side of touches and the keyboard.
+#[derive(Default)]
+struct Input {
+    /// The target under the finger, drawn pressed.
+    pressed: Option<Hit>,
+    /// The list a vertical drag scrolls.
+    dragging: Option<ScrollArea>,
+    /// The horizontal scroller a sideways drag moves, and the finger's last x.
+    sideways: Option<(u64, f32)>,
+    /// Moon's keyboard was asked for.
+    keyboard: bool,
+    /// …by an overlay (a prompt), which puts it away when it goes.
+    keyboard_for_overlay: bool,
+}
+
+/// What acting on input needs.
+struct Context<'a> {
+    link: &'a DaemonLink,
+    model: &'a mut Model,
+    view: &'a mut ViewState,
+    input: &'a mut Input,
+    height: f32,
+    width: f32,
+}
+
+impl Context<'_> {
+    /// Performs an action: the daemon is asked first (its answer is on the
+    /// way while Moon snapshots the page), then a page change slides.
+    fn perform(&mut self, action: Action) {
+        let depth = page_depth(self.model);
+        match &action {
+            Action::Composer(composer::Act::Send) => self.view.follow = true,
+            // The tapped row stays under the finger as it opens.
+            Action::Chat(chat::Act::ToggleExpanded(_)) => self.view.follow = false,
+            Action::Nav(_) if self.input.keyboard => self.hide_keyboard(),
+            _ => {}
+        }
+        for command in self.model.handle(action) {
+            self.link.send(command);
+        }
+        let after = page_depth(self.model);
+        if after != depth {
+            // Before the new page is drawn: Moon slides it over the old one.
+            control::transition(after > depth);
+        }
+        self.take_ui(Instant::now());
+    }
+
+    fn hide_keyboard(&mut self) {
+        if self.input.keyboard {
+            control::hide_keyboard();
+        }
+        self.input.keyboard = false;
+        self.input.keyboard_for_overlay = false;
+        self.view.keyboard = false;
+    }
+
+    fn show_keyboard(&mut self, purpose: KeyboardPurpose) {
+        self.input.keyboard = control::show_keyboard(purpose);
+    }
+
+    /// Takes what the model asked of the interface: overlays and effects.
+    fn take_ui(&mut self, now: Instant) -> bool {
+        let mut changed = self.view.take_ui(self.model, now);
+        let haptics = self.model.persist.settings().haptics;
+        for effect in std::mem::take(&mut self.model.ui.effects) {
+            match effect {
+                Effect::Haptic(haptic) => {
+                    if haptics {
+                        ui::haptic(haptic);
+                    }
+                }
+                Effect::Copy(text) => clipboard::copy(&text),
+                Effect::OpenUrl(url) => {
+                    ui::open_url(&url);
+                }
+                Effect::ShowKeyboard(purpose) => {
+                    self.show_keyboard(purpose);
+                    self.view.follow = true;
+                }
+                Effect::HideKeyboard => self.hide_keyboard(),
+            }
+            changed = true;
+        }
+        // A prompt on top wants the keyboard; gone, it puts it away.
+        match self.view.overlays.keyboard() {
+            Some(purpose) if !self.input.keyboard => {
+                self.show_keyboard(purpose);
+                self.input.keyboard_for_overlay = self.input.keyboard;
+            }
+            None if self.input.keyboard_for_overlay => self.hide_keyboard(),
+            _ => {}
+        }
+        changed
+    }
+
+    /// Offers a gesture to the overlays, then the page. Returns whether
+    /// anything shows differently.
+    fn gesture(&mut self, gesture: Gesture, now: Instant) -> bool {
+        let response = {
+            let mut overlays = std::mem::take(&mut self.view.overlays);
+            let cx = self.view.cx(self.model, self.width, self.height, now);
+            let response = overlays.gesture(&gesture, &cx);
+            self.view.overlays = overlays;
+            response
+        };
+        match response {
+            Response::Pass => {}
+            Response::Handled => {
+                self.input.pressed = None;
+                return true;
+            }
+            Response::Action(action) => {
+                self.input.pressed = None;
+                self.perform(action);
+                return true;
+            }
+        }
+        let height = self.height;
+        match gesture {
+            Gesture::Down { x, y } => {
+                self.input.pressed =
+                    view::hit(self.model, self.view, height, x as i16, y as i16, now)
+                        .filter(|hit| matches!(hit, Hit::Action(_)));
+                true
+            }
+            Gesture::Lift { x, y } => {
+                self.view.lifted = view::liftable(self.model, self.view, height, x, y, now);
+                self.view.lifted.is_some()
+            }
+            Gesture::LongPress { x, y } => {
+                self.input.pressed = None;
+                match view::long_press(self.model, self.view, height, x, y, now) {
+                    Some(action) => {
+                        self.model.ui.haptic(Haptic::Medium);
+                        self.perform(action);
+                    }
+                    None => self.view.lifted = None,
+                }
+                true
+            }
+            Gesture::DragStart {
+                axis: Axis::Vertical,
+                y,
+                start_y,
+                edge: false,
+                ..
+            } => {
+                self.input.pressed = None;
+                self.view.lifted = None;
+                self.input.dragging = view::scroll_area(self.model, self.view, height, start_y);
+                match self.input.dragging {
+                    Some(ScrollArea::List) => {
+                        self.view.list_scroll.begin(start_y, now);
+                        let max = view::list_max(self.model, height);
+                        self.view.list_scroll.moved(y, max, now);
+                    }
+                    Some(ScrollArea::Chat) => {
+                        self.view.chat_scroll.begin(start_y, now);
+                        self.drag_chat(y, now);
+                    }
+                    Some(ScrollArea::Settings) => {
+                        self.view.settings_scroll.begin(start_y, now);
+                        self.view.settings_scroll.moved(y, 0.0, now);
+                    }
+                    None => {}
+                }
+                true
+            }
+            Gesture::DragStart {
+                axis: Axis::Horizontal,
+                x,
+                start_x,
+                start_y,
+                edge: false,
+                ..
+            } => {
+                self.input.pressed = None;
+                self.view.lifted = None;
+                self.input.sideways =
+                    view::horizontal_target(self.model, self.view, height, start_x, start_y, now)
+                        .map(|key| (key, start_x));
+                if let Some((key, last)) = &mut self.input.sideways {
+                    view::horizontal_drag(self.view, *key, x - *last);
+                    *last = x;
+                }
+                true
+            }
+            Gesture::DragStart { edge: true, .. } => {
+                self.input.pressed = None;
+                self.view.lifted = None;
+                true
+            }
+            Gesture::Drag {
+                axis: Axis::Vertical,
+                y,
+                ..
+            } => {
+                match self.input.dragging {
+                    Some(ScrollArea::List) => {
+                        let max = view::list_max(self.model, height);
+                        self.view.list_scroll.moved(y, max, now);
+                    }
+                    Some(ScrollArea::Chat) => self.drag_chat(y, now),
+                    Some(ScrollArea::Settings) => self.view.settings_scroll.moved(y, 0.0, now),
+                    None => {}
+                }
+                true
+            }
+            Gesture::Drag {
+                axis: Axis::Horizontal,
+                x,
+                ..
+            } => {
+                if let Some((key, last)) = &mut self.input.sideways {
+                    view::horizontal_drag(self.view, *key, x - *last);
+                    *last = x;
+                }
+                true
+            }
+            Gesture::DragEnd { axis, .. } => {
+                if axis == Axis::Vertical {
+                    match self.input.dragging.take() {
+                        Some(ScrollArea::List) => {
+                            let max = view::list_max(self.model, height);
+                            self.view.list_scroll.end(max, now);
+                        }
+                        Some(ScrollArea::Chat) => {
+                            let max = self.view.chat_max(self.model, height);
+                            self.view.chat_scroll.end(max, now);
+                        }
+                        Some(ScrollArea::Settings) => self.view.settings_scroll.end(0.0, now),
+                        None => {}
+                    }
+                }
+                self.input.sideways = None;
+                true
+            }
+            Gesture::Tap { x, y } => {
+                self.input.pressed = None;
+                self.view.lifted = None;
+                match view::hit(self.model, self.view, height, x as i16, y as i16, now) {
+                    Some(Hit::Action(action)) => self.perform(action),
+                    Some(Hit::Composer) => {
+                        self.show_keyboard(KeyboardPurpose::Text);
+                        self.view.follow = true;
+                    }
+                    Some(Hit::Transcript) => self.hide_keyboard(),
+                    None => {}
+                }
+                true
+            }
+            // The left-edge swipe: Back (Settings has nothing to its left).
+            Gesture::Back => {
+                if self.model.page != Page::Settings {
+                    self.perform(Action::Nav(Nav::Back));
+                }
+                true
+            }
+            Gesture::Cancel | Gesture::LongPressEnd { .. } => {
+                let changed = self.input.pressed.is_some();
+                self.input.pressed = None;
+                if !self.view.overlays.has_modal() {
+                    self.view.lifted = None;
+                }
+                changed
+            }
+            Gesture::LongPressMove { .. } => false,
+        }
+    }
+
+    fn drag_chat(&mut self, y: f32, now: Instant) {
+        let max = self.view.chat_max(self.model, self.height);
+        self.view.chat_scroll.moved(y, max, now);
+        self.view.follow = false;
+        // Dragging the transcript puts the keyboard away.
+        if self.input.keyboard {
+            self.hide_keyboard();
+        }
+    }
+
+    /// A key from Moon's keyboard: the top overlay's (a prompt), else the
+    /// composer's.
+    fn key(&mut self, input: KeyInput, now: Instant) -> bool {
+        if self.view.overlays.blocking() {
+            let response = {
+                let mut overlays = std::mem::take(&mut self.view.overlays);
+                let cx = self.view.cx(self.model, self.width, self.height, now);
+                let response = overlays.key(&input, &cx);
+                self.view.overlays = overlays;
+                response
+            };
+            if let Response::Action(action) = response {
+                self.perform(action);
+            }
+            return true;
+        }
+        if self.model.page != Page::Chat {
+            return false;
+        }
+        match input {
+            KeyInput::Character(character) => self.model.composer.text.push(character),
+            KeyInput::Backspace => {
+                self.model.composer.text.pop();
+            }
+            KeyInput::Enter => {
+                self.perform(Action::Composer(composer::Act::Send));
+                // Moon puts its keyboard away on Return; a chat keeps it.
+                if self.input.keyboard {
+                    self.show_keyboard(KeyboardPurpose::Text);
+                }
+            }
+        }
+        self.view.follow = true;
+        true
     }
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
     // Launched into the front, the first frames get a fast core; the faces
     // they do not use are parsed meanwhile on other cores (the first frame
-    // parses its own: Bold and Regular).
+    // parses its own: Mono and MonoMedium).
     use crate::text::Weight;
-    crate::text::preload(&[
-        Weight::SemiBold,
-        Weight::Medium,
-        Weight::Italic,
-        Weight::Mono,
-    ]);
+    crate::text::preload(&[Weight::MonoBold, Weight::MonoSemiBold, Weight::MonoItalic]);
     boost_ui_thread(std::env::var_os("EXOCORTEX_APP_NO_BOOST").is_none());
+    // What was kept: the settings set the theme before the first frame.
+    let mut store = Store::open(store::dir());
+    let mut model = Model::new();
+    store.load_into(&mut model.persist);
+    let settings = model.persist.settings();
+    theme::set_current(theme::by_id(&settings.theme));
+    theme::set_text_scale(settings.text_scale);
+    for (name, _) in model.persist.problems().to_vec() {
+        model
+            .ui
+            .error_toast(format!("{name} could not be read: changes are not kept."));
+    }
+    ui::status_bar(theme::STATUS_BAR);
+
     let (conn, screen_number) = x11rb::rust_connection::RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_number];
     let (window, protocols) = crate::create_window(&conn, screen, handoff::APP_ID)?;
@@ -243,14 +573,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     )?;
     let link = DaemonLink::spawn(proto::socket_path())?;
     let mut shell = ShellReader::spawn()?;
-    let mut model = Model::new();
     let mut view = ViewState::new();
-    let mut tap: Option<crate::TapTracker> = None;
-    let mut pressed: Option<Hit> = None;
-    let mut dragging: Option<ScrollArea> = None;
+    let mut input = Input::default();
+    let mut recognizer = Recognizer::new(f32::from(crate::REQUESTED_WIDTH));
     let mut seen_target: Option<u64> = None;
     let mut shown: Option<Option<String>> = None;
-    let mut keyboard_requested = false;
     let mut mapped = false;
     let mut unmapped_at: Option<Instant> = None;
     // When the loop last went to sleep: a frozen app reads UnmapNotify only
@@ -276,15 +603,18 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     // An X event already read from the connection, not yet handled.
     let mut queued_x: Option<XEvent> = None;
 
+    view.take_ui(&mut model, Instant::now());
     // The first frame is drawn before the window maps (as the System app).
     draw_frame(
         &conn,
         &mut renderer,
         &mut model,
         &mut view,
-        pressed.as_ref(),
+        input.pressed.as_ref(),
         Instant::now(),
     )?;
+    // When the next animation frame is wanted.
+    let mut next_frame = view.animator.take();
     conn.map_window(window)?;
     conn.flush()?;
     shell.ask();
@@ -292,7 +622,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     while running {
         let now = Instant::now();
         let before_depth = page_depth(&model);
-        let before_folders = model.folders.len();
+        let before_folders = model.sidebar.path.len();
         let before_id = model.chat.id.clone();
         // The reader's place, kept when the transcript changes above it.
         let before_view = view.before(&model, now);
@@ -333,6 +663,16 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             );
         }
 
+        let mut cx = Context {
+            link: &link,
+            model: &mut model,
+            view: &mut view,
+            input: &mut input,
+            height: renderer.height(),
+            width: renderer.canvas.width as f32,
+        };
+        redraw |= cx.take_ui(now);
+
         // Moon's state: a tapped notification's target.
         if let Some(info) = shell.take() {
             redraw |= control::apply_time(&info);
@@ -344,15 +684,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 // A target younger than 10 s is still wanted: a notification
                 // just started (or brought forward) the app for it.
                 if open.age_ms < 10_000 {
-                    let from_list = model.page == Page::List;
-                    for command in model.open_target(&open.target) {
+                    let from_list = cx.model.page != Page::Chat;
+                    for command in cx.model.open_target(&open.target) {
                         link.send(command);
                     }
                     if from_list {
                         control::transition(true);
                     }
-                    view.chat_scroll.reset();
-                    view.follow = true;
+                    cx.view.chat_scroll.reset();
+                    cx.view.follow = true;
                     redraw = true;
                 }
             }
@@ -375,6 +715,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             };
             let now = Instant::now();
             renderer.presenter.note_event(&event);
+            // The height touches are judged against: with Moon's keyboard
+            // up the window ends above it (no home gesture there).
+            let touch_height = cx.height + if cx.view.keyboard { 400.0 } else { 0.0 };
             match event {
                 XEvent::Expose(event) if event.window == window && event.count == 0 => {
                     renderer.presenter.expose(&conn, 0)?;
@@ -383,9 +726,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 XEvent::ConfigureNotify(event) if event.window == window => {
                     if (event.width, event.height) != renderer.size() {
                         renderer.resize(&conn, event.width, event.height)?;
+                        cx.height = renderer.height();
+                        cx.width = renderer.canvas.width as f32;
+                        recognizer.set_width(cx.width);
                         // Moon shrinks the window above its keyboard.
-                        view.keyboard =
-                            keyboard_requested && event.height < crate::REQUESTED_HEIGHT - 300;
+                        cx.view.keyboard =
+                            cx.input.keyboard && event.height < crate::REQUESTED_HEIGHT - 300;
                         redraw = true;
                     }
                 }
@@ -403,15 +749,18 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     if unmapped_at
                         .take()
                         .is_some_and(|at| now.duration_since(at) > STALE_AFTER)
-                        && model.connected
+                        && cx.model.connected
                     {
-                        model.reconnect_quietly(now, QUIET_RECONNECT);
+                        cx.model.reconnect_quietly(now, QUIET_RECONNECT);
                         dropping = true;
                         link.reconnect();
                         if let Some(back) = &mut back {
                             back.2 = true;
                         }
                     }
+                    // Moon knows the app by now: its status bar takes the
+                    // theme's background (asked again, the same colour).
+                    ui::status_bar(theme::STATUS_BAR);
                     shell.ask();
                     next_shell_poll = now + SHELL_POLL;
                     redraw = true;
@@ -422,146 +771,42 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                         boost_ui_thread(false);
                     }
                     unmapped_at = Some(slept_at.min(now));
+                    for gesture in recognizer.cancel() {
+                        cx.gesture(gesture, now);
+                    }
                 }
                 XEvent::ButtonPress(event) if event.event == window && event.detail == 1 => {
-                    tap = crate::TapTracker::new(
-                        event.event_x,
-                        event.event_y,
-                        tap_height(&renderer, &view),
-                    );
-                    if tap.is_some() {
-                        let height = renderer.height();
-                        let y = f32::from(event.event_y);
-                        dragging = view::scroll_area(&model, &view, height, y);
-                        match dragging {
-                            Some(ScrollArea::List) => view.list_scroll.begin(y, now),
-                            Some(ScrollArea::Chat) => view.chat_scroll.begin(y, now),
-                            Some(ScrollArea::Sheet) => view.sheet_scroll.begin(y, now),
-                            None => {}
+                    let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
+                    if y < touch_height - BOTTOM_GESTURE_RESERVE {
+                        for gesture in recognizer.down(x, y, now) {
+                            redraw |= cx.gesture(gesture, now);
                         }
-                        pressed = view::hit(
-                            &mut model,
-                            &mut view,
-                            height,
-                            event.event_x,
-                            event.event_y,
-                            now,
-                        )
-                        .filter(|hit| matches!(hit, Hit::Action(_)));
-                        redraw = true;
                     }
                 }
                 XEvent::MotionNotify(event) if event.event == window => {
-                    if let Some(tap) = &mut tap {
-                        tap.observe(event.event_x, event.event_y);
-                        if tap.moved {
-                            pressed = None;
-                            let height = renderer.height();
-                            let y = f32::from(event.event_y);
-                            match dragging {
-                                Some(ScrollArea::List) => {
-                                    let max = view::list_max(&mut model, height);
-                                    view.list_scroll.moved(y, max, now);
-                                }
-                                Some(ScrollArea::Chat) => {
-                                    let max = view.chat_max(&model, height);
-                                    view.chat_scroll.moved(y, max, now);
-                                    view.follow = false;
-                                    if keyboard_requested {
-                                        // Dragging the transcript puts the keyboard away.
-                                        control::hide_keyboard();
-                                        keyboard_requested = false;
-                                        view.keyboard = false;
-                                    }
-                                }
-                                Some(ScrollArea::Sheet) => {
-                                    let max = view::sheet_max(&model, height);
-                                    view.sheet_scroll.moved(y, max, now);
-                                }
-                                None => {}
-                            }
-                            redraw = true;
-                        }
+                    let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
+                    for gesture in recognizer.moved(x, y, now) {
+                        redraw |= cx.gesture(gesture, now);
                     }
                 }
                 XEvent::ButtonRelease(event) if event.event == window && event.detail == 1 => {
-                    let height = renderer.height();
-                    match dragging.take() {
-                        Some(ScrollArea::List) => {
-                            let max = view::list_max(&mut model, height);
-                            view.list_scroll.end(max, now);
-                        }
-                        Some(ScrollArea::Chat) => {
-                            let max = view.chat_max(&model, height);
-                            view.chat_scroll.end(max, now);
-                        }
-                        Some(ScrollArea::Sheet) => {
-                            let max = view::sheet_max(&model, height);
-                            view.sheet_scroll.end(max, now);
-                        }
-                        None => {}
-                    }
-                    pressed = None;
-                    if let Some((x, y)) = tap.take().and_then(|tap| {
-                        tap.finish(event.event_x, event.event_y, tap_height(&renderer, &view))
-                    }) && let Some(hit) = view::hit(&mut model, &mut view, height, x, y, now)
+                    let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
+                    // Let go in Moon's gesture area: a drag ends, a press is
+                    // no tap.
+                    let gestures = if y < touch_height - BOTTOM_GESTURE_RESERVE
+                        || recognizer.dragging().is_some()
                     {
-                        match hit {
-                            Hit::Action(action) => {
-                                perform(
-                                    &link,
-                                    &mut model,
-                                    &mut view,
-                                    action,
-                                    &mut keyboard_requested,
-                                );
-                            }
-                            Hit::Composer => {
-                                let visible = control::show_keyboard(KeyboardPurpose::Text);
-                                keyboard_requested = visible;
-                                view.follow = true;
-                            }
-                            Hit::Transcript => {
-                                if keyboard_requested {
-                                    control::hide_keyboard();
-                                    keyboard_requested = false;
-                                    view.keyboard = false;
-                                }
-                            }
-                            Hit::SheetBackdrop => {
-                                model.handle(Action::HidePicker);
-                            }
-                        }
+                        recognizer.up(x, y, now)
+                    } else {
+                        recognizer.cancel()
+                    };
+                    for gesture in gestures {
+                        redraw |= cx.gesture(gesture, now);
                     }
-                    redraw = true;
                 }
                 XEvent::KeyPress(event) if event.event == window => {
-                    if model.page == Page::Chat
-                        && !model.picker
-                        && let Some(input) = key_map.decode(event.detail, event.state)
-                    {
-                        match input {
-                            KeyInput::Character(character) => model.composer.push(character),
-                            KeyInput::Backspace => {
-                                model.composer.pop();
-                            }
-                            KeyInput::Enter => {
-                                perform(
-                                    &link,
-                                    &mut model,
-                                    &mut view,
-                                    Action::Send,
-                                    &mut keyboard_requested,
-                                );
-                                // Moon puts its keyboard away on Return; a chat keeps it.
-                                if keyboard_requested {
-                                    keyboard_requested =
-                                        control::show_keyboard(KeyboardPurpose::Text);
-                                }
-                            }
-                        }
-                        view.follow = true;
-                        redraw = true;
+                    if let Some(input) = key_map.decode(event.detail, event.state) {
+                        redraw |= cx.key(input, now);
                     }
                 }
                 XEvent::ClientMessage(event)
@@ -575,22 +820,34 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 _ => {}
             }
         }
-
         let now = Instant::now();
-        let height = renderer.height();
+        // Held presses: the lift at 150 ms, the long press at 600 ms.
+        for gesture in recognizer.tick(now) {
+            redraw |= cx.gesture(gesture, now);
+        }
+        redraw |= cx.take_ui(now);
+        let height = cx.height;
+        let width = cx.width;
+        if view.overlays.sweep(now) {
+            redraw = true;
+            if !view.overlays.has_modal() {
+                view.lifted = None;
+            }
+        }
 
         // A page change slides (Moon snapshots the old page first).
         let after_depth = page_depth(&model);
         if after_depth != before_depth {
             // Each folder level opens at its top (one scroll serves them
             // all); back from a chat, the list is where it was.
-            if model.folders.len() != before_folders {
+            if model.sidebar.path.len() != before_folders {
                 view.list_scroll.reset();
             }
             if model.page == Page::Chat {
                 view.chat_scroll.reset();
                 view.follow = true;
             }
+            view.lifted = None;
             redraw = true;
         }
 
@@ -617,9 +874,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             let _ = handoff::write_view(showing.as_deref());
             shown = Some(showing);
         }
-        if model.page != Page::Chat && keyboard_requested {
+        if model.page != Page::Chat && input.keyboard && !input.keyboard_for_overlay {
             control::hide_keyboard();
-            keyboard_requested = false;
+            input.keyboard = false;
             view.keyboard = false;
         }
 
@@ -631,36 +888,32 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        let flinging = match (model.picker, model.page) {
-            (true, _) => {
-                let max = view::sheet_max(&model, height);
-                view.sheet_scroll.step(max, now)
-            }
-            (false, Page::List) => {
+        let mut flinging = match model.page {
+            Page::List => {
                 let max = view::list_max(&mut model, height);
                 view.list_scroll.step(max, now)
             }
-            (false, Page::Chat) => {
+            Page::Chat => {
                 let max = view.chat_max(&model, height);
                 view.chat_scroll.step(max, now)
             }
+            Page::Settings => view.settings_scroll.step(0.0, now),
         };
+        {
+            let mut overlays = std::mem::take(&mut view.overlays);
+            let overlay_cx = view.cx(&model, width, height, now);
+            flinging |= overlays.step(&overlay_cx);
+            view.overlays = overlays;
+        }
         // A fling's last step settles the offset (at an edge) without
         // asking for a frame: draw it.
         redraw |= was_flinging && !flinging;
         was_flinging = flinging;
-        if model
-            .notice
-            .as_ref()
-            .is_some_and(|(_, at)| now.duration_since(*at) >= NOTICE_FOR)
-        {
-            model.notice = None;
-            redraw = true;
-        }
         redraw |= model.tick(now);
         redraw |= model.expire(now);
-        let animating = mapped && model.page == Page::Chat && model.streaming();
-        if animating && now >= next_dots {
+        redraw |= view.take_ui(&mut model, now);
+        let dots = mapped && model.page == Page::Chat && model.streaming();
+        if dots && now >= next_dots {
             view.dots = view.dots.wrapping_add(1);
             next_dots = now + DOTS_EVERY;
             redraw = true;
@@ -669,18 +922,24 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             shell.ask();
             next_shell_poll = now + SHELL_POLL;
         }
+        // What the model kept changing is written in the background.
+        store.take(&mut model.persist, now);
+        store.flush_due(now);
 
+        // An animation's frame is due.
+        let animating = next_frame.is_some_and(|at| now >= at);
         // Hidden (in the background, perhaps leased awake), nothing is drawn:
         // MapNotify draws what changed meanwhile.
-        if (redraw || flinging) && running && mapped && !holding {
+        if (redraw || flinging || animating) && running && mapped && !holding {
             draw_frame(
                 &conn,
                 &mut renderer,
                 &mut model,
                 &mut view,
-                pressed.as_ref(),
+                input.pressed.as_ref(),
                 now,
             )?;
+            next_frame = view.animator.take();
             control::page_drawn(|| {
                 let _ = conn.get_input_focus().map(|cookie| cookie.reply());
             });
@@ -735,15 +994,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let mut soonest = |at: Instant| deadline = Some(deadline.map_or(at, |d| d.min(at)));
         if mapped {
             soonest(next_shell_poll);
+            if let Some(at) = next_frame {
+                soonest(at);
+            }
         }
         if flinging {
             soonest(now + Duration::from_millis(8));
         }
-        if animating {
+        if dots {
             soonest(next_dots);
-        }
-        if let Some((_, at)) = &model.notice {
-            soonest(*at + NOTICE_FOR);
         }
         if let Some(until) = hold_until {
             soonest(until);
@@ -752,6 +1011,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             soonest(until);
         }
         if let Some(at) = model.answer_deadline() {
+            soonest(at);
+        }
+        if let Some(at) = recognizer.deadline() {
+            soonest(at);
+        }
+        if let Some(at) = store.deadline() {
             soonest(at);
         }
         let mut timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
@@ -773,45 +1038,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         line::poll(&mut fds, timeout)?;
     }
 
-    if keyboard_requested {
+    if input.keyboard {
         control::hide_keyboard();
     }
+    store.take(&mut model.persist, Instant::now());
+    store.flush_all();
     handoff::clear_view();
     renderer.presenter.destroy(&conn);
     let _ = conn.flush();
     Ok(())
-}
-
-fn perform(
-    link: &DaemonLink,
-    model: &mut Model,
-    view: &mut ViewState,
-    action: Action,
-    keyboard: &mut bool,
-) {
-    let depth = page_depth(model);
-    match &action {
-        Action::Send => view.follow = true,
-        // The tapped row stays under the finger as it opens.
-        Action::ToggleExpanded(_) => view.follow = false,
-        Action::ShowPicker => view.sheet_scroll.reset(),
-        Action::Back if *keyboard => {
-            control::hide_keyboard();
-            *keyboard = false;
-            view.keyboard = false;
-        }
-        _ => {}
-    }
-    // The daemon is asked first: its answer is on the way while Moon
-    // snapshots the page.
-    for command in model.handle(action) {
-        link.send(command);
-    }
-    let after = page_depth(model);
-    if after != depth {
-        // Before the new page is drawn: Moon slides it over the old one.
-        control::transition(after > depth);
-    }
 }
 
 /// A development switch from the environment, read once.
@@ -839,23 +1074,24 @@ fn draw_frame(
     now: Instant,
 ) -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
-    let height = renderer.height();
+    let size = (renderer.canvas.width, renderer.canvas.height);
     // Only what changed is drawn and presented when the last frame is known.
-    let chat = view::chat_frame(model, view, pressed, height, now);
-    let list = view::list_frame(model, view, pressed, height, now);
+    let record = frame::record(model, view, pressed, size, now);
     let laid = started.elapsed();
-    let update = match (&renderer.chat_frame, &chat, &renderer.list_frame, &list) {
-        (Some(old), Some(new), _, _) => {
-            view::draw_chat_update(&mut renderer.canvas, model, view, old, new)
-        }
-        (_, _, Some(old), Some(new)) => {
-            view::draw_list_update(&mut renderer.canvas, model, old, new)
-        }
-        _ => None,
+    let update = match &renderer.frame {
+        Some(old) => frame::update(
+            &mut renderer.canvas,
+            model,
+            view,
+            pressed,
+            old,
+            &record,
+            now,
+        ),
+        None => None,
     };
-    renderer.chat_frame = chat;
-    renderer.list_frame = list;
-    let kind = match update {
+    renderer.frame = Some(record);
+    let (drawn, kind) = match update {
         // Nothing on screen changed.
         Some(damage) if damage.rows.is_empty() && damage.moved.is_none() => return Ok(()),
         Some(damage) => {
@@ -867,46 +1103,18 @@ fn draw_frame(
                 .presenter
                 .present_rows(conn, &renderer.canvas, 0, &damage.rows)?;
             if env_flag("EXOCORTEX_APP_VERIFY") {
-                // Development check: the partial frame equals a full one.
-                let mut full = Canvas::new(renderer.canvas.width, renderer.canvas.height);
-                full.clear(crate::ui::BG);
-                view::draw(&mut full, model, view, pressed, now);
-                let width = full.width as usize;
-                let rows: Vec<usize> = (0..full.height as usize)
-                    .filter(|y| {
-                        full.pixels[y * width..(y + 1) * width]
-                            != renderer.canvas.pixels[y * width..(y + 1) * width]
-                    })
-                    .collect();
-                if let Some(&y) = rows.first() {
-                    let row = y * width..(y + 1) * width;
-                    let xs: Vec<usize> = (0..width)
-                        .filter(|x| {
-                            full.pixels[row.start + x] != renderer.canvas.pixels[row.start + x]
-                        })
-                        .collect();
-                    eprintln!(
-                        "exocortex: partial frame differs in {} rows from {y} (x {:?}..{:?}, {} px; full {:06x} partial {:06x}) ({damage:?})",
-                        rows.len(),
-                        xs.first(),
-                        xs.last(),
-                        xs.len(),
-                        full.pixels[row.start + xs[0]],
-                        renderer.canvas.pixels[row.start + xs[0]],
-                    );
-                }
+                verify(&renderer.canvas, model, view, pressed, now, &damage);
             }
             (drawn, "partial")
         }
         None => {
-            renderer.canvas.clear(crate::ui::BG);
-            view::draw(&mut renderer.canvas, model, view, pressed, now);
+            frame::clear(&mut renderer.canvas);
+            frame::draw_full(&mut renderer.canvas, model, view, pressed, now);
             let drawn = started.elapsed();
             renderer.presenter.present(conn, &renderer.canvas, 0)?;
             (drawn, "full")
         }
     };
-    let (drawn, kind) = kind;
     conn.flush()?;
     if env_flag("EXOCORTEX_APP_PROFILE") {
         eprintln!(
@@ -917,4 +1125,40 @@ fn draw_frame(
         );
     }
     Ok(())
+}
+
+/// Development check (`EXOCORTEX_APP_VERIFY`): the partial frame equals a
+/// full one.
+fn verify(
+    canvas: &Canvas,
+    model: &mut Model,
+    view: &mut ViewState,
+    pressed: Option<&Hit>,
+    now: Instant,
+    damage: &view::FrameDamage,
+) {
+    let mut full = Canvas::new(canvas.width, canvas.height);
+    frame::clear(&mut full);
+    frame::draw_full(&mut full, model, view, pressed, now);
+    let width = full.width as usize;
+    let rows: Vec<usize> = (0..full.height as usize)
+        .filter(|y| {
+            full.pixels[y * width..(y + 1) * width] != canvas.pixels[y * width..(y + 1) * width]
+        })
+        .collect();
+    if let Some(&y) = rows.first() {
+        let row = y * width..(y + 1) * width;
+        let xs: Vec<usize> = (0..width)
+            .filter(|x| full.pixels[row.start + x] != canvas.pixels[row.start + x])
+            .collect();
+        eprintln!(
+            "exocortex: partial frame differs in {} rows from {y} (x {:?}..{:?}, {} px; full {:06x} partial {:06x}) ({damage:?})",
+            rows.len(),
+            xs.first(),
+            xs.last(),
+            xs.len(),
+            full.pixels[row.start + xs[0]],
+            canvas.pixels[row.start + xs[0]],
+        );
+    }
 }

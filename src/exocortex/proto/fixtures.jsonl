@@ -1,0 +1,75 @@
+{"type":"pong","reqId":"ping-1","updateStatus":{"state":"current"}}
+{"type":"update_status","status":{"state":"behind","commits":3}}
+{"type":"daemon_shutdown","mode":"restart"}
+{"type":"ack","reqId":"app-7","convId":"c1"}
+{"type":"connectivity_status","online":false,"offlineSince":1761700000000,"nextProbeAt":1761700005000}
+{"type":"error","reqId":"app-8","convId":"c1","message":"Conversation not found"}
+{"type":"tools_available","providers":[{"id":"anthropic","label":"Anthropic","defaultModel":"claude-opus-5-5","allowsCustomModels":false,"supportsFastMode":true,"models":[{"id":"claude-opus-5-5","label":"Opus 5.5","maxContext":1000000,"supportedEfforts":[{"effort":"high","description":"Deep"}],"defaultEffort":"high","supportsUltrafastMode":true}]}],"tools":[{"name":"bash","label":"$","color":"#d19a66"}],"authByProvider":{"anthropic":true},"authInfoByProvider":{"anthropic":{"configured":true,"authenticated":true,"status":"logged_in","email":"a@b.c","displayName":null,"organizationName":null,"organizationType":null,"organizationRole":null,"workspaceRole":null,"subscriptionType":"max","rateLimitTier":null,"scopes":[],"expiresAt":null,"updatedAt":null,"source":null}},"externalToolStyles":[{"cmd":"gmail","label":"Gmail","color":"#4ddbb7"}],"macroEnvironment":{"repoRoot":"/opt/exocortex","storageDir":"/x","externalToolsDir":"/y","externalToolsTrashDir":"/z","pathStyle":"posix","installedToolDirs":[]},"conversationDefaults":{"defaults":{"provider":"anthropic","model":"claude-opus-5-5","effort":"xhigh","fastMode":false},"configured":true}}
+{"type":"conversation_defaults","reqId":"app-9","defaults":{"provider":"openai","model":"gpt-6-astra","effort":"low","fastMode":"ultrafast"},"configured":true,"message":"Saved"}
+{"type":"usage_update","provider":"anthropic","usage":{"fiveHour":{"utilization":21,"resetsAt":1761710000000,"resets":[1761710000000,1761720000000]},"sevenDay":{"utilization":75.5,"resetsAt":null},"capacity":200}}
+{"type":"accounts","reqId":"app-10","snapshot":{"claude":{"accounts":[]}}}
+{"type":"usage_reset_result","reqId":"app-11","provider":"openai","outcome":"reset","windowsReset":2,"remainingResets":1}
+{"type":"token_stats","reqId":"app-12","stats":{"updatedAt":null,"today":{"day":"2026-10-29"},"lifetime":{},"days":[]}}
+{"type":"goal_updated","reqId":"app-13","convId":"c1","goal":{"objective":"Ship it","status":"active","createdAt":1,"updatedAt":2,"turns":3},"message":"Goal set"}
+{"type":"chrono_result","reqId":"app-14","convId":"c1","action":"create","schedules":[{"id":"s1","title":"Check","nextAt":1761710000000,"kind":"message","payload":"ping","status":"scheduled"}],"created":{"id":"s1","title":"Check","nextAt":1761710000000,"kind":"message","payload":"ping","status":"scheduled"},"cancelled":[]}
+{"type":"tasks_list","reqId":"app-15","tasks":[{"id":"t1","kind":"background","title":"npm test","startedAt":5,"ownerConversationId":"c1","status":"running","toolName":"Bash"}]}
+{"type":"task_stopped","reqId":"app-16","convId":"c1","taskId":"t1","status":"stopping"}
+{"type":"btw_started","sessionId":"b1","convId":"c1","query":"why?","provider":"anthropic","model":"m","startedAt":7}
+{"type":"btw_followup_started","sessionId":"b1","turnId":"b2","convId":"c1","query":"and?","startedAt":8}
+{"type":"btw_block_start","convId":"c1","sessionId":"b1","blockType":"text"}
+{"type":"btw_text_chunk","convId":"c1","sessionId":"b1","text":"Because"}
+{"type":"btw_thinking_chunk","convId":"c1","sessionId":"b1","text":"hm"}
+{"type":"btw_content","convId":"c1","sessionId":"b1","text":"Because.","blocks":[{"type":"text","text":"Because."}]}
+{"type":"btw_tool_call","convId":"c1","sessionId":"b1","toolCallId":"x","toolName":"Read","input":{},"summary":"a.rs"}
+{"type":"btw_tool_result","convId":"c1","sessionId":"b1","toolCallId":"x","toolName":"Read","output":"…","isError":false}
+{"type":"btw_status","convId":"c1","sessionId":"b1","status":"thinking"}
+{"type":"btw_finished","convId":"c1","sessionId":"b1","endedAt":9}
+{"type":"btw_error","convId":"c1","sessionId":"b1","message":"failed","endedAt":9}
+{"type":"btw_closed","convId":"c1","sessionId":"b1"}
+{"type":"btw_mutation_settled","convId":"c1","sessionId":"b1","mutation":"close"}
+{"type":"btw_snapshot","convId":"c1","btw":null}
+{"type":"instructions_loaded","reqId":"app-17","convId":"c1","folderId":null,"conversation":"Be brief","folder":null,"global":"G","globalBase":"B"}
+{"type":"global_instructions_updated","reqId":"app-18","text":"G2"}
+{"type":"system_prompt","reqId":"app-19","systemPrompt":"You are Exocortex."}
+{"type":"auth_status","reqId":"app-20","message":"Open the link","openUrl":"https://example.org/login"}
+{"type":"conversations_list","reqId":"app-21","conversations":[{"id":"c1","provider":"anthropic","model":"m","effort":"high","fastMode":"ultrafast","createdAt":1,"updatedAt":2,"messageCount":4,"title":"T","marked":true,"pinned":false,"muted":true,"streaming":true,"providerWaiting":true,"unread":false,"notificationsMuted":true,"sortOrder":-1,"folderId":"f1","subagentCount":2,"backgroundTaskCount":1,"tasks":[{"id":"t1","kind":"chrono","title":"wake","startedAt":1,"dueAt":2,"chronoMode":"wake"}],"integrations":[{"id":"i1"}]}],"folders":[{"id":"f1","name":"Work","parentId":null,"createdAt":1,"updatedAt":2,"pinned":true,"muted":false,"sortOrder":0,"effectiveInstructions":"…"}],"sidebarPartial":{"remaining":1,"folderConversationCounts":{"f1":2}}}
+{"type":"conversation_updated","summary":{"id":"c1","title":"T","streaming":false},"streamStopReason":"handoff","ownerTurnFinished":true}
+{"type":"conversation_restored","reqId":"app-22","summary":{"id":"c1"}}
+{"type":"conversation_unwound","reqId":"app-23","status":"applied","operationId":"o1","convId":"c1","userMessageIndex":3,"historyTotalEntries":6,"contextTokens":1000,"summary":{"id":"c1"}}
+{"type":"conversation_deleted","reqId":"app-24","convId":"c1","reason":"deleted"}
+{"type":"conversation_marked","convId":"c1","marked":true}
+{"type":"conversation_pinned","convId":"c1","pinned":true}
+{"type":"conversation_moved","conversations":[{"id":"c1","folderId":"f1"}],"folders":[]}
+{"type":"sidebar_items_reordered","updates":[{"item":{"type":"folder","id":"f1"},"sortOrder":3}]}
+{"type":"sidebar_state_patched","conversations":[{"id":"c2"}],"folders":[{"id":"f2","name":"New"}],"removedConversationIds":["c3"],"removedFolderIds":["f3"]}
+{"type":"conversation_created","reqId":"app-25","convId":"c9","provider":"anthropic","model":"m","effort":"high","fastMode":false}
+{"type":"folder_instructions_loaded","reqId":"app-26","folderId":"f1","text":"Use tabs"}
+{"type":"folder_instructions_updated","reqId":"app-27","folderId":"f1","text":"Use spaces"}
+{"type":"conversation_loaded","reqId":"app-28","convId":"c1","provider":"anthropic","model":"m","effort":"high","fastMode":false,"entries":[{"type":"user","text":"Hi","images":[{"mediaType":"image/png","base64":"","sizeBytes":10,"imageId":"img1","width":4,"height":4}],"metadata":{"startedAt":1,"endedAt":2,"model":"m","tokens":0,"automation":{"kind":"chrono"}}},{"type":"ai","blocks":[{"type":"thinking","text":"","elided":{"entry":1,"block":0}},{"type":"tool_call","toolCallId":"t1","toolName":"Bash","input":{"command":"ls"},"summary":"ls","presentation":{"bashStyles":[{"cmd":"gmail","label":"Gmail","color":"#4ddbb7"}],"detail":"to agent"}},{"type":"tool_result","toolCallId":"t1","toolName":"Bash","output":"a","isError":false,"images":[{"id":"sha","mediaType":"image/png","width":10,"height":10,"sizeBytes":99,"name":"shot.png"}]}],"metadata":{"startedAt":1,"endedAt":5,"model":"m","tokens":42,"generationThroughput":{"provider":"anthropic","model":"m","rates":[70.5,80]}}},{"type":"system","text":"Compacted","color":"muted","metadata":{"startedAt":1,"endedAt":null,"model":"m","tokens":0,"kind":"compaction"}}],"historyStartIndex":0,"historyTotalEntries":3,"hasOlderHistory":false,"pendingAI":{"blocks":[],"metadata":null,"blockOffset":2},"contextTokens":1234,"toolOutputsIncluded":false,"queuedMessages":[{"id":"q1","convId":"c1","text":"next","timing":"next-turn","source":"daemon","createdAt":5}],"goal":null,"btw":null}
+{"type":"conversation_history_loaded","reqId":"app-29","convId":"c1","requestSource":"viewport","entries":[],"historyStartIndex":0,"historyStartUserIndex":0,"historyEndIndex":0,"historyTotalEntries":3,"hasOlderHistory":false}
+{"type":"history_updated","convId":"c1","entries":[],"historyStartIndex":3,"resetHistoryWindow":true,"contextTokens":9,"toolOutputsIncluded":true,"pendingAI":null}
+{"type":"streaming_started","convId":"c1","provider":"anthropic","model":"m","streamSeq":1,"snapshotKind":"catchup","startedAt":10,"workTimerStartedAt":5,"blocks":[],"blockOffset":0,"tokens":12,"generationThroughput":{"provider":"anthropic","model":"m","rates":[50]},"compactionStartedAt":null,"connectionWaitStartedAt":8,"connectionWaitLabel":"network"}
+{"type":"streaming_stopped","convId":"c1","reason":"suspended","persistedBlocks":[{"type":"text","text":"so far"}]}
+{"type":"block_start","convId":"c1","blockType":"thinking"}
+{"type":"text_chunk","convId":"c1","text":"Hel"}
+{"type":"thinking_chunk","convId":"c1","text":"hm"}
+{"type":"streaming_sync","convId":"c1","blocks":[{"type":"text","text":"Hello"}]}
+{"type":"tool_call","convId":"c1","toolCallId":"t2","toolName":"Read","input":{"path":"a"},"summary":"a","presentation":{"detail":"x"}}
+{"type":"tool_result","convId":"c1","toolCallId":"t2","toolName":"Read","output":"ok","isError":true,"images":[]}
+{"type":"tokens_update","convId":"c1","tokens":120,"generationThroughput":{"provider":"anthropic","model":"m","rates":[60]}}
+{"type":"context_update","convId":"c1","contextTokens":4567}
+{"type":"message_complete","convId":"c1","blocks":[{"type":"text","text":"Done"}],"endedAt":20,"tokens":130}
+{"type":"user_message","convId":"c1","text":"more","startedAt":21,"images":[],"queueId":"q1","automation":{"kind":"subagent_completion","sourceId":"c2"}}
+{"type":"system_message","convId":"c1","text":"Rate limited","color":"warning"}
+{"type":"stream_retry","convId":"c1","attempt":2,"maxAttempts":5,"errorMessage":"overloaded","delaySec":12,"kind":"usage_limit_reset","resetAt":1761710000000}
+{"type":"context_compaction_status","convId":"c1","active":false,"startedAt":1,"completedAt":2}
+{"type":"connection_wait_status","convId":"c1","active":true,"label":"Waiting for network","startedAt":3}
+{"type":"tool_outputs_loaded","reqId":"app-30","convId":"c1","outputs":[{"toolCallId":"t1","output":"full"}]}
+{"type":"display_blocks_loaded","reqId":"app-31","convId":"c1","ranges":[{"entry":1,"start":0,"blocks":[{"type":"thinking","text":"hm"}]}],"truncated":true}
+{"type":"image_data","reqId":"app-32","imageId":"sha","format":"png","width":10,"height":10,"base64":"iVBOR"}
+{"type":"file_link_resolved","reqId":"app-33","convId":"c1","path":"/opt/a.rs","kind":"file","size":12}
+{"type":"system_instructions_updated","convId":"c1","text":"Be terse"}
+{"type":"queue_updated","messages":[{"id":"q2","convId":"c1","text":"later","timing":"message-end","source":"daemon","createdAt":9,"waitTarget":{"type":"delay","delayMs":1000,"label":"1s"}}],"settledQueueIds":["q2"]}
+{"type":"queue_notice","queueId":"q2","convId":"c1","message":"dropped","level":"warning"}
+{"type":"transcription_result","reqId":"app-34","text":"hello world"}
+{"type":"user_macros","macros":[{"name":"x"}],"reqId":"app-35","change":{"action":"created","macro":{"name":"x"}}}

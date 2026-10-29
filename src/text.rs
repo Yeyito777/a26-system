@@ -1,8 +1,10 @@
 //! Vendored from Moon (OSS-Phone-V1 `src/a26-shell/src`); keep in sync.
 #![allow(dead_code)]
 //! Anti-aliased text using the embedded Inter typeface (SIL OFL 1.1, see
-//! `assets/fonts/OFL.txt`; this copy adds Inter Italic and JetBrains Mono,
-//! `OFL-JetBrainsMono.txt`, for the Exocortex app), with fallbacks for everything Inter lacks so a
+//! `assets/fonts/OFL.txt`; this copy, unlike Moon's, adds JetBrains Mono NL
+//! in five cuts, `OFL-JetBrainsMono.txt`, subset by
+//! `scripts/subset-fonts.sh`, for the Exocortex app's Whale look, which is
+//! monospaced throughout), with fallbacks for everything Inter lacks so a
 //! message never shows a '?': Noto Sans (Latin extended, Greek, Cyrillic,
 //! Vietnamese), Noto Sans Symbols 2, Symbols and Math, and Noto Color Emoji (colour
 //! bitmaps; ZWJ sequences, skin tones, keycaps and flags through its
@@ -34,13 +36,15 @@ pub enum Weight {
     DisplayLight,
     DisplayMedium,
     DisplaySemiBold,
-    /// Inter Italic (emphasis in the Exocortex app's markdown).
-    Italic,
-    /// JetBrains Mono NL (code in the Exocortex app's markdown).
+    /// JetBrains Mono NL: the Exocortex app's text, in its five cuts.
     Mono,
+    MonoMedium,
+    MonoSemiBold,
+    MonoBold,
+    MonoItalic,
 }
 
-const WEIGHTS: [Weight; 9] = [
+const WEIGHTS: [Weight; 12] = [
     Weight::Regular,
     Weight::Medium,
     Weight::SemiBold,
@@ -48,8 +52,11 @@ const WEIGHTS: [Weight; 9] = [
     Weight::DisplayLight,
     Weight::DisplayMedium,
     Weight::DisplaySemiBold,
-    Weight::Italic,
     Weight::Mono,
+    Weight::MonoMedium,
+    Weight::MonoSemiBold,
+    Weight::MonoBold,
+    Weight::MonoItalic,
 ];
 
 fn font_bytes(weight: Weight) -> &'static [u8] {
@@ -61,8 +68,11 @@ fn font_bytes(weight: Weight) -> &'static [u8] {
         Weight::DisplayLight => include_bytes!("../assets/fonts/InterDisplay-Light.ttf"),
         Weight::DisplayMedium => include_bytes!("../assets/fonts/InterDisplay-Medium.ttf"),
         Weight::DisplaySemiBold => include_bytes!("../assets/fonts/InterDisplay-SemiBold.ttf"),
-        Weight::Italic => include_bytes!("../assets/fonts/Inter-Italic.ttf"),
         Weight::Mono => include_bytes!("../assets/fonts/JetBrainsMonoNL-Regular.ttf"),
+        Weight::MonoMedium => include_bytes!("../assets/fonts/JetBrainsMonoNL-Medium.ttf"),
+        Weight::MonoSemiBold => include_bytes!("../assets/fonts/JetBrainsMonoNL-SemiBold.ttf"),
+        Weight::MonoBold => include_bytes!("../assets/fonts/JetBrainsMonoNL-Bold.ttf"),
+        Weight::MonoItalic => include_bytes!("../assets/fonts/JetBrainsMonoNL-Italic.ttf"),
     }
 }
 
@@ -446,15 +456,15 @@ fn resample(width: u32, height: u32, pixels: &[u32], to_w: u32, to_h: u32) -> Ve
 }
 
 /// The embedded faces, each parsed the first time it is needed (fontdue
-/// parses every glyph up front: all nine took 63 ms on the A26's fast core,
+/// parses every glyph up front: Inter's nine took 63 ms on the A26's fast core,
 /// a cold start's longest step), or ahead of time by `preload`.
-static FACES: [OnceLock<Font>; 9] = [const { OnceLock::new() }; 9];
+static FACES: [OnceLock<Font>; 12] = [const { OnceLock::new() }; 12];
 
 fn face(weight: Weight) -> &'static Font {
     let index = WEIGHTS.iter().position(|w| *w == weight).unwrap_or(0);
     FACES[index].get_or_init(|| {
         Font::from_bytes(font_bytes(WEIGHTS[index]), FontSettings::default())
-            .expect("embedded Inter font is valid")
+            .expect("embedded font is valid")
     })
 }
 
@@ -533,7 +543,11 @@ impl Typefaces {
             return Glyph::empty(self.inter(weight).metrics(' ', size).advance_width);
         }
         let noto = match weight {
-            Weight::SemiBold | Weight::Bold | Weight::DisplaySemiBold => NOTO_SEMIBOLD,
+            Weight::SemiBold
+            | Weight::Bold
+            | Weight::DisplaySemiBold
+            | Weight::MonoSemiBold
+            | Weight::MonoBold => NOTO_SEMIBOLD,
             _ => NOTO_REGULAR,
         };
         for index in [noto, SYMBOLS_2, SYMBOLS, MATH] {
