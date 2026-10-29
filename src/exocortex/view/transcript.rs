@@ -23,7 +23,9 @@ use crate::gfx::{Canvas, RectF};
 use super::super::anim::{Animator, Tween};
 use super::super::footer;
 use super::super::markdown::{self, MdBlock};
-use super::super::model::chat::{COMPACTION_KIND, Disclosure, merged_thinking, thinking_key, visible};
+use super::super::model::chat::{
+    COMPACTION_KIND, Disclosure, merged_thinking, thinking_key, visible,
+};
 use super::super::model::{Action, Chat, Model, Page, chat, composer, rich::Rich};
 use super::super::proto::{Block, Entry, Metadata, ToolStyle};
 use super::super::theme::{
@@ -1281,7 +1283,10 @@ pub(crate) fn frame(
     // Not while the transcript moves under it (a drag, a fling): a floating
     // button over moving rows would cost its rows in every frame. It fades
     // in once the transcript is still, and goes at once.
-    let moving = view.transcript.last_offset.is_some_and(|last| last != offset)
+    let moving = view
+        .transcript
+        .last_offset
+        .is_some_and(|last| last != offset)
         || view.chat_scroll.dragging();
     view.transcript.last_offset = Some(offset);
     let wanted = max - offset > JUMP_THRESHOLD && !loading && !moving;
