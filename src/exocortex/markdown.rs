@@ -232,6 +232,67 @@ pub enum MdBlock {
     /// Display math (`$$…$$`, `\[…\]` starting a block): its TeX.
     Math(String),
     Rule,
+    /// A block over `PIECE_MAX_CHARS` characters (code aside): the start of
+    /// its text, and all of it (`parse_capped`).
+    Long {
+        preview: String,
+        full: Rc<str>,
+    },
+    /// Blocks past `MAX_PIECES` are left out; the whole text (`parse_capped`).
+    More {
+        total: usize,
+        full: Rc<str>,
+    },
+}
+
+/// A reply shows at most this many blocks… (the iPhone's caps, PAR-134)
+pub const MAX_PIECES: usize = 128;
+/// …a block over this many characters shows…
+pub const PIECE_MAX_CHARS: usize = 24_000;
+/// …this many of them.
+pub const PIECE_PREVIEW_CHARS: usize = 8_000;
+
+/// `parse`, with the iPhone's caps: at most `MAX_PIECES` blocks, then a
+/// `More` with the whole text; a block over `PIECE_MAX_CHARS` characters
+/// (code aside, which has its own preview) as a `Long` preview.
+pub fn parse_capped(text: &str) -> Vec<MdBlock> {
+    let mut blocks = parse(text);
+    for block in &mut blocks {
+        let plain = match block {
+            MdBlock::Paragraph(spans) | MdBlock::Heading(_, spans) | MdBlock::Quote(spans) => {
+                spans_text(spans)
+            }
+            MdBlock::Item(_, marker, spans) => format!("{marker} {}", spans_text(spans)),
+            MdBlock::Table(table) => {
+                if table.rows.len() < 100 {
+                    continue;
+                }
+                table.text()
+            }
+            MdBlock::Math(tex) => tex.clone(),
+            _ => continue,
+        };
+        let count = plain.chars().count();
+        if count > PIECE_MAX_CHARS {
+            *block = MdBlock::Long {
+                preview: plain.chars().take(PIECE_PREVIEW_CHARS).collect(),
+                full: Rc::from(plain),
+            };
+        }
+    }
+    if blocks.len() > MAX_PIECES {
+        let total = blocks.len();
+        blocks.truncate(MAX_PIECES);
+        blocks.push(MdBlock::More {
+            total,
+            full: Rc::from(text),
+        });
+    }
+    blocks
+}
+
+fn spans_text(spans: &[Span]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
 }
 
 /// Lists nest at most this deep.
@@ -1114,6 +1175,7 @@ mod tests {
                 MdBlock::Code { .. } => "code",
                 MdBlock::Table(_) => "table",
                 MdBlock::Math(_) => "math",
+                MdBlock::Long { .. } | MdBlock::More { .. } => "more",
                 MdBlock::Rule => "hr",
             })
             .collect();
@@ -1150,6 +1212,31 @@ mod tests {
 
     fn span(text: &str, style: Style) -> Span {
         Span::new(text, style)
+    }
+
+    #[test]
+    fn caps_long_blocks_and_many_blocks() {
+        let long = "word ".repeat(6000);
+        let blocks = parse_capped(&format!("Short.\n\n{long}\n\n```\n{long}\n```"));
+        assert_eq!(
+            blocks[0],
+            MdBlock::Paragraph(vec![span("Short.", Style::Plain)])
+        );
+        match &blocks[1] {
+            MdBlock::Long { preview, full } => {
+                assert_eq!(preview.chars().count(), PIECE_PREVIEW_CHARS);
+                assert_eq!(full.len(), long.trim_end().len());
+            }
+            other => panic!("{other:?}"),
+        }
+        // Code has its own preview.
+        assert!(matches!(&blocks[2], MdBlock::Code { .. }));
+        let many: String = (0..200).map(|i| format!("p{i}\n\n")).collect();
+        let blocks = parse_capped(&many);
+        assert_eq!(blocks.len(), MAX_PIECES + 1);
+        assert!(
+            matches!(&blocks[MAX_PIECES], MdBlock::More { total: 200, full } if full.len() == many.len())
+        );
     }
 
     #[test]

@@ -172,7 +172,7 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
                         (false, true) => PARAGRAPH_GAP,
                         (false, false) => 18.0,
                     };
-                    let parsed = markdown::parse(text);
+                    let parsed = markdown::parse_capped(text);
                     for (at, block) in parsed.iter().enumerate() {
                         segments.push(Segment::Markdown {
                             block: block.clone(),

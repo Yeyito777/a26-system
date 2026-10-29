@@ -358,7 +358,7 @@ pub fn lay_with(
     let MdStyle::Body = style;
     let mut laid = Laid::default();
     let mut y = top;
-    let blocks = markdown::parse(source);
+    let blocks = markdown::parse_capped(source);
     for (index, block) in blocks.iter().enumerate() {
         if index > 0 {
             y += md_gap(&blocks[index - 1], block);
@@ -499,6 +499,41 @@ fn block_into(
         MdBlock::Math(tex) => {
             y = lay_display_math(laid, tex, x, width, y);
         }
+        // Over the caps (PAR-134): the start, and the whole in the reader.
+        MdBlock::Long { preview, full } => {
+            let lines = wrap(&plain(&format!("{preview}…")), width, BODY);
+            y += push_lines(&mut laid.ops, &lines, x, y, BODY, BODY_LINE, None, 1.0);
+            let label = format!(
+                "Read full paragraph ({} characters)",
+                group_digits(full.chars().count())
+            );
+            y = more_button(
+                laid,
+                &label,
+                Action::Ui(UiAct::Read {
+                    title: "Paragraph".into(),
+                    text: full.to_string(),
+                }),
+                x,
+                y + MARKDOWN_GAP,
+            );
+        }
+        MdBlock::More { total, full } => {
+            let label = format!(
+                "{}-piece preview · Open all {total} pieces",
+                markdown::MAX_PIECES
+            );
+            y = more_button(
+                laid,
+                &label,
+                Action::Ui(UiAct::Read {
+                    title: "Response".into(),
+                    text: full.to_string(),
+                }),
+                x,
+                y,
+            );
+        }
         MdBlock::Rule => {
             laid.ops.push(ops::rect(
                 RectF::new(x, y + 12.0, width, HAIRLINE),
@@ -567,6 +602,44 @@ fn lay_display_math(laid: &mut Laid, tex: &str, x: f32, width: f32, top: f32) ->
         Action::Ui(UiAct::Copy(tex.to_owned())),
     ));
     y + TARGET
+}
+
+/// A "Read full …" / "Open all …" button (§3.6.7): 122 high, a 2 px
+/// border in `secondary_accent` at 40 %, its label in `T_SMALL`. Returns
+/// its bottom.
+fn more_button(laid: &mut Laid, label: &str, action: Action, x: f32, top: f32) -> f32 {
+    let p = theme::p();
+    let ty = T_SMALL;
+    let w = (text::measure(label, ty.weight, ty.px()) + 56.0).max(TARGET);
+    let rect = RectF::new(x, top, w, TARGET);
+    laid.ops.push(Op::Border {
+        rect,
+        width: HAIRLINE,
+        color: theme::mix(p.secondary_accent, 40, p.app_background),
+    });
+    laid.ops.push(ops::text(
+        x + 28.0,
+        top + (TARGET + ty.px() * 0.74) / 2.0,
+        label,
+        ty.weight,
+        ty.px(),
+        p.secondary_accent,
+    ));
+    laid.hits.push((rect, action));
+    top + TARGET
+}
+
+/// 12345 as "12,345".
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (index, c) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A row of a monospaced grid: ASCII runs as text, every other character
