@@ -274,6 +274,10 @@ pub struct Sidebar {
     /// Whether a conversation opened from the list was unread just before
     /// (PAR-088; the transcript's reading position).
     pub unread_at_open: HashMap<String, bool>,
+    /// The wall clock (ms) at an instant: frames read the time from their
+    /// `now` through it, so a frame and its redraw agree whatever the real
+    /// clock does meanwhile (and tests are deterministic).
+    pub clock: Option<(Instant, u64)>,
     /// The list could not be loaded (the state's Retry asks again).
     pub error: Option<String>,
     /// A row on screen has a pulsing dot (the view's frames).
@@ -755,6 +759,16 @@ impl Sidebar {
         false
     }
 
+    /// The wall clock (ms since the epoch) at `now`.
+    pub fn wall_ms(&mut self, now: Instant) -> f64 {
+        let (at, ms) = *self.clock.get_or_insert_with(|| (now, super::now_ms()));
+        if now >= at {
+            ms as f64 + now.duration_since(at).as_millis() as f64
+        } else {
+            ms as f64 - at.duration_since(now).as_millis() as f64
+        }
+    }
+
     /// What is selected that is still there, in the list's order.
     pub fn selected_keys(&self) -> Vec<Key> {
         let Some(selection) = &self.selection else {
@@ -939,6 +953,9 @@ impl Model {
     /// a new conversation's row goes when its request failed; true when
     /// the list changed.
     pub fn list_tick(&mut self, now: Instant) -> bool {
+        // The wall clock relative times read, set again each pass of the
+        // event loop (a deep suspend stops `Instant`, not the wall clock).
+        self.sidebar.clock = Some((now, super::now_ms()));
         let mut changed = self.settle_created(now);
         changed |= self.sidebar.expire_edits(now);
         if self.sidebar.search.tick(now) {

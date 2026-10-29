@@ -310,7 +310,7 @@ impl<'a> Ctx<'a> {
         };
         Ctx {
             aggregates: model.sidebar.aggregates(&model.composer.queued),
-            now_ms: model::now_ms() as f64,
+            now_ms: model.sidebar.wall_ms(now),
             pulse: anim::pulse_percent(now, 1600),
             pressed,
             lifted,
@@ -1438,7 +1438,9 @@ pub fn animate(model: &Model, now: Instant, animator: &mut Animator) {
     if model.offline || !model.sidebar.loaded || model.sidebar.pulsing {
         animator.slow_frame(now);
     }
-    let into_minute = model::now_ms() % 60_000;
+    let into_minute = model.sidebar.clock.map_or(model::now_ms(), |(at, ms)| {
+        ms + now.saturating_duration_since(at).as_millis() as u64
+    }) % 60_000;
     animator.request(now + Duration::from_millis(60_000 - into_minute + 5));
     if let Some(due) = model.sidebar.search.due() {
         animator.request(due);
@@ -2011,6 +2013,50 @@ mod tests {
         }
         let damage = update_matches(&mut model, &mut view, (None, None), (now, now), |_, _| {});
         assert_eq!(damage, FrameDamage::default());
+    }
+
+    /// Relative times read the frames' clock (`now`), not the wall clock
+    /// at drawing: a label turning over redraws its row, and a frame and
+    /// its redraw agree across a minute's turn.
+    #[test]
+    fn relative_times_turn_over_with_the_frames_clock() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let t0 = Instant::now();
+        // c2 was updated 59.5 s before t0, by the frames' clock.
+        let updated = model.sidebar.conversations["c2"].updated_at;
+        model.sidebar.clock = Some((t0, (updated + 59_500.0) as u64));
+        let damage = update_matches(
+            &mut model,
+            &mut view,
+            (None, None),
+            (t0, t0 + Duration::from_secs(1)),
+            |_, _| {},
+        );
+        let layout = model.sidebar.layout();
+        let index = layout
+            .index_of(|row| matches!(row, Row::Conversation { id, .. } if id == "c2"))
+            .unwrap();
+        let y = (list_top(&model) + layout.tops[index]) as i32;
+        assert!(
+            damage
+                .rows
+                .iter()
+                .any(|(y0, y1)| *y0 <= y + 124 && *y1 >= y + 124),
+            "c2's meta line drawn again: {damage:?}"
+        );
+        // Unchanged time: nothing, whatever the wall clock does.
+        let damage = update_matches(
+            &mut model,
+            &mut view,
+            (None, None),
+            (t0 + Duration::from_secs(1), t0 + Duration::from_secs(1)),
+            |_, _| {},
+        );
+        assert!(
+            damage.rows.iter().all(|(y0, y1)| y1 - y0 <= 2 * DOT_HALF),
+            "{damage:?}"
+        );
     }
 
     #[test]
