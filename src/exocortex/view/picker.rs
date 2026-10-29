@@ -59,6 +59,10 @@ pub struct Picker {
     opened: Option<Instant>,
     closed: Option<Instant>,
     state: Option<PickerState>,
+    /// A hash of `state` (what the rows show).
+    state_key: u64,
+    /// The hint footer, wrapped.
+    hint: Vec<String>,
     macros: bool,
 }
 
@@ -73,6 +77,8 @@ impl Picker {
             opened: None,
             closed: None,
             state: None,
+            state_key: 0,
+            hint: Vec::new(),
             macros: false,
         }
     }
@@ -98,20 +104,11 @@ impl Picker {
         self.state.as_ref().map_or(&[], |s| s.rows(self.macros))
     }
 
-    fn hint_lines(&self) -> Vec<String> {
-        self.state
-            .as_ref()
-            .and_then(|s| s.hint.as_ref())
-            .map(|(text, _)| widgets::wrap_plain(text, T_CAPTION, self.rect.w - 2.0 * PAD))
-            .unwrap_or_default()
-    }
-
     fn hint_h(&self) -> f32 {
-        let lines = self.hint_lines();
-        if lines.is_empty() {
+        if self.hint.is_empty() {
             0.0
         } else {
-            lines.len() as f32 * T_CAPTION.line() + 2.0 * S2
+            self.hint.len() as f32 * T_CAPTION.line() + 2.0 * S2
         }
     }
 
@@ -192,13 +189,25 @@ impl Overlay for Picker {
         if self.closed.is_some() && self.state.is_some() {
             return;
         }
-        let state = model.composer.picker_state.clone();
-        if state.as_ref().map(|s| &s.completion.query)
-            != self.state.as_ref().map(|s| &s.completion.query)
-        {
-            self.offset = 0.0;
+        if model.composer.picker_state != self.state {
+            let state = model.composer.picker_state.clone();
+            if state.as_ref().map(|s| &s.completion.query)
+                != self.state.as_ref().map(|s| &s.completion.query)
+            {
+                self.offset = 0.0;
+            }
+            let mut key = DefaultHasher::new();
+            format!("{state:?}").hash(&mut key);
+            self.state_key = key.finish();
+            self.hint = state
+                .as_ref()
+                .and_then(|s| s.hint.as_ref())
+                .map(|(text, _)| {
+                    widgets::wrap_plain(text, T_CAPTION, W - 2.0 * COMPOSER_MARGIN - 2.0 * PAD)
+                })
+                .unwrap_or_default();
+            self.state = state;
         }
-        self.state = state;
         self.macros = model.composer.picker_macros;
         // Only with the keyboard up for the composer (PAR-198).
         if !cx.keyboard {
@@ -230,7 +239,7 @@ impl Overlay for Picker {
         let mut key = DefaultHasher::new();
         (
             self.serial,
-            self.state.as_ref().map(|s| format!("{s:?}")),
+            self.state_key,
             self.macros,
             self.offset.to_bits(),
             self.pressed,
@@ -243,7 +252,7 @@ impl Overlay for Picker {
         Body {
             rows: (
                 (self.rect.y - SHADOW).floor() as i32,
-                (self.rect.y + self.rect.h).ceil() as i32 + 1,
+                (self.rect.y + self.rect.h).ceil() as i32,
             ),
             solid: None,
             scroller: None,
@@ -412,10 +421,10 @@ impl Overlay for Picker {
             }
             if let Some((_, warning)) = &state.hint {
                 let mut y = top + self.rows().len() as f32 * ROW + S2;
-                for line in self.hint_lines() {
+                for line in &self.hint {
                     widgets::text(
                         canvas,
-                        &line,
+                        line,
                         r.x + PAD,
                         T_CAPTION.baseline(y),
                         T_CAPTION,

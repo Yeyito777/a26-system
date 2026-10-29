@@ -252,8 +252,15 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
     )
     .icon(Icon::Sparkle)
     .detail(label.clone());
+    // D's Discard draft (PAR-190), when there is one to discard.
+    let discard = (!model.composer.text.trim().is_empty() && !model.submitting()).then(|| {
+        ActionItem::new("Discard draft", Action::Composer(composer::Act::Discard))
+            .icon(Icon::Trash)
+            .tone(Tone::Destructive)
+    });
     let Some(id) = model.chat.id.clone() else {
-        return action_sheet(ActionList::new("New chat", vec![model_item]).scoped());
+        let items = std::iter::once(model_item).chain(discard).collect();
+        return action_sheet(ActionList::new("New chat", items).scoped());
     };
     let mut items = Vec::new();
     if model.streaming() {
@@ -287,6 +294,7 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
             .icon(Icon::Copy)
             .detail(id),
     );
+    items.extend(discard);
     let mut line = label;
     if let Some(tokens) = model.context_tokens() {
         line = format!("{line} · {} context tokens", ops::grouped(tokens));

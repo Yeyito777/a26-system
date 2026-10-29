@@ -241,7 +241,10 @@ impl Model {
             return Vec::new();
         }
         if self.rewinding() {
-            self.refuse(&key, "Finishing conversation rewind; submit again in a moment.");
+            self.refuse(
+                &key,
+                "Finishing conversation rewind; submit again in a moment.",
+            );
             return Vec::new();
         }
         self.composer.errors.remove(&key);

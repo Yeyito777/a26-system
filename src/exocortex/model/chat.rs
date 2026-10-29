@@ -1062,6 +1062,17 @@ impl Model {
                 )
                 .icon(Icon::Pencil),
             );
+            // D's rewind (PAR-266, PAR-267), when this message allows it.
+            if self.can_rewind(stamp).is_ok() {
+                items.push(
+                    ActionItem::new(
+                        "Edit / rewind",
+                        Action::Composer(composer::Act::Rewind(stamp)),
+                    )
+                    .icon(Icon::Rewind)
+                    .detail("Removes it and what follows; its text returns"),
+                );
+            }
         }
         items.push(
             ActionItem::new(

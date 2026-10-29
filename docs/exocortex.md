@@ -41,7 +41,10 @@ lands), and scrolling up asks for the older page again.
 | List commands | `pin_conversation`, `mark_conversation`, `mute_conversation`, `delete_conversation`, `pin_folder`, `mute_folder`, `delete_folder`, each followed by a `ping` with its reqId (`updateStatusOnly`); `rename_conversation`, `create_folder`, `rename_folder` (acked); `undo_delete`, `redo_delete` (answered by `conversation_restored` or a state patch); `list_conversations` to start over |
 | A conversation | `load_conversation` with `turns`, the `viewport` and an `initialBackfill` (which subscribes and marks it read): a window of about two screens, then the older page behind it from the same snapshot; older pages (15 turns) with `load_conversation_history` as the user scrolls up, joined where a page ends inside an entry; the stream (`streaming_started`, `block_start`, `text_chunk`, `thinking_chunk`, `streaming_sync`, `tool_call`, `tool_result`, `message_complete`, `streaming_stopped`, `user_message`, `system_message`, `history_updated`, whose `pendingAI: null` ends the live reply); after each stop the newest page again, so the history settles on the daemon's copy. Leaving it `unsubscribe`s. |
 | Sending | `send_message` (shown at once, confirmed by the daemon's `user_message` or `streaming_started` with the same `startedAt`); while it works, Send asks "Deliver message": **Next turn** (Steer now on other providers) or **Message end**, `queue_message` with that `timing` (shown as queued until delivered; sent directly if the turn ended meanwhile); a new conversation is `new_conversation` with its first message and only the draft's explicit model choices (in the folder whose "+" was tapped). Refused or unconfirmed in 20 s: the text goes back into the draft it came from, with the error above the composer |
-| The queue | a queued bubble tapped: Edit in composer, Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it) |
+| The queue | a queued bubble tapped: Edit… (`update_queued_message`), deliver at the other timing, Edit in composer, Move earlier / later (`move_queued_message`), Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it). `/queue [target]` in a message puts it on the daemon's idle queue (`source: global-idle` with its `waitTarget`) |
+| Commands | Run: `/model`, `/effort`, `/fast`, `/ultrafast` (through E's `PickModel` / `PickEffort` / `PickSpeed`), `/default-model` (`set_conversation_defaults`, `reset_conversation_defaults`), `/rename` (`rename_conversation`, `generate_title`), `/replay`, `/compact`, `/trim`, `/instructions` (`set_system_instructions`), `/goal` (`set_goal`), `/stop`, `/ping`, `/reload`; the rest open E's panels or say something |
+| Rewind | the message menu's Edit / rewind: the text back into the draft, then `unwind_conversation` with its `userMessageIndex` (from the windows' `historyStartUserIndex`) and `expectedStartedAt` |
+| The mic | `exocortex-voice dictate` (OSS-Phone-V1 `docs/voice.md`): its `level` lines drive the strip, `stop` on its stdin transcribes (the daemon's `transcribe_audio`, by the hook) |
 | Stop | `abort` with the stream's `expectedStartedAt`; a spinner until `ack`, `streaming_stopped` or `message_complete`; a second press says it is already stopping |
 | The model inspector | `tools_available`'s providers, models, efforts and speeds, and `conversationDefaults` (or `conversation_defaults`); Apply sends `set_model`, `set_effort`, `set_fast_mode` for what changed; a draft changes nothing on the wire until its first message |
 | Tool outputs | `load_tool_outputs` for a row opened, and for rows within a screen of what shows (six at a time, one request in flight; history leaves outputs out); one that does not come says so ("no longer available", "timed out") and a tap asks again |
@@ -124,7 +127,29 @@ it), the handles and the caret can be dragged, and a tap at the caret or on
 the selection opens the edit menu (Cut, Copy, Paste, Select, Select all over
 Moon's clipboard). Six lines show; more scroll inside, the caret's line kept
 in view. Drafts are kept per conversation and per new chat in a folder, in
-`drafts.json`, across restarts.
+`drafts.json`, across restarts; the chat's ⋯ menu discards one.
+
+A slash word at the caret opens the picker above the composer (`commands/`,
+`view/picker.rs`): commands at the start of the prompt (Commands and Macros
+tabs with counts), macros and the inline modifiers anywhere, then their
+arguments (providers, models, efforts, `/queue` targets) by a fuzzy search
+ported from the TUI ("/model opus" finds "/model anthropic claude-opus-5-5").
+A suggestion inserts its text and never runs; a typed command makes the
+trailing button Run. Send and Run go through the TUI's pipeline: `//` sends a
+literal slash; shorthands resolve ("/mod opus"); an unknown command is
+refused (the text stays, the reason above the composer); inline modifiers
+(`/model p m`, `/effort x`, `/fast`, `/ultrafast`, `/queue [target]`) apply
+first and leave the text; macros (`macros.rs`, the TUI's catalog in
+`macros.json`, regenerated with `scripts/sync-exocortex-macros.ts`) expand
+with the daemon's paths. Command results show as notices in the transcript
+(long ones, `/help`, `/model`, in the reader; a new chat's as toasts).
+
+The mic shows when nothing is typed: it runs Moon's voice hook
+(`dictation.rs`), and a recording strip takes the editor's row (cancel, the
+red dot and the clock, the waveform of the hook's levels, finish). The words
+go in at the caret of the draft they were spoken for, wherever the user is
+by then; a recording ends with its chat and stops by itself before the
+capture's 120 s limit; transcription is given up on after 90 s.
 
 Sending `turns` matters: without it the daemon does not page at all. It
 sends the whole history on every open (790 KB for a long conversation) and
@@ -232,7 +257,7 @@ the interfaces below. Every file's header says whose it is.
 | `view/list.rs`, `model/sidebar.rs`, `proto/sidebar.rs`, `list/` | B | the list, folders, search; activity and titles (`list/activity.rs`), the search field (`list/search.rs`), commands, menus and prompts (`list/actions.rs`) |
 | `view/markdown_layout.rs`, `view/code.rs`, `view/table.rs`, `view/media.rs`, `markdown.rs`, `images.rs`, `viewer.rs`, `reader.rs`, `find.rs`, `model/rich.rs` | C1 | markdown as pieces, code blocks, tables; images in the transcript, their cache and the viewer; the reader and Find; rich content's state and actions (`Action::Rich`, `Owner::Rich`) |
 | `view/transcript.rs`, `view/blocks.rs`, `view/tools.rs`, `model/chat.rs`, `proto/chat.rs` | C2 | the transcript, streaming, history |
-| `view/composer.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts |
+| `view/composer.rs`, `view/picker.rs`, `model/composer.rs`, `proto/composer.rs`, `editor.rs`, `drafts.rs`, `dictation.rs`, `commands/`, `macros.rs`, `macros.json` | D | the composer and its editor (caret, selection, wrap, the edit menu), sending, the queue, kept drafts, the mic, the command picker, commands and macros |
 | `view/chat_header.rs`, `screens/settings.rs`, `sheets/`, `model/ops.rs`, `proto/ops.rs` | E | the chat's header, Settings, the model sheet and the other panels |
 
 A package adds its new files (`list/*.rs`, `commands/*.rs`, `sheets/*.rs`
@@ -247,7 +272,9 @@ additions are the only shared edits.
   adds variants to its own `Act` and handles them in its `handle_*`
   (`handle_list`, `handle_chat`, `handle_composer`, `handle_ops`), which
   returns the commands to send. Interfaces fixed for meeting points:
-  `composer::Act::{Insert(String), RestoreDraft { conv, text }, Focus}`
+  `composer::Act::{Insert(String), RestoreDraft { conv, text }, Focus,
+  Rewind(stamp), Discard}` (`Model::can_rewind(stamp)` says whether a sent
+  message can be rewound now)
   (C2's message menu, D's rewind) and `ops::Act::{OpenInspector, ChatMenu,
   OpenSettings, OpenGoal, OpenActivity, OpenChrono, OpenBtw, OpenAccounts,
   OpenSystemPrompt, OpenFind, …}` (D's commands open E's panels; the

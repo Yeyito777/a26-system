@@ -1663,7 +1663,7 @@ mod tests {
         for _ in 0..20 {
             frames(&mut model, &mut view, &|_| {}, 8);
         }
-        assert!(view.overlays.len() >= 1, "the edit menu");
+        assert!(!view.overlays.is_empty(), "the edit menu");
         // Stop pressed: its spinner turns.
         frames(
             &mut model,
