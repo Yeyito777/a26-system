@@ -177,6 +177,36 @@ fn next_grapheme(chars: &[char], i: usize) -> (usize, usize) {
     (width, end)
 }
 
+/// `s` as its grapheme clusters and the columns each takes (a mark rides
+/// on the character before it): how a monospaced grid places it.
+pub fn cells(s: &str) -> Vec<(String, usize)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let (columns, end) = if (' '..='~').contains(&c) {
+            (1, i + 1)
+        } else {
+            next_grapheme(&chars, i).max_end(i)
+        };
+        out.push((chars[i..end].iter().collect(), columns));
+        i = end;
+    }
+    out
+}
+
+trait MaxEnd {
+    fn max_end(self, at: usize) -> (usize, usize);
+}
+
+impl MaxEnd for (usize, usize) {
+    /// Always at least one character on.
+    fn max_end(self, at: usize) -> (usize, usize) {
+        (self.0, self.1.max(at + 1))
+    }
+}
+
 /// Terminal columns of `s` (textwidth.ts's `termWidth`).
 pub fn width(s: &str) -> usize {
     if s.bytes().all(|b| (0x20..=0x7E).contains(&b)) {

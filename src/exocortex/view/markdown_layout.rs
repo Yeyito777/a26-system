@@ -110,8 +110,8 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
         // Inline math is drawn as its Unicode rendering.
         let rendered;
         let text = if span.style == Style::Math {
-            rendered = math::inline(&span.text);
-            rendered.as_str()
+            rendered = inline_math(&span.text);
+            &rendered[..]
         } else {
             span.text.as_str()
         };
@@ -165,6 +165,32 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
         finish(&mut lines, &mut line, &mut x);
     }
     lines
+}
+
+/// Inline math as one line, no-break spaces where TeX would not break
+/// it (the TUI's prose rendering), remembered: a streamed paragraph is laid
+/// out again on every chunk.
+fn inline_math(tex: &str) -> Rc<str> {
+    thread_local! {
+        static RENDERED: std::cell::RefCell<std::collections::HashMap<String, Rc<str>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    RENDERED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(text) = cache.get(tex) {
+            return text.clone();
+        }
+        if cache.len() > 2000 {
+            cache.clear();
+        }
+        let options = math::Options {
+            nbsp: true,
+            ..math::Options::default()
+        };
+        let text: Rc<str> = Rc::from(math::inline_with(tex, options));
+        cache.insert(tex.to_owned(), text.clone());
+        text
+    })
 }
 
 /// Splits a line into words and runs of spaces.
@@ -551,13 +577,13 @@ fn block_into(
 fn lay_display_math(laid: &mut Laid, tex: &str, x: f32, width: f32, top: f32) -> f32 {
     let p = theme::p();
     let size = BODY;
-    let line_h = (size * 1.3).round();
+    let line_h = (size * 1.2).round();
     let cell = text::measure("M", Weight::Mono, size).max(1.0);
     let columns = (width / cell).floor().max(8.0) as usize;
     let rows = math::display(tex, columns);
     let cols = rows
         .iter()
-        .map(|row| row.chars().count())
+        .map(|row| math::cells(row).iter().map(|(_, w)| w).sum::<usize>())
         .max()
         .unwrap_or(0);
     let grid_w = cols as f32 * cell;
@@ -642,8 +668,9 @@ fn group_digits(n: usize) -> String {
     out
 }
 
-/// A row of a monospaced grid: ASCII runs as text, every other character
-/// in its own cell (glyphs from fallback fonts are not a cell wide).
+/// A row of a monospaced grid (`math::cells`): runs of ASCII as text,
+/// every other cluster centred in its own cells (fallback glyphs are not a
+/// cell wide; wide ones take two).
 fn grid_text(
     ops: &mut Vec<Op>,
     row: &str,
@@ -668,19 +695,20 @@ fn grid_text(
         }
         run.clear();
     };
-    for (column, c) in row.chars().enumerate() {
-        if c.is_ascii() {
+    let mut column = 0;
+    for (glyph, columns) in math::cells(row) {
+        if glyph.len() == 1 && glyph.is_ascii() {
             if run.is_empty() {
                 run_start = column;
             }
-            run.push(c);
+            run.push_str(&glyph);
         } else {
             flush(ops, &mut run, run_start);
-            if !c.is_whitespace() {
-                let glyph = c.to_string();
+            if !glyph.trim().is_empty() {
                 let w = text::measure(&glyph, Weight::Mono, size);
+                let span = columns.max(1) as f32 * cell;
                 ops.push(ops::text(
-                    (left + column as f32 * cell + (cell - w) / 2.0).round(),
+                    (left + column as f32 * cell + (span - w) / 2.0).round(),
                     baseline,
                     glyph,
                     Weight::Mono,
@@ -689,6 +717,7 @@ fn grid_text(
                 ));
             }
         }
+        column += columns;
     }
     flush(ops, &mut run, run_start);
 }

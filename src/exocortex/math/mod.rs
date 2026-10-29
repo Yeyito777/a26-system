@@ -66,6 +66,12 @@ pub fn inline_with(tex: &str, options: Options) -> String {
     .unwrap_or_else(|| source.to_string())
 }
 
+/// A rendered row's grapheme clusters and their columns (wide glyphs
+/// two, marks riding on their base): for drawing it on a grid.
+pub fn cells(row: &str) -> Vec<(String, usize)> {
+    text::cells(row)
+}
+
 /// Display rows, at most `width` columns wide when a narrower layout
 /// exists (`usize::MAX`: unlimited); no rows for empty source.
 pub fn display(tex: &str, width: usize) -> Vec<String> {
