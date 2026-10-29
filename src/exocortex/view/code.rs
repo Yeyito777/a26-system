@@ -15,6 +15,9 @@ use super::super::theme::{self, HAIRLINE, T_CODE, T_EYEBROW, T_SMALL, TARGET};
 use super::super::ui::widgets;
 use super::ops::{self, Laid, Op};
 
+/// A row's coloured spans: character ranges and their classes.
+type Spans = Vec<(usize, usize, Token)>;
+
 /// The code shown before "Preview · …" (the iPhone's).
 pub const PREVIEW_CHARS: usize = 8000;
 /// The header's height.
@@ -59,7 +62,7 @@ pub fn lay(
     } else {
         usize::MAX
     };
-    let mut rows: Vec<(Vec<char>, Vec<(usize, usize, Token)>)> = Vec::new();
+    let mut rows: Vec<(Vec<char>, Spans)> = Vec::new();
     for line in &shown {
         let characters: Vec<char> = line.chars().collect();
         let spans = highlight::highlight_cached(line, lang);

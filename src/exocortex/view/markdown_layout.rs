@@ -655,7 +655,6 @@ fn grid_text(
 ) {
     let mut run = String::new();
     let mut run_start = 0;
-    let mut column = 0;
     let flush = |ops: &mut Vec<Op>, run: &mut String, start: usize| {
         if !run.trim().is_empty() {
             ops.push(ops::text(
@@ -669,7 +668,7 @@ fn grid_text(
         }
         run.clear();
     };
-    for c in row.chars() {
+    for (column, c) in row.chars().enumerate() {
         if c.is_ascii() {
             if run.is_empty() {
                 run_start = column;
@@ -690,7 +689,6 @@ fn grid_text(
                 ));
             }
         }
-        column += 1;
     }
     flush(ops, &mut run, run_start);
 }

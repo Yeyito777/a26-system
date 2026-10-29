@@ -695,8 +695,7 @@ impl Parser {
         }
         let mut items = Vec::new();
         let mut first = true;
-        loop {
-            let Some(c) = self.peek() else { break };
+        while let Some(c) = self.peek() {
             if c == ']' && !first {
                 self.at += 1;
                 break;
