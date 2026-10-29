@@ -522,27 +522,29 @@ pub fn tokens(model: &Model) -> Built {
     }
 }
 
-fn account_usage(usage: Option<&Usage>, now: f64) -> String {
-    let cell = |label: &str, w: &Option<UsageWindow>| {
+/// An account's 5-hour and weekly meters (`real-10-sheet-accounts`): the
+/// share used, a bar, the time to the reset.
+fn meters(usage: Option<&Usage>, now: f64) -> [Option<panel::Meter>; 2] {
+    let meter = |w: &Option<UsageWindow>| {
         w.as_ref().map(|w| {
             let pct = match w.resets_at {
-                Some(at) if at <= now => 0,
-                _ => w.utilization.round() as i64,
+                Some(at) if at <= now => 0.0,
+                _ => w.utilization.round().clamp(0.0, 100.0),
             };
-            let reset = w
-                .resets_at
-                .filter(|at| *at > now)
-                .map(|at| format!(" {}", clock::format_account_duration(at - now)))
-                .unwrap_or_default();
-            format!("{label} {pct}%{reset}")
+            panel::Meter {
+                permille: (pct * 10.0) as u16,
+                share: format!("{pct}%"),
+                reset: w
+                    .resets_at
+                    .filter(|at| *at > now)
+                    .map(|at| clock::format_account_duration(at - now))
+                    .unwrap_or_default(),
+                color: usage_color(100.0 - pct),
+            }
         })
     };
     let usage = usage.cloned().unwrap_or_default();
-    [cell("5h", &usage.five_hour), cell("wk", &usage.seven_day)]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
+    [meter(&usage.five_hour), meter(&usage.seven_day)]
 }
 
 fn near_limit(account: &ClaudeAccount, floors: (f64, f64), now: f64) -> Option<&'static str> {
@@ -584,7 +586,7 @@ pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
         rows.push(panel::section("Claude"));
         rows.push(panel::note("The remote daemon's login (/proxy)"));
     } else if !claude.accounts.is_empty() {
-        rows.push(panel::section("Claude"));
+        rows.push(Row::GridHead("Claude".into()));
         let floors = (claude.routing.five_hour_floor, claude.routing.weekly_floor);
         let mut notes = Vec::new();
         for account in &claude.accounts {
@@ -638,18 +640,18 @@ pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
             {
                 tags.push("new work".into());
             }
-            let usage = if matches!(account.state.as_str(), "ready" | "limited") {
-                account_usage(account.usage.as_ref(), now)
+            let windows = if matches!(account.state.as_str(), "ready" | "limited") {
+                meters(account.usage.as_ref(), now)
             } else {
-                String::new()
+                [None, None]
             };
-            rows.push(Row::Task {
-                label: format!("● {}", account.id),
-                color: if current { p.accent } else { dot },
-                title: tags.join(" · "),
-                time: usage,
-                tap: None,
-                more: None,
+            rows.push(Row::Account {
+                dot,
+                name: account.id.clone(),
+                name_color: if current { p.accent } else { p.text },
+                bold: current,
+                note: (!tags.is_empty()).then(|| tags.join(" · ")),
+                windows,
             });
             if let Some(command) = &account.login_command {
                 notes.push(format!("sign in {}: {command}", account.id));
@@ -710,7 +712,7 @@ pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
     }
     let openai = &snapshot.openai;
     if !openai.accounts.is_empty() {
-        rows.push(panel::section("OpenAI"));
+        rows.push(Row::GridHead("OpenAI".into()));
         if openai.proxied {
             rows.push(panel::note("The remote daemon's login (/proxy)"));
         }
@@ -720,17 +722,17 @@ pub fn accounts(model: &Model, _conv: Option<&str>, _now: Instant) -> Built {
                 .clone()
                 .or_else(|| account.display_name.clone())
                 .unwrap_or_else(|| format!("account {}", account.index));
-            rows.push(Row::Task {
-                label: format!("● {name}"),
-                color: if account.current { p.accent } else { p.muted },
-                title: account.plan.clone().unwrap_or_default(),
-                time: if account.current {
-                    account_usage(model.usage_of("openai"), now)
+            rows.push(Row::Account {
+                dot: if account.current { p.success } else { p.muted },
+                name,
+                name_color: if account.current { p.accent } else { p.text },
+                bold: account.current,
+                note: account.plan.clone(),
+                windows: if account.current {
+                    meters(model.usage_of("openai"), now)
                 } else {
-                    String::new()
+                    [None, None]
                 },
-                tap: None,
-                more: None,
             });
         }
     }
@@ -908,7 +910,7 @@ mod tests {
         );
         let built = accounts(&model, None, Instant::now());
         assert!(built.rows.iter().any(
-            |r| matches!(r, Row::Task { label, time, .. } if label == "● main" && time == "5h 12%")
+            |r| matches!(r, Row::Account { name, windows: [Some(five), _], .. } if name == "main" && five.share == "12%")
         ));
         let stop = model.unwatch_accounts();
         assert_eq!(stop[0]["watch"], false);

@@ -167,6 +167,19 @@ pub enum Row {
         label: String,
         tap: Tap,
     },
+    /// The accounts grid's head (`real-10-sheet-accounts`): the provider,
+    /// then "5-HOUR" and "WEEKLY" over their columns.
+    GridHead(String),
+    /// An account in the grid: its dot, name and note, and a bar with its
+    /// share and reset per window.
+    Account {
+        dot: Rgb,
+        name: String,
+        name_color: Rgb,
+        bold: bool,
+        note: Option<String>,
+        windows: [Option<Meter>; 2],
+    },
     /// A 3 pt bar filled to `permille`.
     Bar {
         permille: u16,
@@ -182,6 +195,24 @@ pub enum Row {
         end: usize,
         tap: Tap,
     },
+}
+
+/// A window's meter in the accounts grid: the bar's fill, the share
+/// ("13%") and the time to its reset ("1h15m").
+#[derive(Debug, Clone, PartialEq)]
+pub struct Meter {
+    pub permille: u16,
+    pub share: String,
+    pub reset: String,
+    pub color: Rgb,
+}
+
+/// The accounts grid's columns: where the two windows start and how wide
+/// they are, for a content `width`.
+fn grid_columns(width: f32) -> [(f32, f32); 2] {
+    let w = (width * 0.235).round();
+    let gap = 22.0;
+    [(width - 2.0 * w - gap, w), (width - w, w)]
 }
 
 /// A hit's preview shows at most this many lines.
@@ -393,6 +424,8 @@ pub fn lay(row: Row, top: f32, width: f32) -> Laid {
                 + FIELD_PAD
         }
         Row::Action { .. } => theme::grown(TARGET, 60.0),
+        Row::GridHead(_) => theme::grown(SECTION, 40.0),
+        Row::Account { .. } => theme::grown(144.0, 100.0),
         Row::Bar { .. } => BAR + 14.0,
         Row::Gap(px) => *px as f32,
         Row::Hit { preview, .. } => {
@@ -940,6 +973,85 @@ pub fn draw_row(
                 let baseline = body.baseline(top + index as f32 * body.line());
                 widgets::text(canvas, line, x, baseline, body, p.text, 1.0);
             }
+        }
+        Row::GridHead(title) => {
+            let ty = Style::CaptionBold.ty();
+            let baseline = ty.baseline(y + laid.height - 34.0 - ty.line());
+            let title_room = grid_columns(width)[0].0 - 22.0;
+            let title = widgets::fit(&title.to_uppercase(), ty, title_room);
+            widgets::text(canvas, &title, x, baseline, ty, p.text, 1.0);
+            let head = theme::T_EYEBROW;
+            for ((cx, _), label) in grid_columns(width).into_iter().zip(["5-hour", "Weekly"]) {
+                widgets::text(canvas, label, x + cx, baseline, head, p.muted, 1.0);
+            }
+            widgets::hairline(
+                canvas,
+                x,
+                right,
+                y + laid.height - HAIRLINE,
+                c.rule_settings,
+            );
+        }
+        Row::Account {
+            dot,
+            name,
+            name_color,
+            bold,
+            note,
+            windows,
+        } => {
+            let columns = grid_columns(width);
+            let body = if *bold {
+                Style::Body.ty().weight(Weight::MonoBold)
+            } else {
+                Style::Body.ty()
+            };
+            let meta = Style::Meta.ty();
+            let text_h = body.line() + if note.is_some() { meta.line() } else { 0.0 };
+            let top = y + ((laid.height - text_h) / 2.0).round();
+            canvas.fill_circle(x + 20.0, top + body.line() / 2.0, 11.0, *dot, 1.0);
+            let name_x = x + 62.0;
+            let room = columns[0].0 - 62.0 - 22.0;
+            let name = widgets::fit(name, body, room);
+            widgets::text(
+                canvas,
+                &name,
+                name_x,
+                body.baseline(top),
+                body,
+                *name_color,
+                1.0,
+            );
+            if let Some(note) = note {
+                let note = widgets::fit(note, meta, room);
+                let baseline = meta.baseline(top + body.line());
+                widgets::text(canvas, &note, name_x, baseline, meta, p.muted, 1.0);
+            }
+            let caption = Style::Caption.ty();
+            let bar_y = y + ((laid.height - (BAR + 12.0 + caption.line())) / 2.0).round();
+            for ((cx, w), meter) in columns.into_iter().zip(windows) {
+                let Some(meter) = meter else { continue };
+                let track = RectF::new(x + cx, bar_y, w, BAR);
+                widgets::fill(canvas, track, c.switch_off);
+                let fill = (w * f32::from(meter.permille.min(1000)) / 1000.0).round();
+                if fill > 0.0 {
+                    widgets::fill(canvas, RectF::new(track.x, bar_y, fill, BAR), meter.color);
+                }
+                let baseline = caption.baseline(bar_y + BAR + 12.0);
+                widgets::text(
+                    canvas,
+                    &meter.share,
+                    track.x,
+                    baseline,
+                    caption,
+                    meter.color,
+                    1.0,
+                );
+                let reset_room = w - widgets::measure(&meter.share, caption) - 11.0;
+                let reset = widgets::fit(&meter.reset, caption, reset_room.max(0.0));
+                widgets::text_right(canvas, &reset, track.x + w, baseline, caption, p.muted, 1.0);
+            }
+            widgets::hairline(canvas, x, right, y + laid.height - HAIRLINE, row_rule);
         }
         Row::Action { label, tap } => {
             if down(tap) {
