@@ -215,11 +215,36 @@ impl<'a> SlashEnv<'a> {
                 }
             }
             "/chrono" => {
+                // Cancelling is destructive: run only when typed out.
+                let exact = |item: Item| Item {
+                    exact: true,
+                    ..item
+                };
+                if let Some(conv) = &self.model.chat.id {
+                    let schedules = self.model.ops.chrono.lists.get(conv);
+                    let mut ids: Vec<Item> = schedules
+                        .into_iter()
+                        .flatten()
+                        .map(|s| {
+                            exact(Item::new(
+                                crate::exocortex::sheets::chrono::short_id(&s.id),
+                                crate::exocortex::sheets::chrono::payload_label(s, 60),
+                            ))
+                        })
+                        .collect();
+                    if !ids.is_empty() {
+                        ids.push(exact(Item::new(
+                            "all",
+                            "cancel every schedule in this conversation",
+                        )));
+                    }
+                    out.insert("/chrono cancel".into(), ids);
+                }
                 out.insert(
                     root.into(),
                     vec![
                         Item::new("list", "show this conversation's schedules"),
-                        Item::new("cancel", "cancel a schedule"),
+                        exact(Item::new("cancel", "cancel a schedule")),
                         Item::new("in", "once after a delay: in 2h 30m <message>"),
                         Item::new("at", "once at a time: at tomorrow 9am <message>"),
                         Item::new("every", "repeat: every day at 9am <message>"),

@@ -309,7 +309,7 @@ impl Model {
         }
         let mut commands = Vec::new();
         if let Some(selection) = &parsed.selection {
-            commands.extend(self.apply_selection(selection, &parsed));
+            commands.extend(self.apply_modifiers(selection, &parsed));
             for notice in parsed.notices.clone() {
                 self.notice(&notice, Level::Info, None);
             }
@@ -331,7 +331,7 @@ impl Model {
 
     /// The selection the modifiers chose, applied: a conversation's on the
     /// daemon (model, then effort, then speed), a draft's locally.
-    fn apply_selection(&mut self, s: &Generation, parsed: &inline::Inline) -> Vec<Value> {
+    fn apply_modifiers(&mut self, s: &Generation, parsed: &inline::Inline) -> Vec<Value> {
         let mut commands = Vec::new();
         if parsed.model_changed {
             commands.extend(self.handle(Action::Ops(ops::Act::PickModel(
@@ -522,7 +522,7 @@ impl Model {
                 Ok(self.handle(Action::Ops(ops::Act::OpenSystemPrompt)))
             }
             "goal" => self.goal_command(args.trim()),
-            "chrono" => Ok(self.handle(Action::Ops(ops::Act::OpenChrono))),
+            "chrono" => self.chrono_command(args.trim()),
             "queue" => {
                 self.notice(
                     "Usage: include /queue in a message, or combine it with a compatible command such as /replay or /compact, to run after all conversations and queued turns are idle. Use /queue <conversation-or-folder> to wait for one conversation, or a 📁 folder, instead, or /queue <duration> (such as 30s, 5h, 8h3m1s, or 9d) to send after that delay once this conversation is idle.",
@@ -540,7 +540,7 @@ impl Model {
                     return Err("Usage resets are not used from the phone yet. Run /usage reset in the TUI.".into());
                 }
                 no_args(&argv)?;
-                Ok(self.handle(Action::Ops(ops::Act::OpenSettings)))
+                Ok(self.handle(Action::Ops(ops::Act::OpenUsage)))
             }
             "ping" => {
                 no_args(&argv)?;
@@ -634,14 +634,28 @@ impl Model {
                 Ok(self.handle(Action::Ops(ops::Act::OpenAccounts)))
             }
             "btw" => {
-                if args.trim().is_empty() {
+                let query = args.trim();
+                let conv = self.chat.id.clone().unwrap_or_default();
+                if query.is_empty() {
                     return Err("Usage: /btw <query>\n       /btw close".into());
                 }
-                Ok(self.handle(Action::Ops(ops::Act::OpenBtw)))
+                if query == "close" {
+                    if self.aside(&conv).is_none() {
+                        self.notice("No /btw session is open.", Level::Info, None);
+                        return Ok(Vec::new());
+                    }
+                    return Ok(self.handle(Action::Ops(ops::Act::Btw(
+                        crate::exocortex::sheets::btw::Act::EndConfirmed,
+                    ))));
+                }
+                // Asked, then shown in its panel.
+                let mut commands = self.ask_aside(&conv, query);
+                commands.extend(self.handle(Action::Ops(ops::Act::OpenBtw)));
+                Ok(commands)
             }
             "tokens" => {
                 no_args(&argv)?;
-                Ok(self.handle(Action::Ops(ops::Act::OpenSettings)))
+                Ok(self.handle(Action::Ops(ops::Act::OpenTokens)))
             }
             _ => Err(format!("{name} isn't supported on phone yet.")),
         }
@@ -1111,18 +1125,23 @@ impl Model {
         })])
     }
 
+    /// `/goal` through E's goal panel and requests.
     fn goal_command(&mut self, args: &str) -> Outcome {
-        let Some(id) = self.chat.id.clone() else {
+        use crate::exocortex::sheets::goal::Act as Goal;
+        if self.chat.id.is_none() {
             return Err("Create or open a conversation before using /goal.".into());
-        };
-        if args.is_empty() {
-            return Ok(self.handle(Action::Ops(ops::Act::OpenGoal)));
         }
-        let mut command = json!({ "type": "set_goal", "convId": id });
+        let goal = |model: &mut Model, a: Goal| model.handle(Action::Ops(ops::Act::Goal(a)));
         match args {
-            "pause" | "resume" | "complete" | "clear" => command["action"] = Value::from(args),
+            "" => Ok(self.handle(Action::Ops(ops::Act::OpenGoal))),
+            "pause" => Ok(goal(self, Goal::Do("pause"))),
+            "resume" => Ok(goal(self, Goal::Do("resume"))),
+            "complete" => Ok(goal(self, Goal::Do("complete"))),
+            // Typed out in full: no second question.
+            "clear" => Ok(goal(self, Goal::ClearConfirmed)),
             _ => {
                 let mut objective = args.to_owned();
+                let mut max = None;
                 if objective == "max-time" || objective.starts_with("max-time ") {
                     let mut parts = objective["max-time".len()..]
                         .trim()
@@ -1132,7 +1151,7 @@ impl Model {
                     let ms = super::queue_targets::parse_duration_ms(duration)
                         .filter(|_| !rest.is_empty())
                         .ok_or("Usage: /goal max-time <duration> <objective>, with a duration such as 9h2m1s, 8h3m, 1h, 5m or 2d")?;
-                    command["maxTimeMs"] = Value::from(ms);
+                    max = Some(ms);
                     objective = rest.to_owned();
                 }
                 if objective.starts_with("--max-turns") {
@@ -1141,19 +1160,31 @@ impl Model {
                             .into(),
                     );
                 }
-                command["action"] = Value::from("set");
-                command["objective"] = Value::from(objective);
+                Ok(goal(self, Goal::Set(objective, max)))
             }
         }
-        let request = self.requests.issue(
-            Owner::Composer,
-            "command",
-            Some(&id),
-            requests::DEFAULT_WITHIN,
-            std::time::Instant::now(),
-        );
-        command["reqId"] = Value::from(request);
-        Ok(vec![command])
+    }
+
+    /// `/chrono` through E's grammar and requests: a list, a cancel, or a
+    /// schedule (its message's macros expanded, PAR-207).
+    fn chrono_command(&mut self, args: &str) -> Outcome {
+        use crate::exocortex::sheets::chrono::{self, Act as Chrono, Request};
+        if args == "help" {
+            self.notice(chrono::USAGE, Level::Info, Some("Chrono"));
+            return Ok(Vec::new());
+        }
+        let text = macros::expand(args, self.composer.macro_env.as_ref());
+        let now = crate::exocortex::model::now_ms() as f64;
+        match chrono::parse(&text, now)? {
+            Request::List => Ok(self.handle(Action::Ops(ops::Act::OpenChrono))),
+            // Typed out in full: no second question.
+            Request::Cancel(id) => {
+                Ok(self.handle(Action::Ops(ops::Act::Chrono(Chrono::CancelConfirmed(id)))))
+            }
+            Request::Create { .. } => {
+                Ok(self.handle(Action::Ops(ops::Act::Chrono(Chrono::Create(text)))))
+            }
+        }
     }
 }
 
@@ -1365,6 +1396,35 @@ mod tests {
         opened(&mut model);
         assert!(!send(&mut model, "/effort low").is_empty());
         assert!(!opened(&mut model).contains(&"Deliver message".to_owned()));
+    }
+
+    #[test]
+    fn goal_chrono_and_btw_go_through_the_panels_requests() {
+        let mut model = ready(false);
+        let sent = send(&mut model, "/chrono in 5m /consider it");
+        assert_eq!(sent[0]["type"], "chrono");
+        assert_eq!(sent[0]["action"], "create");
+        assert!(
+            sent[0]["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("Consider what I'm saying")),
+            "macros expanded: {}",
+            sent[0]
+        );
+        let sent = send(&mut model, "/chrono cancel all");
+        assert_eq!(
+            (sent[0]["type"].as_str(), sent[0]["action"].as_str()),
+            (Some("chrono"), Some("cancel"))
+        );
+        // A fragment of the destructive argument is never expanded.
+        assert!(send(&mut model, "/chrono canc").is_empty());
+        assert_eq!(model.composer.text, "/chrono canc", "kept");
+        let sent = send(&mut model, "/btw what is a monad");
+        assert_eq!(sent[0]["type"], "btw_query");
+        assert_eq!(sent[0]["query"], "what is a monad");
+        let sent = send(&mut model, "/goal pause");
+        assert_eq!(sent[0]["type"], "set_goal");
+        assert_eq!(sent[0]["action"], "pause");
     }
 
     #[test]
