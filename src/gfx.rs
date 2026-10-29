@@ -523,23 +523,24 @@ impl Canvas {
         alpha: f32,
     ) {
         let a = alpha_256(alpha);
-        for my in 0..height {
-            let ty = y + my;
-            if ty < self.clip.1 || ty >= self.clip.3 {
-                continue;
-            }
-            let row = (ty * self.width) as usize;
-            for mx in 0..width {
-                let tx = x + mx;
-                if tx < self.clip.0 || tx >= self.clip.2 {
-                    continue;
-                }
-                let m = u32::from(mask[(my * width + mx) as usize]);
+        // Only what the clip shows (a glyph outside it costs nothing: a
+        // strip or a column drawn again visits only its own pixels).
+        let (y0, y1) = ((self.clip.1 - y).max(0), (self.clip.3 - y).min(height));
+        let (x0, x1) = ((self.clip.0 - x).max(0), (self.clip.2 - x).min(width));
+        if y0 >= y1 || x0 >= x1 {
+            return;
+        }
+        for my in y0..y1 {
+            // (x may be left of the canvas: whole i32 until the clip adds.)
+            let row = (y + my) * self.width + x;
+            let line = (my * width) as usize;
+            for mx in x0..x1 {
+                let m = u32::from(mask[line + mx as usize]);
                 if m == 0 {
                     continue;
                 }
                 let coverage = ((m + (m >> 7)) * a) >> 8;
-                let index = row + tx as usize;
+                let index = (row + mx) as usize;
                 self.pixels[index] = blend(self.pixels[index], color, coverage);
             }
         }
@@ -811,6 +812,38 @@ pub fn ease_spring(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mask drawn across the canvas's edges and clip draws what the clip
+    /// shows, the same pixels as one pixel at a time would.
+    #[test]
+    fn masks_draw_only_inside_the_clip() {
+        let mask: Vec<u8> = (0..100).map(|i| (i * 2 + 50) as u8).collect();
+        for (x, y, clip) in [
+            (-4, -3, (0, 0, 20, 20)),
+            (15, 15, (0, 0, 20, 20)),
+            (5, 5, (8, 6, 12, 9)),
+            (30, 30, (0, 0, 20, 20)),
+        ] {
+            let mut canvas = Canvas::new(20, 20);
+            canvas.clear(0x102030);
+            canvas.set_clip(clip.0, clip.1, clip.2, clip.3);
+            canvas.draw_mask(x, y, 10, 10, &mask, 0xff8000, 1.0);
+            let mut expected = Canvas::new(20, 20);
+            expected.clear(0x102030);
+            for my in 0..10 {
+                for mx in 0..10 {
+                    let (tx, ty) = (x + mx, y + my);
+                    if tx >= clip.0 && tx < clip.2 && ty >= clip.1 && ty < clip.3 {
+                        let m = u32::from(mask[(my * 10 + mx) as usize]);
+                        let coverage = ((m + (m >> 7)) * alpha_256(1.0)) >> 8;
+                        let index = (ty * 20 + tx) as usize;
+                        expected.pixels[index] = blend(expected.pixels[index], 0xff8000, coverage);
+                    }
+                }
+            }
+            assert!(canvas.pixels == expected.pixels, "{x} {y} {clip:?}");
+        }
+    }
 
     /// A stroke is solid all along: its round caps add to its body rather
     /// than cancelling it where they overlap (a hole at each end and joint).
