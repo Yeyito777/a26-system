@@ -26,8 +26,11 @@ and fields are ignored, missing ones take defaults.
 The app declares `targeted-unwind`, `sidebar-reorder-delta`,
 `sidebar-state-patch`, `history-block-pagination`, `token-stats-on-demand`
 and `sidebar-incremental` (with a navigate-view `sidebarView`), then `ping`s.
-Its bootstrap, and every reconnection's, is that, plus `load_conversation`
-for the conversation on screen in the same write.
+Its bootstrap, and every reconnection's, is that, with `load_conversation`
+for the conversation on screen before the `ping`, in the same write, so its
+window comes ahead of the list. A window or an older page the daemon has not
+answered in 15 s is given up on: the chat says so (a late answer still
+lands), and scrolling up asks for the older page again.
 
 | Screen | Daemon traffic |
 | --- | --- |

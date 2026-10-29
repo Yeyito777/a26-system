@@ -248,6 +248,7 @@ pub struct Chat {
     pub start_block: u64,
     pub has_older: bool,
     pub older_request: Option<String>,
+    older_sent: Option<Instant>,
     pub loaded: bool,
     pub live: Option<Live>,
     pub echoes: Vec<Echo>,
@@ -446,6 +447,7 @@ impl Chat {
     fn shelved(mut self) -> Self {
         self.live = None;
         self.older_request = None;
+        self.older_sent = None;
         self.outputs_requested.clear();
         self.echoes.clear();
         self.error = None;
@@ -503,6 +505,8 @@ pub struct Model {
     next_request: u64,
     /// Requests whose answer opens the chat (load) or replaces it.
     load_request: Option<String>,
+    /// When it was sent (it is given up on after `ANSWER_WITHIN`).
+    load_sent: Option<Instant>,
     refresh_request: Option<String>,
     /// Conversations opened before, most recent last: reopening one shows
     /// it at once while the daemon's fresh window is on its way.
@@ -519,6 +523,11 @@ impl Default for Model {
         Self::new()
     }
 }
+
+/// A conversation's window, or an older page, that has not come in this
+/// long is given up on: the chat says so (a late one still lands), and
+/// scrolling up asks again.
+pub const ANSWER_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -548,6 +557,7 @@ impl Model {
             picker: false,
             next_request: 0,
             load_request: None,
+            load_sent: None,
             refresh_request: None,
             shelf: Vec::new(),
             styles_version: 0,
@@ -628,11 +638,12 @@ impl Model {
         self.offline = false;
         self.quiet_until = None;
         self.was_connected = true;
-        let mut commands = vec![
-            proto::client_capabilities(&proto::APP_CAPABILITIES, Some(24)),
-            proto::ping(&format!("ping-{}", now_ms())),
-        ];
-        // The open conversation comes back with the list, in the same write.
+        let mut commands = vec![proto::client_capabilities(
+            &proto::APP_CAPABILITIES,
+            Some(24),
+        )];
+        // The open conversation comes back first, then the list (PAR-018),
+        // all in the same write.
         let reopen = self.pending_open.take().or_else(|| match self.page {
             Page::Chat => self.chat.id.clone(),
             Page::List => None,
@@ -640,6 +651,7 @@ impl Model {
         if let Some(id) = reopen {
             commands.extend(self.open(id));
         }
+        commands.push(proto::ping(&format!("ping-{}", now_ms())));
         commands
     }
 
@@ -647,8 +659,10 @@ impl Model {
         self.connected = false;
         self.offline = self.quiet_until.is_none();
         self.load_request = None;
+        self.load_sent = None;
         self.refresh_request = None;
         self.chat.older_request = None;
+        self.chat.older_sent = None;
         self.chat.outputs_requested.clear();
         // The live tail is unknown until the conversation is reloaded (a
         // quiet reconnection keeps showing it until then).
@@ -1034,6 +1048,7 @@ impl Model {
                 let fresh = req_id.is_some() && req_id == self.load_request;
                 if fresh {
                     self.load_request = None;
+                    self.load_sent = None;
                     self.chat.live = None;
                     self.chat.echoes.clear();
                     self.chat.error = None;
@@ -1045,6 +1060,9 @@ impl Model {
                     // was kept: it would not join on, so it is not waited for.
                     let kept = (self.chat.start, self.chat.start_block) == before;
                     self.chat.older_request = if kept { None } else { backfill };
+                    if self.chat.older_request.is_none() {
+                        self.chat.older_sent = None;
+                    }
                 }
                 if !streaming && !self.open_summary().is_some_and(|s| s.streaming) {
                     self.chat.live = None;
@@ -1061,6 +1079,7 @@ impl Model {
                 }
                 if req_id.is_some() && req_id == self.chat.older_request {
                     self.chat.older_request = None;
+                    self.chat.older_sent = None;
                     if !self.chat.prepend(window) {
                         // The history moved under the page: start over.
                         return self.reload();
@@ -1116,11 +1135,13 @@ impl Model {
             } => {
                 if req_id.is_some() && req_id == self.load_request {
                     self.load_request = None;
+                    self.load_sent = None;
                     self.chat.error = Some(message.clone());
                     self.chat.loaded = true;
                     self.chat.touch();
                 } else if req_id.is_some() && req_id == self.chat.older_request {
                     self.chat.older_request = None;
+                    self.chat.older_sent = None;
                     self.chat.has_older = false;
                 } else if conv_id.is_some() && conv_id == self.chat.id {
                     self.notice = Some((message, now));
@@ -1300,8 +1321,11 @@ impl Model {
             Some(id) if self.connected => {
                 let request = self.request_id();
                 let backfill = self.request_id();
+                let now = Instant::now();
                 self.load_request = Some(request.clone());
+                self.load_sent = Some(now);
                 self.chat.older_request = Some(backfill.clone());
+                self.chat.older_sent = Some(now);
                 vec![proto::load_conversation(&request, &id, &backfill)]
             }
             _ => Vec::new(),
@@ -1323,6 +1347,7 @@ impl Model {
         };
         let request = self.request_id();
         self.chat.older_request = Some(request.clone());
+        self.chat.older_sent = Some(Instant::now());
         self.chat.touch();
         vec![proto::load_history(
             &request,
@@ -1331,6 +1356,46 @@ impl Model {
             self.chat.start_block,
             proto::OLDER_TURNS,
         )]
+    }
+
+    /// Gives up on what the daemon has not answered in `ANSWER_WITHIN`;
+    /// returns whether that changed what shows.
+    pub fn expire(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        if self
+            .load_sent
+            .is_some_and(|at| now.duration_since(at) >= ANSWER_WITHIN)
+        {
+            // load_request stays: a late answer still lands.
+            self.load_sent = None;
+            if self.load_request.is_some() {
+                self.chat.loaded = true;
+                self.chat.error =
+                    Some("Exocortex did not answer. Open the conversation again to retry.".into());
+                self.chat.touch();
+                changed = true;
+            }
+        }
+        if self
+            .chat
+            .older_sent
+            .is_some_and(|at| now.duration_since(at) >= ANSWER_WITHIN)
+        {
+            self.chat.older_sent = None;
+            self.chat.older_request = None;
+            self.chat.touch();
+            changed = true;
+        }
+        changed
+    }
+
+    /// When `expire` next has something to do.
+    pub fn answer_deadline(&self) -> Option<Instant> {
+        [self.load_sent, self.chat.older_sent]
+            .into_iter()
+            .flatten()
+            .min()
+            .map(|at| at + ANSWER_WITHIN)
     }
 
     /// Messages waiting to join the open conversation.
@@ -1780,6 +1845,28 @@ mod tests {
         let commands = model.on_connected();
         assert!(!model.offline);
         assert!(commands.iter().any(|c| c["type"] == "load_conversation"));
+    }
+
+    #[test]
+    fn an_unanswered_load_is_given_up_on_and_a_late_one_still_lands() {
+        let now = Instant::now();
+        let mut model = connected();
+        let request = open(&mut model, "c");
+        assert!(!model.expire(now));
+        let late = model.answer_deadline().expect("a deadline");
+        assert!(model.expire(late));
+        assert!(model.chat.loaded && model.chat.error.is_some());
+        assert!(
+            model.chat.older_request.is_none(),
+            "scrolling up asks again"
+        );
+        model.apply(
+            parse_event(&window("conversation_loaded", &request, 0, 2, "a", "")),
+            now,
+        );
+        assert!(model.chat.error.is_none());
+        assert_eq!(model.chat.entries.len(), 2);
+        assert!(model.answer_deadline().is_none());
     }
 
     #[test]

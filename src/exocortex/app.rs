@@ -677,6 +677,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             redraw = true;
         }
         redraw |= model.tick(now);
+        redraw |= model.expire(now);
         let animating = mapped && model.page == Page::Chat && model.streaming();
         if animating && now >= next_dots {
             view.dots = view.dots.wrapping_add(1);
@@ -768,6 +769,9 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         if let Some(until) = model.quiet_deadline() {
             soonest(until);
+        }
+        if let Some(at) = model.answer_deadline() {
+            soonest(at);
         }
         let timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
         conn.flush()?;
