@@ -843,7 +843,7 @@ mod tests {
     use crate::exocortex::proto::parse_event;
     use crate::text::Weight;
     use list::{ROW_H, draw_list_update, list_frame, list_top};
-    use markdown_layout::{BODY, lay_markdown, line_width, plain, wrap};
+    use markdown_layout::{body, lay_markdown, line_width, plain, wrap};
     use ops::Op;
     use theme::TRANSCRIPT_PAD as MARGIN;
     use tools::TOOL_ROW;
@@ -860,7 +860,7 @@ mod tests {
                 Style::Plain,
             ),
         ];
-        let lines = wrap(&spans, 400.0, BODY);
+        let lines = wrap(&spans, 400.0, body());
         assert!(lines.len() >= 4);
         for line in &lines {
             assert!(line_width(line) <= 400.5, "{line:?}");
@@ -878,10 +878,10 @@ mod tests {
             .map(|r| r.text.as_str())
             .collect();
         assert_eq!(last, "and breaks");
-        let long = wrap(&plain(&"x".repeat(200)), 300.0, BODY);
+        let long = wrap(&plain(&"x".repeat(200)), 300.0, body());
         assert!(long.len() > 3);
         assert!(long.iter().all(|line| line_width(line) <= 300.5));
-        assert_eq!(wrap(&plain(""), 300.0, BODY).len(), 1);
+        assert_eq!(wrap(&plain(""), 300.0, body()).len(), 1);
     }
 
     #[test]

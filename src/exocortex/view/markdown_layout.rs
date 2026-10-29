@@ -23,9 +23,13 @@ use super::code;
 use super::ops::{self, Laid, Op};
 use super::table;
 
-// Text.
-pub(crate) const BODY: f32 = 40.0;
-pub(crate) const BODY_LINE: f32 = 60.0;
+// Text: T_BODY, so it follows Settings' text size.
+pub(crate) fn body() -> f32 {
+    T_BODY.px()
+}
+pub(crate) fn body_line() -> f32 {
+    T_BODY.line()
+}
 /// Tool lines, notices.
 #[allow(dead_code)]
 pub(crate) const SMALL: f32 = 34.0;
@@ -447,8 +451,8 @@ fn block_into(
     let mut y = top;
     match block {
         MdBlock::Paragraph(spans) => {
-            let lines = wrap(spans, width, BODY);
-            y += push_lines_linked(laid, &lines, x, y, BODY, BODY_LINE, None);
+            let lines = wrap(spans, width, body());
+            y += push_lines_linked(laid, &lines, x, y, body(), body_line(), None);
         }
         MdBlock::Heading(level, spans) => {
             let (ty, color) = match level {
@@ -475,7 +479,7 @@ fn block_into(
             // Markers 34 px in, 30 more per level; the text after them
             // (the iPhone's 12 pt list padding and its marker box).
             let indent = LIST_INDENT + f32::from(*depth) * MARKER_GAP;
-            let marker_w = (text::measure(marker, Weight::Mono, BODY) + 14.0).max(46.0);
+            let marker_w = (text::measure(marker, Weight::Mono, body()) + 14.0).max(46.0);
             let shown = if marker == "•" && *depth > 0 {
                 "◦"
             } else {
@@ -483,32 +487,32 @@ fn block_into(
             };
             laid.ops.push(ops::text(
                 x + indent,
-                y + (BODY_LINE + BODY * 0.74) / 2.0,
+                y + (body_line() + body() * 0.74) / 2.0,
                 shown,
                 Weight::Mono,
-                BODY,
+                body(),
                 p.accent,
             ));
-            let lines = wrap(spans, (width - indent - marker_w).max(BODY * 4.0), BODY);
+            let lines = wrap(spans, (width - indent - marker_w).max(body() * 4.0), body());
             y += push_lines_linked(
                 laid,
                 &lines,
                 x + indent + marker_w,
                 y,
-                BODY,
-                BODY_LINE,
+                body(),
+                body_line(),
                 None,
             );
         }
         MdBlock::Quote(spans) => {
-            let lines = wrap(spans, width - QUOTE_INDENT, BODY);
+            let lines = wrap(spans, width - QUOTE_INDENT, body());
             let h = push_lines_linked(
                 laid,
                 &lines,
                 x + QUOTE_INDENT,
                 y,
-                BODY,
-                BODY_LINE,
+                body(),
+                body_line(),
                 Some(c.text_quote),
             );
             laid.ops
@@ -527,8 +531,8 @@ fn block_into(
         }
         // Over the caps (PAR-134): the start, and the whole in the reader.
         MdBlock::Long { preview, full } => {
-            let lines = wrap(&plain(&format!("{preview}…")), width, BODY);
-            y += push_lines(&mut laid.ops, &lines, x, y, BODY, BODY_LINE, None, 1.0);
+            let lines = wrap(&plain(&format!("{preview}…")), width, body());
+            y += push_lines(&mut laid.ops, &lines, x, y, body(), body_line(), None, 1.0);
             let label = format!(
                 "Read full paragraph ({} characters)",
                 group_digits(full.chars().count())
@@ -576,7 +580,7 @@ fn block_into(
 /// "Copy LaTeX" under it. Returns the bottom.
 fn lay_display_math(laid: &mut Laid, tex: &str, x: f32, width: f32, top: f32) -> f32 {
     let p = theme::p();
-    let size = BODY;
+    let size = body();
     let line_h = (size * 1.2).round();
     let cell = text::measure("M", Weight::Mono, size).max(1.0);
     let columns = (width / cell).floor().max(8.0) as usize;

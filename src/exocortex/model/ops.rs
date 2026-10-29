@@ -1839,6 +1839,22 @@ mod tests {
     }
 
     #[test]
+    fn text_size_scales_the_transcript_too() {
+        use super::super::super::view::markdown_layout::lay_markdown;
+        let paragraph = || lay_markdown(&mut Vec::new(), "A paragraph.", 0.0, 900.0, 0.0);
+        let mut model = ready();
+        let default = paragraph();
+        let before = theme::generation();
+        model.handle(Action::Ops(Act::TextSize(TEXT_SIZES.len() - 1)));
+        assert_eq!(model.persist.settings().text_scale, 1.36);
+        assert_eq!(text_step(theme::text_scale()), TEXT_SIZES.len() - 1);
+        assert_ne!(theme::generation(), before, "layouts are made again");
+        assert!(paragraph() > default * 1.3);
+        model.handle(Action::Ops(Act::TextSize(2)));
+        assert_eq!(paragraph(), default);
+    }
+
+    #[test]
     fn daemon_defaults_are_confirmed_only_by_their_own_answer() {
         let mut model = ready();
         model.handle(Action::Nav(Nav::NewConversation));
