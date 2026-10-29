@@ -1299,9 +1299,9 @@ fn draw_no_results(canvas: &mut Canvas, area: RectF) {
     let p = theme::p();
     let area = RectF::new(
         area.x,
-        area.y + theme::HEADER_ROW,
+        area.y + theme::header_row(),
         area.w,
-        area.h - theme::HEADER_ROW,
+        area.h - theme::header_row(),
     );
     let cy = (area.y + area.h * 0.4).round();
     icons::draw(

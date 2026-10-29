@@ -1102,8 +1102,10 @@ impl Model {
                     .effect(Effect::ShowKeyboard(KeyboardPurpose::Search));
                 self.sidebar.changed();
             }
+            // Clears and gives up the keyboard, as the iPhone's ✕ does.
             Act::ClearSearch => {
                 self.sidebar.search.clear();
+                self.unfocus_search();
                 self.sidebar.searched();
             }
             Act::Key(KeyInput::Enter) => {
