@@ -98,6 +98,8 @@ pub struct ViewState {
     generation: u64,
     /// Phase of the "working" dots.
     pub dots: u8,
+    /// The transcript's own (C2): the jump button's fade, its bounds.
+    pub transcript: transcript::TranscriptView,
 }
 
 /// A hash of an action (for frame keys; actions carry rects, which do not
@@ -219,6 +221,9 @@ pub fn animate(model: &Model, view: &mut ViewState, now: Instant) {
         Page::Chat => {
             chat_header::animate(model, now, &mut view.animator);
             composer::animate(model, view.keyboard, now, &mut view.animator);
+            let mut animator = std::mem::take(&mut view.animator);
+            transcript::animate(model, view, now, &mut animator);
+            view.animator = animator;
         }
         Page::List => list::animate(model, now, &mut view.animator),
         Page::Settings => settings::animate(model, now, &mut view.animator),
@@ -235,8 +240,8 @@ pub struct ChatFrame {
     height: i32,
     offset: f32,
     items: Vec<(f32, Rc<Laid>)>,
-    /// The working dots' phase and their center in content coordinates.
-    dots: Option<(u8, f32)>,
+    /// The transcript's marks and jump button (C2).
+    transcript: transcript::TranscriptFrame,
     pressed: Option<Action>,
     header: u64,
     composer: u64,
@@ -250,7 +255,7 @@ impl ChatFrame {
         self.bounds == other.bounds
             && self.height == other.height
             && self.offset == other.offset
-            && self.dots == other.dots
+            && self.transcript == other.transcript
             && self.pressed == other.pressed
             && self.header == other.header
             && self.composer == other.composer
@@ -274,25 +279,30 @@ pub fn chat_frame(
     height: f32,
     now: Instant,
 ) -> Option<ChatFrame> {
-    if model.page != Page::Chat || model.offline || !model.chat.loaded || model.chat.id.is_none() {
+    if model.page != Page::Chat
+        || model.offline
+        || !model.chat.loaded
+        || model.chat.id.is_none()
+        || transcript::stateful(model)
+    {
         return None;
     }
     view.layout(model);
     let (top, bottom) = transcript_bounds(model, height, view.keyboard);
     let pressed = pressed_action(pressed).cloned();
+    let offset = view.chat_scroll.value(now).round();
+    let transcript = transcript::frame(model, view, (top, bottom), offset, now);
     Some(ChatFrame {
         bounds: (top as i32, bottom as i32),
         height: height as i32,
-        offset: view.chat_scroll.value(now).round(),
+        offset,
         items: view
             .layout
             .items
             .iter()
             .map(|item| (item.y, item.laid.clone()))
             .collect(),
-        dots: model
-            .streaming()
-            .then_some((view.dots % 3, view.layout.height - 34.0)),
+        transcript,
         header: chat_header::frame_key(model, pressed.as_ref(), now),
         composer: composer::frame_key(model, view.keyboard, pressed.as_ref(), now),
         scrolls: view
@@ -363,8 +373,11 @@ pub fn draw_chat_update(
     if shift.abs() > (bottom - top) / 2 {
         return None;
     }
-    // Content (in transcript coordinates) from which the frames differ.
+    // Content (in transcript coordinates) from which the frames differ;
+    // a piece that changed in place (same top, same height) is only its
+    // own rows.
     let mut change = f32::INFINITY;
+    let mut pieces: Vec<(f32, f32)> = Vec::new();
     for index in 0..old.items.len().max(new.items.len()) {
         match (old.items.get(index), new.items.get(index)) {
             (Some((old_y, old_laid)), Some((new_y, new_laid))) if old_y == new_y => {
@@ -372,6 +385,11 @@ pub fn draw_chat_update(
                     continue;
                 }
                 if let Some(at) = first_change(old_laid, new_laid) {
+                    if old_laid.h == new_laid.h {
+                        let to = old_laid.ink.1.max(new_laid.ink.1);
+                        pieces.push((new_y + at, new_y + to));
+                        continue;
+                    }
                     change = new_y + at;
                     break;
                 }
@@ -386,13 +404,21 @@ pub fn draw_chat_update(
             }
         }
     }
-    if old.dots != new.dots {
-        for (_, y) in old.dots.iter().chain(&new.dots) {
-            change = change.min(y - 16.0);
-        }
-    }
     let mut damage = FrameDamage::default();
     let mut redraw: Vec<(i32, i32)> = Vec::new();
+    for (y0, y1) in pieces {
+        let from = (CHAT_TOP + y0 - new.offset).floor() as i32;
+        let to = (CHAT_TOP + y1 - new.offset).ceil() as i32;
+        if to > top && from < bottom {
+            redraw.push((from.max(top), to.min(bottom)));
+        }
+    }
+    redraw.extend(transcript::mark_damage(
+        &old.transcript,
+        &new.transcript,
+        new.offset,
+        (top, bottom),
+    ));
     if shift != 0 {
         let width = canvas.width as usize;
         if shift > 0 {
@@ -450,19 +476,38 @@ pub fn draw_chat_update(
         }
     }
     let merged = frame::merge(redraw);
-    let background = theme::p().app_background;
-    for &(y0, y1) in &merged {
-        canvas.fill_rect(0, y0, W as i32, y1 - y0, background, 1.0);
-        draw_transcript(
+    for &rows in &merged {
+        transcript::draw_band(
             canvas,
             model,
             view,
             new.pressed.as_ref(),
-            (y0 as f32, y1 as f32),
+            rows,
+            0,
             new.offset,
+            now,
         );
     }
     damage.rows = merged;
+    // The jump button floats: the rows under it in its columns.
+    if let Some((y0, y1)) =
+        transcript::jump_damage(&old.transcript, &new.transcript, shift, (top, bottom))
+    {
+        let rest = transcript::subtract_rows((y0, y1), &damage.rows);
+        for &rows in &rest {
+            transcript::draw_band(
+                canvas,
+                model,
+                view,
+                new.pressed.as_ref(),
+                rows,
+                transcript::jump_columns(),
+                new.offset,
+                now,
+            );
+        }
+        damage.rows = frame::merge(damage.rows.iter().copied().chain(rest).collect());
+    }
     if old.header != new.header || header_pressed {
         chat_header::draw(canvas, model, new.pressed.as_ref(), now);
         damage.rows.push(widgets::TOP_BAR_ROWS);
@@ -496,26 +541,21 @@ fn draw_chat(
     // Whole pixels, so a scrolled frame equals a shifted one.
     let offset = view.chat_scroll.value(now).round();
     let pressed_action = pressed_action(pressed).cloned();
-    draw_transcript(
-        canvas,
-        model,
-        view,
-        pressed_action.as_ref(),
-        (top, bottom),
-        offset,
-    );
     widgets::clipped(canvas, RectF::new(0.0, top, W, bottom - top), |canvas| {
-        if !model.chat.loaded && model.chat.id.is_some() {
-            widgets::empty_state(
-                canvas,
-                RectF::new(0.0, top, W, bottom - top),
-                "",
-                "Loading…",
-                None,
-                p.app_background,
-            );
+        if transcript::stateful(model) {
+            transcript::draw_state(canvas, model, (top, bottom), pressed_action.as_ref(), now);
         } else if model.chat.id.is_none() && model.chat.echoes.is_empty() {
             new_chat_state(canvas, model, (top, bottom), pressed_action.as_ref());
+        } else {
+            draw_transcript(
+                canvas,
+                model,
+                view,
+                pressed_action.as_ref(),
+                (top, bottom),
+                offset,
+                now,
+            );
         }
     });
     chat_header::draw(canvas, model, pressed_action.as_ref(), now);
@@ -646,24 +686,16 @@ pub fn hit(
             {
                 return Some(Hit::Action(Action::Ops(ops_model::Act::OpenInspector)));
             }
-            view.layout(model);
-            let offset = view.chat_scroll.value(now);
-            for item in &view.layout.items {
-                let iy = top + item.y - offset;
-                if y < iy || y >= iy + item.laid.h {
-                    continue;
-                }
-                for (rect, action) in &item.laid.hits {
-                    if y >= iy + rect.y
-                        && y < iy + rect.y + rect.h
-                        && x >= rect.x
-                        && x < rect.x + rect.w
-                    {
-                        return Some(Hit::Action(action.clone()));
-                    }
-                }
+            if transcript::stateful(model) {
+                return Some(
+                    transcript::state_hit(model, (top, bottom), x, y)
+                        .map_or(Hit::Transcript, Hit::Action),
+                );
             }
-            Some(Hit::Transcript)
+            Some(
+                transcript::hit(view, model, (top, bottom), x, y, now)
+                    .map_or(Hit::Transcript, Hit::Action),
+            )
         }
     }
 }
@@ -686,7 +718,7 @@ pub fn liftable(
 /// What a long press at (`x`, `y`) does (a list row's menu), if anything.
 pub fn long_press(
     model: &mut Model,
-    view: &ViewState,
+    view: &mut ViewState,
     height: f32,
     x: f32,
     y: f32,
@@ -694,7 +726,10 @@ pub fn long_press(
 ) -> Option<Action> {
     match model.page {
         Page::List => list::long_press(model, view, height, x, y, now),
-        Page::Chat => composer::long_press(model, height, view.keyboard, x, y),
+        Page::Chat => composer::long_press(model, height, view.keyboard, x, y).or_else(|| {
+            let bounds = transcript_bounds(model, height, view.keyboard);
+            transcript::long_press(model, view, bounds, y, now)
+        }),
         Page::Settings => None,
     }
 }
@@ -927,15 +962,16 @@ mod tests {
         let mut view = ViewState::default();
         view.layout(&model);
         let height = 2216.0;
-        // A bubble, then one folded row for four calls, then the text.
-        let group = view.layout.items[1].laid.hits.clone();
+        // The history's edge, a bubble, then one folded row for four calls,
+        // then the text.
+        let group = view.layout.items[2].laid.hits.clone();
         assert_eq!(group.len(), 1);
         assert_eq!(
             group[0].1,
             Action::Chat(chat::Act::ToggleExpanded("group:t0".into()))
         );
         let (top, _) = transcript_bounds(&model, height, false);
-        let y = top + view.layout.items[1].y + group[0].0.y + 10.0;
+        let y = top + view.layout.items[2].y + group[0].0.y + 10.0;
         let hit_action = hit(&mut model, &mut view, height, 300, y as i16, now);
         assert_eq!(
             hit_action,
@@ -944,13 +980,13 @@ mod tests {
             ))))
         );
         // The reply's pieces: the folded row, then the text.
-        assert_eq!(view.layout.items.len(), 3);
+        assert_eq!(view.layout.items.len(), 4);
         let before = view.layout.height;
-        let text = view.layout.items[2].laid.clone();
+        let text = view.layout.items[3].laid.clone();
         model.handle(Action::Chat(chat::Act::ToggleExpanded("group:t0".into())));
         view.layout(&model);
         // Opened: the row, a row per call, and the same text piece below.
-        let hits: Vec<&Action> = view.layout.items[1..]
+        let hits: Vec<&Action> = view.layout.items[2..]
             .iter()
             .flat_map(|item| item.laid.hits.iter().map(|(_, action)| action))
             .collect();
@@ -960,7 +996,7 @@ mod tests {
             &Action::Chat(chat::Act::ToggleExpanded("tool:t0".into()))
         );
         assert!(view.layout.height > before + 3.0 * TOOL_ROW);
-        assert!(Rc::ptr_eq(&view.layout.items[6].laid, &text));
+        assert!(Rc::ptr_eq(&view.layout.items[7].laid, &text));
         // The composer and send button are hit; the transcript elsewhere.
         let geometry = composer::geometry(&model, height, false);
         assert_eq!(
@@ -1014,7 +1050,8 @@ mod tests {
         view.layout(&model);
         let after: Vec<Rc<Laid>> = view.layout.items.iter().map(|i| i.laid.clone()).collect();
         assert_eq!(before.len(), after.len());
-        let last = after.len() - 1;
+        // The growing paragraph, then the live footer's row.
+        let last = after.len() - 2;
         // Everything but the growing paragraph is the same piece.
         for (index, (old, new)) in before.iter().zip(&after).enumerate() {
             assert_eq!(Rc::ptr_eq(old, new), index != last, "piece {index}");
@@ -1026,7 +1063,16 @@ mod tests {
         );
         view.layout(&model);
         let committed: Vec<Rc<Laid>> = view.layout.items.iter().map(|i| i.laid.clone()).collect();
-        assert!(after.iter().zip(&committed).all(|(a, b)| Rc::ptr_eq(a, b)));
+        // (The footer's row stays, its line now the finish clock.)
+        assert_eq!(after.len(), committed.len());
+        let rows = after.len() - 1;
+        assert!(
+            after[..rows]
+                .iter()
+                .zip(&committed[..rows])
+                .all(|(a, b)| Rc::ptr_eq(a, b))
+        );
+        assert_eq!(after[rows].h, committed[rows].h);
     }
 
     #[test]
@@ -1095,9 +1141,9 @@ mod tests {
         let mut view = ViewState::new();
         view.layout(&model);
         // The reply's text, after its folded run of calls, at the top.
-        let text = view.layout.items[2].laid.clone();
+        let text = view.layout.items[3].laid.clone();
         view.follow = false;
-        view.chat_scroll.offset = view.layout.items[2].y;
+        view.chat_scroll.offset = view.layout.items[3].y;
         let before = view.before(&model, now);
         model.handle(Action::Chat(chat::Act::ToggleExpanded("group:t0".into())));
         view.settle(&model, before, 900.0, now);
@@ -1244,8 +1290,14 @@ mod tests {
                 view.chat_scroll.offset = to;
             });
             assert!(damage.moved.is_some());
+            // The uncovered strip, and the jump button's rows (in its
+            // columns) as the transcript moves under it.
+            let jump = 122 + 44 + 55 + 2 * 60;
             let redrawn: i32 = damage.rows.iter().map(|(a, b)| b - a).sum();
-            assert!(redrawn <= 200, "only the uncovered strip: {damage:?}");
+            assert!(
+                redrawn <= 200 + jump,
+                "only the uncovered strip: {damage:?}"
+            );
         }
         // Unchanged: nothing to draw.
         let damage = update_matches(&mut model, &mut view, height, |_, _| {});

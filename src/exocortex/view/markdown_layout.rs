@@ -16,8 +16,8 @@ use super::super::math;
 use super::super::model::rich::Rich;
 use super::super::model::{Action, UiAct, rich};
 use super::super::theme::{
-    self, HAIRLINE, LIST_INDENT, MARKDOWN_GAP, MARKER_GAP, QUOTE_BAR, QUOTE_INDENT, T_BODY,
-    T_CAPTION, T_CODE, T_H1, T_H2, T_H3, T_H4, T_INLINE_CODE, T_SMALL, TARGET,
+    self, HAIRLINE, LIST_INDENT, MARKDOWN_GAP, MARKER_GAP, QUOTE_BAR, QUOTE_INDENT, T_BODY, T_H1,
+    T_H2, T_H3, T_H4, T_INLINE_CODE, T_SMALL, TARGET,
 };
 use super::code;
 use super::ops::{self, Laid, Op};
@@ -26,10 +26,10 @@ use super::table;
 // Text.
 pub(crate) const BODY: f32 = 40.0;
 pub(crate) const BODY_LINE: f32 = 60.0;
-pub(crate) const CODE: f32 = 34.0;
-pub(crate) const CODE_LINE: f32 = 52.0;
 /// Tool lines, notices.
+#[allow(dead_code)]
 pub(crate) const SMALL: f32 = 34.0;
+#[allow(dead_code)]
 pub(crate) const SMALL_LINE: f32 = 48.0;
 pub(crate) const PARAGRAPH_GAP: f32 = MARKDOWN_GAP;
 
@@ -693,65 +693,4 @@ fn grid_text(
         column += 1;
     }
     flush(ops, &mut run, run_start);
-}
-
-/// Monospaced lines in a box (code, a tool's input or output), broken at
-/// the box's width (code is never reflowed by words). At most
-/// `max_lines`, then a count of the rest.
-pub(crate) fn lay_code(
-    ops: &mut Vec<Op>,
-    lines: &[String],
-    x: f32,
-    width: f32,
-    top: f32,
-    background: Rgb,
-    max_lines: usize,
-) -> f32 {
-    let p = theme::p();
-    let c = theme::c();
-    let (pad_y, pad_x) = (28.0, 34.0);
-    let advance = text::measure("M", Weight::Mono, CODE).max(1.0);
-    let columns = (((width - 2.0 * pad_x) / advance).floor() as usize).max(8);
-    let mut rows: Vec<String> = Vec::new();
-    for line in lines {
-        let characters: Vec<char> = line.chars().collect();
-        if characters.is_empty() {
-            rows.push(String::new());
-        }
-        for chunk in characters.chunks(columns) {
-            rows.push(chunk.iter().collect());
-        }
-    }
-    let hidden = rows.len().saturating_sub(max_lines);
-    if hidden > 0 {
-        rows.truncate(max_lines);
-        rows.push(format!("… {hidden} more lines"));
-    }
-    let h = rows.len().max(1) as f32 * CODE_LINE + 2.0 * pad_y;
-    ops.push(ops::rect(RectF::new(x, top, width, h), background));
-    ops.push(Op::Border {
-        rect: RectF::new(x, top, width, h),
-        width: HAIRLINE,
-        color: c.rule_code,
-    });
-    for (index, row) in rows.iter().enumerate() {
-        if row.is_empty() {
-            continue;
-        }
-        let muted = hidden > 0 && index == rows.len() - 1;
-        let (size, color) = if muted {
-            (T_CAPTION.px(), p.muted)
-        } else {
-            (T_CODE.px(), p.text)
-        };
-        ops.push(ops::text(
-            x + pad_x,
-            top + pad_y + index as f32 * CODE_LINE + (CODE_LINE + size * 0.74) / 2.0,
-            row.clone(),
-            Weight::Mono,
-            size,
-            color,
-        ));
-    }
-    h
 }

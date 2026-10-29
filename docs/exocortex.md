@@ -44,7 +44,7 @@ lands), and scrolling up asks for the older page again.
 | The queue | a queued bubble tapped: Edit in composer, Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it) |
 | Stop | `abort` with the stream's `expectedStartedAt`; a spinner until `ack`, `streaming_stopped` or `message_complete`; a second press says it is already stopping |
 | The model inspector | `tools_available`'s providers, models, efforts and speeds, and `conversationDefaults` (or `conversation_defaults`); Apply sends `set_model`, `set_effort`, `set_fast_mode` for what changed; a draft changes nothing on the wire until its first message |
-| A tool row opened | `load_tool_outputs` for that call (history leaves outputs out) |
+| Tool outputs | `load_tool_outputs` for a row opened, and for rows within a screen of what shows (six at a time, one request in flight; history leaves outputs out); one that does not come says so ("no longer available", "timed out") and a tap asks again |
 
 The app has three pages, left to right as on the iPhone: Settings, the
 list, a conversation. Back (the top bar's chevron, Moon's Back, a swipe from
@@ -66,10 +66,27 @@ nothing, so each is followed by a `ping` with its reqId: the daemon handles a
 client's commands in order, so a change the list does not show by the `pong`
 was not made, and the app says so and asks for the list again.
 
-Tool calls show as one row each (label as the TUI styles it, summary, ERR
-when it failed); a run of three or more folds into one row ("7 tool calls ·
-$, Read"). Thinking shows as a folded row. Replies are markdown
-(`src/exocortex/markdown.rs`, GFM as the iPhone renders it): headings in
+The transcript is the iPhone's (roadmap §3.6.6–3.6.14, `fake-02…08`): the
+user's bubbles right-aligned with an accent rail (sent ones not yet echoed
+at 86 %, queued ones at 58 % with "queued: next turn"); automated prompts
+folded into a row ("CHRONO  Chrono wake: …") that opens to the automated
+bubble with "⚙ Chrono · from …" under it (a parent's delegation is shown as
+that bubble); replies as markdown (`src/exocortex/markdown.rs`); thinking
+boxes ("THINKING", OPEN for the reader; Settings' Expand thinking opens
+them); a tool row per call in its tool's colour (label and summary, three
+lines folded, ERR and ✗ when it failed, a spinner while it runs; opened,
+Read full output, Copy and a 6000-byte preview); a run of three or more
+calls folds into one row ("4 TOOL CALLS  $, Read"); system notices as
+coloured boxes (three lines, open to all of it and Copy), the compaction
+divider, `[Context:` text dim, model-only notices not at all; one metadata
+footer per run of replies (`OPUS-5.5 | 76.2 TOK/S | 2:03PM`, `footer.rs`,
+model names from `model_display.rs`), a tap on it or a long press on a
+message opens Copy message / Edit in composer / Read in full. The live
+reply shows WORKING until it shows something, the retry, compaction and
+connection-wait lines, and a footer whose duration ticks. A jump-to-latest
+button shows more than 120 pt from the end once the transcript is still.
+
+The replies' markdown (`src/exocortex/markdown.rs`, GFM as the iPhone renders it): headings in
 the accent colours, paragraphs (a newline is a line break), bullet,
 numbered and task lists nested to 12 levels, quotes, rules, fenced (``` and
 ~~~) and indented code, tables, with bold, italic, strikethrough, inline
@@ -79,8 +96,8 @@ sideways, and over 8000 characters shows a preview. A table is a grid
 (header row, cells wrapped and aligned per its delimiter row, at most 12
 columns) that scrolls sideways when wide; over 10 rows it is at most 997 px
 tall and its rows scroll inside it under the header; "Open full response"
-opens the reply in the reader. Automated prompts (subagent reports,
-notifications) are one gray line.
+opens the reply in the reader.
+
 
 Images a model attached (the `attach` tool) show after its message, and
 the user's pasted images under their bubble: thumbnails fitted in 465 px
@@ -143,8 +160,13 @@ are discarded.
   up to 150 ms) shows its messages. The daemon is asked before Moon is asked
   to snapshot the page.
 - **Entries have stamps.** Every history entry has a stamp (`Chat::stamps`)
-  that changes only when the entry does: a window that resends an entry
-  unchanged keeps its stamp. The view caches an entry's plan by stamp.
+  that changes only when what it shows does: a window that resends an entry
+  unchanged keeps its stamp (a reply's metadata alone does not change it).
+  The view caches an entry's plan by stamp. The live reply has a stamp too,
+  and the entry it is committed into keeps it, through completion and the
+  daemon's copy: one identity per turn, so the reader's place and the pieces
+  on screen survive (an injected message splits the reply: the part so far
+  is committed, and the rest goes on under a new stamp).
 - **Pieces.** The transcript is laid out as pieces: a markdown block, a tool
   or thinking row (an opened run of tool calls is a row per call), a bubble,
   a notice. Each is cached by a hash of what it shows (`ViewState::pieces`),
@@ -154,6 +176,15 @@ are discarded.
   are visited. The reader's place, when not following the newest message, is
   a piece (entry stamp and index) and its distance from the top; it is kept
   when anything changes above it (older history, a fresh window).
+  Following resumes within 12 pt of the end.
+- **Marks.** What changes with time inside a piece (a spinner, the WORKING
+  shimmer, the live footer's clock and rate, a status line's clock) is a
+  mark (`blocks::Mark`): placed with its piece, keyed per frame
+  (`transcript::TranscriptFrame`) and drawn again alone, so a second ticking
+  costs its own line of rows and no layout pass. The jump button is drawn
+  over the transcript in its own columns; it steps aside while the
+  transcript moves (a floating button over moving rows would cost its rows
+  in every frame of a scroll) and fades back in once it is still.
 - **The list's rows.** The rows (`sidebar::Layout`) are rebuilt only when
   rows may come, go or move (a pin, a sort order, a folder opened, the
   search), and folder activity is added up once per change
