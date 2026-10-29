@@ -28,7 +28,7 @@ pub struct FrameDamage {
     pub rows: Vec<(i32, i32)>,
     /// Areas (`x0, y0, x1, y1`) drawn anew only in their columns, the rest
     /// of their rows untouched (a floating button over moved rows; for
-    /// `Presenter::present_areas`).
+    /// `Presenter::present_rows_and_areas`).
     pub areas: Vec<(i32, i32, i32, i32)>,
 }
 

@@ -1306,12 +1306,13 @@ fn draw_frame(
                 renderer.presenter.scroll(conn, y0, y1, dy)?;
             }
             let drawn = started.elapsed();
-            renderer
-                .presenter
-                .present_rows(conn, &renderer.canvas, 0, &damage.rows)?;
-            renderer
-                .presenter
-                .present_areas(conn, &renderer.canvas, 0, &damage.areas)?;
+            renderer.presenter.present_rows_and_areas(
+                conn,
+                &renderer.canvas,
+                0,
+                &damage.rows,
+                &damage.areas,
+            )?;
             if env_flag("EXOCORTEX_APP_VERIFY") {
                 verify(&renderer.canvas, model, view, pressed, now, &damage);
             }

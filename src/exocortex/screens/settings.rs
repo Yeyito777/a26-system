@@ -109,6 +109,11 @@ impl Row {
     }
 }
 
+/// A card summary's line at the current text size.
+fn summary_line() -> f32 {
+    (SUMMARY_LINE * theme::text_scale()).round()
+}
+
 /// A theme card's width (three to a row).
 fn card_width() -> f32 {
     ((width() - 2.0 * CARD_GAP) / 3.0).floor()
@@ -127,7 +132,7 @@ fn card_height() -> f32 {
         .max()
         .unwrap_or(1);
     let name = T_NOTE.line();
-    (CARD_PAD + SWATCH + SWATCH_GAP + name + SWATCH_GAP + lines as f32 * SUMMARY_LINE + CARD_PAD)
+    (CARD_PAD + SWATCH + SWATCH_GAP + name + SWATCH_GAP + lines as f32 * summary_line() + CARD_PAD)
         .round()
 }
 
@@ -789,12 +794,13 @@ fn theme_card(canvas: &mut Canvas, theme: &Theme, rect: RectF, current: bool, pr
         );
     }
     y += name.line() + SWATCH_GAP;
-    for (index, line) in summary_lines(theme).iter().enumerate() {
+    let line = summary_line();
+    for (index, text) in summary_lines(theme).iter().enumerate() {
         widgets::text(
             canvas,
-            line,
+            text,
             x,
-            T_META.baseline(y + index as f32 * SUMMARY_LINE - (T_META.line() - SUMMARY_LINE) / 2.0),
+            T_META.baseline(y + index as f32 * line - (T_META.line() - line) / 2.0),
             T_META.weight(Weight::Mono),
             t.muted,
             1.0,

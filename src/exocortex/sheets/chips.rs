@@ -29,9 +29,11 @@ const GAP: f32 = 14.0;
 /// The usage chip's bars.
 const BAR_W: f32 = 78.0;
 const BAR_H: f32 = 8.0;
-/// The shadow's blur and its drop.
-const SHADOW: f32 = 39.0;
-const SHADOW_DY: f32 = 11.0;
+/// The shadow's blur and its drop: compact, as the jump button's (the
+/// iPhone's 14 pt blur barely shows on the dark themes, and every row and
+/// column it reaches is drawn and sent again on every frame of a scroll).
+const SHADOW: f32 = 14.0;
+const SHADOW_DY: f32 = 5.0;
 
 /// What a chip shows.
 #[derive(Debug, Clone, PartialEq)]
