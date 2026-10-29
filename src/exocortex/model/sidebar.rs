@@ -63,6 +63,10 @@ pub enum Instructions {
     Failed(String),
 }
 
+/// How long the list counts as in use after it was last shown, touched,
+/// scrolled or typed into.
+pub const IN_USE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Select mode's bar under the rows (PAR-077): the count, then Move, Pin,
 /// Group and Delete.
 pub const SELECT_BAR: f32 = 200.0;
@@ -319,6 +323,13 @@ pub struct Sidebar {
     pub tree_scroll: Option<f32>,
     /// The folder opened or closed last, and when (its chevron turns).
     pub toggled: Option<(String, Instant)>,
+    /// Until when the list counts as in use (shown, touched, scrolled,
+    /// typed into): streaming dots pulse only then, so a list nobody
+    /// touches draws nothing (battery).
+    pub in_use_until: Option<Instant>,
+    /// The scroll offset the last pass saw, and whether the list showed:
+    /// what says it moved or came up.
+    pub seen: Option<f32>,
     layout: Option<((u64, String, u64), Rc<Layout>)>,
     aggregates: Option<(u64, Rc<Aggregates>)>,
 }
@@ -806,6 +817,16 @@ impl Sidebar {
         false
     }
 
+    /// The list is in use: its dots pulse for a while.
+    pub fn touch_list(&mut self, now: Instant) {
+        self.in_use_until = Some(now + IN_USE);
+    }
+
+    /// Whether the dots pulse at `now`.
+    pub fn pulsing_now(&self, now: Instant) -> bool {
+        self.in_use_until.is_some_and(|until| now < until)
+    }
+
     /// The wall clock (ms since the epoch) at `now`.
     pub fn wall_ms(&mut self, now: Instant) -> f64 {
         let (at, ms) = *self.clock.get_or_insert_with(|| (now, super::now_ms()));
@@ -1113,6 +1134,7 @@ impl Model {
                 self.sidebar.changed();
             }
             Act::Key(input) => {
+                self.sidebar.touch_list(now);
                 if self.sidebar.search.key(input, now) {
                     self.sidebar.changed();
                 }
