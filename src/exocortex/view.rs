@@ -824,31 +824,27 @@ fn plan_blocks(blocks: &[Block]) -> Plan {
                         let Block::ToolCall {
                             tool_call_id,
                             tool_name,
-                            input,
                             summary,
+                            ..
                         } = &blocks[call]
                         else {
                             return None;
                         };
                         let result = results.get(tool_call_id.as_str()).copied();
+                        // A call's input and result never change once sent (a
+                        // live reply's plan is made on every pass: neither is
+                        // hashed whole).
                         let outcome = result.and_then(|at| match &blocks[at] {
                             Block::ToolResult {
                                 output, is_error, ..
-                            } => Some((output, is_error)),
+                            } => Some((output.len(), is_error)),
                             _ => None,
                         });
                         Some(ToolRef {
                             call,
                             result,
                             key: format!("tool:{tool_call_id}"),
-                            hash: hash_of((
-                                "tool",
-                                tool_call_id,
-                                tool_name,
-                                summary,
-                                input.to_string(),
-                                outcome,
-                            )),
+                            hash: hash_of(("tool", tool_call_id, tool_name, summary, outcome)),
                         })
                     })
                     .collect();
@@ -1335,7 +1331,7 @@ impl ViewState {
                         // Opened, it shows the output fetched for it.
                         let fetched = open.then(|| {
                             (
-                                context.chat.outputs.get(id),
+                                context.chat.outputs.get(id).map(String::len),
                                 context.chat.outputs_requested.contains(id),
                             )
                         });
