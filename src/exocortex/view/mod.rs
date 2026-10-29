@@ -851,18 +851,12 @@ mod tests {
     #[test]
     fn wrapping_fits_width_breaks_lines_and_long_words() {
         let spans = vec![
-            Span {
-                text: "Hello world, this is ".into(),
-                style: Style::Plain,
-            },
-            Span {
-                text: "bold".into(),
-                style: Style::Bold,
-            },
-            Span {
-                text: " text that wraps across several lines\nand breaks".into(),
-                style: Style::Plain,
-            },
+            Span::new("Hello world, this is ", Style::Plain),
+            Span::new("bold", Style::Bold),
+            Span::new(
+                " text that wraps across several lines\nand breaks",
+                Style::Plain,
+            ),
         ];
         let lines = wrap(&spans, 400.0, BODY);
         assert!(lines.len() >= 4);
@@ -1469,7 +1463,7 @@ mod tests {
             .map(|i| format!("| r{i} | {i} | wide cell {i} |\\n"))
             .collect();
         let text = format!(
-            "Intro.\\n\\n```rust\\nfn main() {{ let x = 1; }} // {}\\nmore\\n```\\n\\n| a | b | c |\\n|--|--:|:-:|\\n| one | 1 | x |\\n\\n| tall | n | w |\\n|---|---|---|\\n{rows}\\nEnd.",
+            "Intro $x^2$ and [a link](https://a.b).\\n\\n$$\\\\sum_{{k=1}}^{{n}} k = \\\\frac{{n(n+1)}}{{2}}$$\\n\\n```rust\\nfn main() {{ let x = 1; }} // {}\\nmore\\n```\\n\\n| a | b | c |\\n|--|--:|:-:|\\n| one | 1 | x |\\n\\n| tall | n | w |\\n|---|---|---|\\n{rows}\\nEnd.",
             "a long trailing comment ".repeat(4)
         );
         let image = r#"{"type":"tool_call","toolCallId":"a1","toolName":"attach","input":{},"summary":"shot.png"},{"type":"tool_result","toolCallId":"a1","toolName":"","output":"","isError":false,"images":[{"id":"img","mediaType":"image/png","width":200,"height":100,"sizeBytes":10}]}"#;

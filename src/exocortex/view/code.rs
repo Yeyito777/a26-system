@@ -8,11 +8,15 @@
 use crate::gfx::RectF;
 use crate::text::{self, Weight};
 
+use super::super::highlight::{self, Token};
 use super::super::images::hash_of;
 use super::super::model::{Action, UiAct, rich};
 use super::super::theme::{self, HAIRLINE, T_CODE, T_EYEBROW, T_SMALL, TARGET};
 use super::super::ui::widgets;
 use super::ops::{self, Laid, Op};
+
+/// A row's coloured spans: character ranges and their classes.
+type Spans = Vec<(usize, usize, Token)>;
 
 /// The code shown before "Preview · …" (the iPhone's).
 pub const PREVIEW_CHARS: usize = 8000;
@@ -52,22 +56,34 @@ pub fn lay(
     let size = T_CODE.px();
     let line_h = T_CODE.line();
     let advance = text::measure("M", Weight::Mono, size).max(1.0);
-    let rows: Vec<String> = if wrapped {
-        let columns = (((width - 2.0 * PAD.1) / advance).floor() as usize).max(8);
-        let mut rows = Vec::new();
-        for line in &shown {
-            let characters: Vec<char> = line.chars().collect();
-            if characters.is_empty() {
-                rows.push(String::new());
-            }
-            for chunk in characters.chunks(columns) {
-                rows.push(chunk.iter().collect());
-            }
-        }
-        rows
+    // Each row: its characters and their colours (as the TUI colours code).
+    let columns = if wrapped {
+        (((width - 2.0 * PAD.1) / advance).floor() as usize).max(8)
     } else {
-        shown
+        usize::MAX
     };
+    let mut rows: Vec<(Vec<char>, Spans)> = Vec::new();
+    for line in &shown {
+        let characters: Vec<char> = line.chars().collect();
+        let spans = highlight::highlight_cached(line, lang);
+        if characters.is_empty() {
+            rows.push((Vec::new(), Vec::new()));
+        }
+        let mut start = 0;
+        while start < characters.len() {
+            let end = characters.len().min(start.saturating_add(columns));
+            let row_spans = match &spans {
+                Some(spans) => spans
+                    .iter()
+                    .filter(|(a, b, _)| *b > start && *a < end)
+                    .map(|(a, b, token)| ((*a).max(start) - start, (*b).min(end) - start, *token))
+                    .collect(),
+                None => vec![(0, end - start, Token::Default)],
+            };
+            rows.push((characters[start..end].to_vec(), row_spans));
+            start = end;
+        }
+    }
     let rows_h = rows.len().max(1) as f32 * line_h;
     let note_h = if cut { T_SMALL.line() + 8.0 } else { 0.0 };
     let body_top = top + HEAD + HAIRLINE;
@@ -133,22 +149,47 @@ pub fn lay(
     ));
 
     // The code.
+    let syntax = p.syntax;
     let mut text_ops = Vec::with_capacity(rows.len());
     let mut widest = 0.0_f32;
-    for (index, row) in rows.iter().enumerate() {
+    for (index, (row, spans)) in rows.iter().enumerate() {
         if row.is_empty() {
             continue;
         }
-        let y = body_top + PAD.0 + index as f32 * line_h;
-        widest = widest.max(row.chars().count() as f32 * advance);
-        text_ops.push(ops::text(
-            x + PAD.1,
-            T_CODE.baseline(y),
-            row.clone(),
-            Weight::Mono,
-            size,
-            p.text,
-        ));
+        let baseline = T_CODE.baseline(body_top + PAD.0 + index as f32 * line_h);
+        let ascii = row.iter().all(char::is_ascii);
+        let x_of = |at: usize| -> f32 {
+            if ascii {
+                at as f32 * advance
+            } else {
+                text::measure(&row[..at].iter().collect::<String>(), Weight::Mono, size)
+            }
+        };
+        widest = widest.max(x_of(row.len()));
+        for &(a, b, token) in spans {
+            let piece: String = row[a..b].iter().collect();
+            if piece.trim().is_empty() {
+                continue;
+            }
+            let (color, weight) = match token {
+                Token::Keyword => (syntax.keyword, Weight::Mono),
+                Token::String => (syntax.string, Weight::Mono),
+                Token::Comment => (syntax.comment, Weight::MonoItalic),
+                Token::Number => (syntax.number, Weight::Mono),
+                Token::Type | Token::Operator => (syntax.type_, Weight::Mono),
+                Token::Function => (syntax.function, Weight::Mono),
+                Token::Punct => (syntax.punctuation, Weight::Mono),
+                Token::Default => (p.text, Weight::Mono),
+            };
+            text_ops.push(ops::text(
+                x + PAD.1 + x_of(a),
+                baseline,
+                piece,
+                weight,
+                size,
+                color,
+            ));
+        }
     }
     let clip = RectF::new(
         x + HAIRLINE,
@@ -193,7 +234,7 @@ fn title(lang: &str) -> String {
     if lang.is_empty() {
         "Code".into()
     } else {
-        format!("{lang} code")
+        format!("{} code", lang.to_uppercase())
     }
 }
 
@@ -236,14 +277,37 @@ mod tests {
         let (key, max) = laid.xmax[0];
         assert_eq!(key, super::key("rust", &code));
         assert!(max > 1000.0, "{max}");
-        assert!(laid.ops.iter().any(
-            |op| matches!(op, Op::Clip { xscroll: Some(k), ops, .. } if *k == key && ops.len() == 4)
-        ));
+        // Four rows, coloured: the numbers are the TUI's number colour.
+        let clipped = laid
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Clip {
+                    xscroll: Some(k),
+                    ops,
+                    ..
+                } if *k == key => Some(ops),
+                _ => None,
+            })
+            .expect("a scroller");
+        let mut rows: Vec<u32> = clipped
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text { baseline, .. } => Some(baseline.to_bits()),
+                _ => None,
+            })
+            .collect();
+        rows.dedup();
+        assert_eq!(rows.len(), 4);
+        assert!(clipped.iter().any(|op| matches!(
+            op,
+            Op::Text { text, color, .. } if text == "0000" && *color == theme::p().syntax.number
+        )));
         // The actions: WRAP toggles, OPEN reads, COPY copies the code.
         let actions: Vec<&Action> = laid.hits.iter().map(|(_, a)| a).collect();
         assert_eq!(actions[0], &Action::Rich(rich::Act::ToggleWrap(key)));
         assert!(
-            matches!(actions[1], Action::Ui(UiAct::Read { title, text }) if title == "rust code" && text == &code.join("\n"))
+            matches!(actions[1], Action::Ui(UiAct::Read { title, text }) if title == "RUST code" && text == &code.join("\n"))
         );
         assert!(matches!(actions[2], Action::Ui(UiAct::Copy(text)) if text == &code.join("\n")));
         // Header actions sit side by side, 122 wide at least, at the right.
@@ -271,7 +335,17 @@ mod tests {
             .ops
             .iter()
             .find_map(|op| match op {
-                Op::Clip { ops, .. } => Some(ops.len()),
+                Op::Clip { ops, .. } => {
+                    let mut rows: Vec<u32> = ops
+                        .iter()
+                        .filter_map(|op| match op {
+                            Op::Text { baseline, .. } => Some(baseline.to_bits()),
+                            _ => None,
+                        })
+                        .collect();
+                    rows.dedup();
+                    Some(rows.len())
+                }
                 _ => None,
             })
             .unwrap_or(0);
