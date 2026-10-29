@@ -2256,7 +2256,7 @@ pub fn requests(model: &mut Model, view: &mut ViewState, height: f32, now: Insta
 pub struct TranscriptFrame {
     /// Marks on screen: their rows, what they show, the columns they keep
     /// to (none: all).
-    marks: Vec<(i32, i32, u64, Option<(i32, i32)>)>,
+    marks: Vec<FrameMark>,
     /// Fold marks on screen: their rows and how they show (closed, open,
     /// pressed), and the content rows on screen.
     gutters: Vec<(i32, i32, u8)>,
@@ -2265,6 +2265,13 @@ pub struct TranscriptFrame {
     jump: u32,
     jump_rows: (i32, i32),
 }
+
+/// A mark as a frame shows it: its rows, what it shows, the columns it
+/// keeps to (none: all of them).
+type FrameMark = (i32, i32, u64, Option<(i32, i32)>);
+
+/// A mark that changed: its rows on screen and its columns.
+type MarkChange = ((i32, i32), Option<(i32, i32)>);
 
 /// The jump button's square (§3.6.14): 34 px from the right, 34 above the
 /// island.
@@ -2423,7 +2430,7 @@ fn mark_changes(
     new: &TranscriptFrame,
     offset: f32,
     (top, bottom): (i32, i32),
-) -> Vec<((i32, i32), Option<(i32, i32)>)> {
+) -> Vec<MarkChange> {
     let screen = |(y0, y1): (i32, i32)| {
         let base = chat_top() - offset;
         (
