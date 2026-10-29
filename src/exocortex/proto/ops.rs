@@ -70,6 +70,49 @@ pub struct Selection {
     pub fast_mode: Value,
 }
 
+impl Selection {
+    pub fn speed(&self) -> Speed {
+        Speed::of(&self.fast_mode)
+    }
+}
+
+/// A conversation's speed tier (`FastMode`: `false`, `true` or
+/// `"ultrafast"`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Speed {
+    #[default]
+    Standard,
+    Fast,
+    Ultrafast,
+}
+
+impl Speed {
+    /// A `FastMode` value (anything else is Standard).
+    pub fn of(value: &Value) -> Self {
+        match value {
+            Value::Bool(true) => Speed::Fast,
+            Value::String(s) if s == "ultrafast" => Speed::Ultrafast,
+            _ => Speed::Standard,
+        }
+    }
+
+    pub fn value(self) -> Value {
+        match self {
+            Speed::Standard => json!(false),
+            Speed::Fast => json!(true),
+            Speed::Ultrafast => json!("ultrafast"),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Speed::Standard => "Standard",
+            Speed::Fast => "Fast",
+            Speed::Ultrafast => "Ultrafast",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DefaultsSnapshot {
@@ -297,4 +340,8 @@ pub fn set_model(req_id: &str, conv_id: &str, provider: &str, model: &str) -> Va
 
 pub fn set_effort(req_id: &str, conv_id: &str, effort: &str) -> Value {
     json!({ "type": "set_effort", "reqId": req_id, "convId": conv_id, "effort": effort })
+}
+
+pub fn set_fast_mode(req_id: &str, conv_id: &str, speed: Speed) -> Value {
+    json!({ "type": "set_fast_mode", "reqId": req_id, "convId": conv_id, "enabled": speed.value() })
 }

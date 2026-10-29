@@ -1,10 +1,12 @@
 //! The chat's top bar (WP-E; roadmap §3.6.1): back, the conversation's
-//! title over its subtitle (model · effort, a status dot), ⋯ for the chat
-//! menu, and the page rail. Tapping the title opens the model inspector.
+//! title over its subtitle (a status dot, the model or what the
+//! conversation is doing, its context), ⋯ for the chat menu, and the page
+//! rail. Tapping the title opens the model inspector.
 //!
-//! `subtitle` is WP-A's stub (the model label); E gives it the status
-//! priorities of PAR-009 (Connecting…, Couldn't load, Syncing…, Working ·
-//! model) and fills `chat_menu`.
+//! The subtitle follows the iPhone's priorities (PAR-009): the connection,
+//! a failed load, a retry, a wait, a running turn, a window on its way,
+//! else the model label. It is one line of fixed height, so a status
+//! change never moves the transcript (PAR-177).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -13,10 +15,10 @@ use std::time::Instant;
 use crate::gfx::{Canvas, Rgb};
 
 use super::super::anim::{self, Animator};
-use super::super::model::{Action, Model, Nav, UiAct, ops};
+use super::super::model::{Action, Model, Nav, UiAct, chat, composer, ops};
 use super::super::theme::{self, T_SUBTITLE, T_TITLE, TOP_BAR};
 use super::super::ui::icons::{self, Icon, Style};
-use super::super::ui::sheet::{ActionItem, ActionList, Sheet, action_sheet};
+use super::super::ui::sheet::{ActionItem, ActionList, Sheet, Tone, action_sheet};
 use super::super::ui::widgets::{self, RAIL_CHAT};
 
 /// The centre column (title and subtitle).
@@ -28,13 +30,16 @@ const ROW_Y: f32 = 61.0;
 /// roadmap's 64 for the title sits lower than the iPhone's).
 const TITLE_BASELINE: f32 = 47.0;
 const SUBTITLE_BASELINE: f32 = 104.0;
+/// The status dot (5 pt) and the gap after it.
+const DOT: f32 = 14.0;
+const DOT_GAP: f32 = 14.0;
 
 /// The subtitle's status dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Dot {
     /// Streaming or loading (pulses).
     Live,
-    /// Not ready.
+    /// Not ready, retrying, waiting.
     Waiting,
     /// Failed to load.
     Failed,
@@ -49,28 +54,52 @@ pub struct Subtitle {
     pub dot: Option<Dot>,
 }
 
-/// What the subtitle says (A's stub: the model and effort, a dot while the
-/// conversation streams, isn't ready or failed to load).
+/// What the subtitle says (PAR-009, 279).
 pub fn subtitle(model: &Model) -> Subtitle {
-    let selection = model.selection();
-    let mut text = model.model_label(&selection);
-    if !selection.effort.is_empty() {
-        text = format!("{text} · {}", selection.effort);
-    }
-    let dot = if model.chat.error.is_some() {
-        Some(Dot::Failed)
-    } else if !model.ready {
-        Some(Dot::Waiting)
-    } else if model.streaming() || model.chat_pending() {
-        Some(Dot::Live)
+    let resolved = model.resolve();
+    let label = model.generation_label(&resolved, false);
+    let summary = model.open_summary();
+    let live = model.live_status();
+    let streaming = model.streaming();
+    let connected = model.ready || (!model.connected && !model.offline);
+    let (mut text, dot) = if !model.connected && model.offline {
+        let text = if model.was_connected {
+            "Reconnecting…"
+        } else {
+            "Connecting…"
+        };
+        (text.to_owned(), Some(Dot::Waiting))
+    } else if !connected {
+        ("Syncing…".to_owned(), Some(Dot::Waiting))
+    } else if model.chat.error.is_some() {
+        (
+            "Couldn't load · Retry in menu".to_owned(),
+            Some(Dot::Failed),
+        )
+    } else if live.is_some_and(|l| l.retrying) {
+        (format!("Retrying · {label}"), Some(Dot::Waiting))
+    } else if summary.is_some_and(|s| s.provider_waiting) || live.is_some_and(|l| l.waiting) {
+        (format!("Waiting · {label}"), Some(Dot::Waiting))
+    } else if streaming {
+        (format!("Working · {label}"), Some(Dot::Live))
+    } else if model.chat_pending() && !model.chat.loaded {
+        ("Syncing…".to_owned(), Some(Dot::Live))
     } else {
-        None
+        (model.generation_label(&resolved, true), None)
     };
-    Subtitle {
-        text,
-        detail: None,
-        dot,
+    if connected
+        && dot != Some(Dot::Failed)
+        && let Some(goal) = summary.and_then(|s| s.goal.as_ref())
+        && goal.status != "complete"
+        && !goal.status.is_empty()
+    {
+        text = format!("{text} · goal {}", goal.status);
     }
+    let detail = model
+        .context_tokens()
+        .filter(|_| connected && !streaming)
+        .map(|tokens| format!(" · {} ctx", ops::format_tokens(tokens)));
+    Subtitle { text, detail, dot }
 }
 
 fn title(model: &Model) -> String {
@@ -151,17 +180,50 @@ pub fn draw(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>, now: I
     let cx = (CENTRE.0 + CENTRE.1) / 2.0;
     let title = widgets::fit(&title(model), T_TITLE, width);
     widgets::text_centered(canvas, &title, cx, TITLE_BASELINE, T_TITLE, p.text, alpha);
-    let subtitle = subtitle(model);
+    draw_subtitle(canvas, &subtitle(model), cx, width, alpha, now);
+}
+
+/// The subtitle as one centred group: dot, text, detail.
+fn draw_subtitle(
+    canvas: &mut Canvas,
+    subtitle: &Subtitle,
+    cx: f32,
+    width: f32,
+    alpha: f32,
+    now: Instant,
+) {
+    let p = theme::p();
     let c = theme::c();
-    let main = widgets::fit(&subtitle.text, T_SUBTITLE, width - 40.0);
     let detail = subtitle.detail.clone().unwrap_or_default();
-    let main_w = widgets::measure(&main, T_SUBTITLE);
     let detail_w = widgets::measure(&detail, T_SUBTITLE);
-    let left = (cx - (main_w + detail_w) / 2.0).round();
+    let dot_w = if subtitle.dot.is_some() {
+        DOT + DOT_GAP
+    } else {
+        0.0
+    };
+    let main = widgets::fit(&subtitle.text, T_SUBTITLE, width - dot_w - detail_w);
+    let main_w = widgets::measure(&main, T_SUBTITLE);
+    let left = (cx - (dot_w + main_w + detail_w) / 2.0).round();
+    if let Some(dot) = subtitle.dot {
+        let (color, shade): (Rgb, f32) = match dot {
+            Dot::Live => (p.accent, anim::pulse(now, 1400)),
+            Dot::Waiting => (p.warning, 1.0),
+            Dot::Failed => (p.error, 1.0),
+        };
+        let color = theme::mix(color, (shade * 100.0).round() as u32, p.app_background);
+        canvas.fill_circle(
+            left + DOT / 2.0,
+            SUBTITLE_BASELINE - 10.0,
+            DOT / 2.0,
+            color,
+            alpha,
+        );
+    }
+    let x = left + dot_w;
     widgets::text(
         canvas,
         &main,
-        left,
+        x,
         SUBTITLE_BASELINE,
         T_SUBTITLE,
         c.text_dim,
@@ -171,41 +233,43 @@ pub fn draw(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>, now: I
         widgets::text(
             canvas,
             &detail,
-            left + main_w,
+            x + main_w,
             SUBTITLE_BASELINE,
             T_SUBTITLE,
             p.muted,
             alpha,
         );
     }
-    if let Some(dot) = subtitle.dot {
-        let (color, shade): (Rgb, f32) = match dot {
-            Dot::Live => (p.accent, anim::pulse(now, 1400)),
-            Dot::Waiting => (p.warning, 1.0),
-            Dot::Failed => (p.error, 1.0),
-        };
-        let color = theme::mix(color, (shade * 100.0).round() as u32, p.app_background);
-        canvas.fill_circle(
-            left - 14.0 - 7.0,
-            SUBTITLE_BASELINE - 10.0,
-            7.0,
-            color,
-            alpha,
-        );
-    }
 }
 
-/// The ⋯ menu (WP-E fills it: Reconnect, Configuration and activity, Find,
-/// Export, Discard draft; PAR-010).
+/// The ⋯ menu (PAR-010): Stop, Retry, the model, the last reply, the id.
 pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
-    let selection = model.selection();
-    let mut items = vec![
-        ActionItem::new(
-            "Model, effort & speed…",
-            Action::Ops(ops::Act::OpenInspector),
-        )
-        .detail(subtitle(model).text),
-    ];
+    let resolved = model.resolve();
+    let label = model.generation_label(&resolved, true);
+    let model_item = ActionItem::new(
+        "Model, effort & speed…",
+        Action::Ops(ops::Act::OpenInspector),
+    )
+    .icon(Icon::Sparkle)
+    .detail(label.clone());
+    let Some(id) = model.chat.id.clone() else {
+        return action_sheet(ActionList::new("New chat", vec![model_item]).scoped());
+    };
+    let mut items = Vec::new();
+    if model.streaming() {
+        items.push(
+            ActionItem::new("Stop", Action::Composer(composer::Act::Abort))
+                .icon(Icon::Stop)
+                .tone(Tone::Destructive),
+        );
+    }
+    if model.chat.error.is_some() {
+        items.push(
+            ActionItem::new("Retry opening conversation", Action::Chat(chat::Act::Retry))
+                .icon(Icon::Refresh),
+        );
+    }
+    items.push(model_item);
     if let Some(text) = last_reply(model) {
         items.push(
             ActionItem::new(
@@ -218,22 +282,16 @@ pub fn chat_menu(model: &Model) -> Sheet<ActionList> {
             .icon(Icon::FileText),
         );
     }
-    if let Some(id) = &model.chat.id {
-        items.push(
-            ActionItem::new("Copy conversation id", Action::Ui(UiAct::Copy(id.clone())))
-                .icon(Icon::Copy),
-        );
+    items.push(
+        ActionItem::new("Copy conversation id", Action::Ui(UiAct::Copy(id.clone())))
+            .icon(Icon::Copy)
+            .detail(id),
+    );
+    let mut line = label;
+    if let Some(tokens) = model.context_tokens() {
+        line = format!("{line} · {} context tokens", ops::grouped(tokens));
     }
-    let label = model.model_label(&selection);
-    action_sheet(
-        ActionList::new(title(model), items)
-            .subtitle(if selection.effort.is_empty() {
-                label
-            } else {
-                format!("{label} · {}", selection.effort)
-            })
-            .scoped(),
-    )
+    action_sheet(ActionList::new(title(model), items).subtitle(line).scoped())
 }
 
 /// The newest reply's text, if any is loaded.
@@ -251,4 +309,159 @@ fn last_reply(model: &Model) -> Option<String> {
             }
             _ => None,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exocortex::proto::parse_event;
+
+    const CATALOG: &str = r#"{"type":"tools_available","providers":[{"id":"anthropic","label":"Anthropic","defaultModel":"opus","supportsFastMode":true,"models":[{"id":"opus","label":"Opus 5.5","defaultEffort":"high","supportedEfforts":[{"effort":"high"}]}]}],"authByProvider":{"anthropic":true},"tools":[],"conversationDefaults":{"defaults":{"provider":"anthropic","model":"opus","effort":"xhigh","fastMode":false},"configured":false}}"#;
+
+    /// Connected, the daemon ready, the catalog in, conversation `c`
+    /// (with `fields`) open.
+    fn open(fields: &str) -> Model {
+        let mut model = Model::new();
+        let commands = model.on_connected();
+        let ping = commands.last().unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let now = Instant::now();
+        model.apply(
+            parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
+            now,
+        );
+        model.apply(parse_event(CATALOG), now);
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_updated","summary":{{"id":"c","title":"T","provider":"anthropic","model":"opus","effort":"high"{fields}}}}}"#
+            )),
+            now,
+        );
+        model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        model
+    }
+
+    fn event(model: &mut Model, line: &str) {
+        model.apply(parse_event(line), Instant::now());
+    }
+
+    fn loaded(model: &mut Model) {
+        let id = model.chat.load_request.clone().unwrap();
+        event(
+            model,
+            &format!(
+                r#"{{"type":"conversation_loaded","reqId":"{id}","convId":"c","entries":[],"contextTokens":1000}}"#
+            ),
+        );
+    }
+
+    fn says(model: &Model) -> (String, Option<Dot>) {
+        let s = subtitle(model);
+        (s.text, s.dot)
+    }
+
+    #[test]
+    fn the_subtitle_follows_the_iphones_priorities() {
+        let mut model = open("");
+        // The window on its way, nothing shown yet.
+        assert_eq!(says(&model), ("Syncing…".into(), Some(Dot::Live)));
+        loaded(&mut model);
+        assert_eq!(says(&model), ("Opus 5.5 · high".into(), None));
+        assert_eq!(subtitle(&model).detail.as_deref(), Some(" · 1.0k ctx"));
+        // Working, then waiting, then retrying, each over the last.
+        event(
+            &mut model,
+            r#"{"type":"streaming_started","convId":"c","provider":"anthropic","model":"opus","startedAt":5}"#,
+        );
+        assert_eq!(says(&model), ("Working · Opus 5.5".into(), Some(Dot::Live)));
+        assert_eq!(subtitle(&model).detail, None, "no context while working");
+        event(
+            &mut model,
+            r#"{"type":"connection_wait_status","convId":"c","active":true}"#,
+        );
+        assert_eq!(
+            says(&model),
+            ("Waiting · Opus 5.5".into(), Some(Dot::Waiting))
+        );
+        event(
+            &mut model,
+            r#"{"type":"stream_retry","convId":"c","attempt":1,"maxAttempts":3,"errorMessage":"x","delaySec":2}"#,
+        );
+        assert_eq!(
+            says(&model),
+            ("Retrying · Opus 5.5".into(), Some(Dot::Waiting))
+        );
+        // A failed load over all of those.
+        model.chat.error = Some("boom".into());
+        assert_eq!(
+            says(&model),
+            ("Couldn't load · Retry in menu".into(), Some(Dot::Failed))
+        );
+        // The connection over everything.
+        model.on_disconnected();
+        assert!(model.offline);
+        assert_eq!(says(&model), ("Reconnecting…".into(), Some(Dot::Waiting)));
+        model.on_connected();
+        assert_eq!(says(&model), ("Syncing…".into(), Some(Dot::Waiting)));
+    }
+
+    #[test]
+    fn the_first_connection_says_connecting_and_a_quiet_one_nothing() {
+        let model = Model::new();
+        assert_eq!(says(&model), ("Connecting…".into(), Some(Dot::Waiting)));
+        let mut model = open("");
+        loaded(&mut model);
+        let now = Instant::now();
+        model.reconnect_quietly(now, std::time::Duration::from_millis(1500));
+        model.on_disconnected();
+        assert_eq!(says(&model), ("Opus 5.5 · high".into(), None));
+    }
+
+    #[test]
+    fn a_goal_and_speed_show_in_the_label() {
+        let mut model = open(r#","fastMode":true,"goal":{"objective":"o","status":"paused"}"#);
+        loaded(&mut model);
+        assert_eq!(
+            says(&model),
+            ("Opus 5.5 · high · fast · goal paused".into(), None)
+        );
+        let mut model = open(r#","goal":{"objective":"o","status":"complete"}"#);
+        loaded(&mut model);
+        assert_eq!(says(&model).0, "Opus 5.5 · high");
+    }
+
+    #[test]
+    fn a_draft_says_its_model_or_the_daemon_default() {
+        let mut model = Model::new();
+        model.handle(Action::Nav(Nav::NewConversation));
+        model.on_connected();
+        model.ready = true;
+        assert_eq!(says(&model), ("Daemon default".into(), None));
+        event(&mut model, CATALOG);
+        assert_eq!(says(&model), ("Opus 5.5 · xhigh".into(), None));
+    }
+
+    #[test]
+    fn the_menu_offers_retry_and_stop_when_they_apply() {
+        let mut model = open(r#","streaming":true"#);
+        model.chat.error = Some("boom".into());
+        let menu = chat_menu(&model);
+        let labels: Vec<&str> = menu
+            .content
+            .items
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Stop",
+                "Retry opening conversation",
+                "Model, effort & speed…",
+                "Copy conversation id"
+            ]
+        );
+    }
 }
