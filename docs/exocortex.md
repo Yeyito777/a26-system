@@ -41,6 +41,7 @@ lands), and scrolling up asks for the older page again.
 | Sending | `send_message` (shown at once, confirmed by the daemon's `user_message` or `streaming_started` with the same `startedAt`); while it works, Send asks "Deliver message": **Next turn** (Steer now on other providers) or **Message end**, `queue_message` with that `timing` (shown as queued until delivered; sent directly if the turn ended meanwhile); a new conversation is `new_conversation` with its first message and only the draft's explicit model choices (in the folder the list showed). Refused or unconfirmed in 20 s: the text goes back into the draft it came from, with the error above the composer |
 | The queue | a queued bubble tapped: Edit in composer, Copy text, Remove from queue (`unqueue_message`; the bubble says "Removing…" until the daemon's `queue_updated` settles it) |
 | Stop | `abort` with the stream's `expectedStartedAt`; a spinner until `ack`, `streaming_stopped` or `message_complete`; a second press says it is already stopping |
+| Panels (E) | Activity: `list_tasks`, `stop_task`, `abort` for a subagent; Goal: `set_goal` (its `goal_updated` reaches subscribers only: the open conversation); Chrono: `chrono` list, create, cancel; BTW: `btw_query`, `btw_followup`, `btw_close` (sent again after a reconnection until settled); System prompt: `get_system_prompt`, `load_instructions`, `set_system_instructions`; Accounts: `accounts {watch}` while it shows; Usage: `usage_update` (pushed), `get_token_stats` when Settings or a usage panel opens; the inspector's "Use as daemon default" and reset: `set_conversation_defaults`, `reset_conversation_defaults`, confirmed only by a `conversation_defaults` with their reqId |
 | The model inspector | `tools_available`'s providers, models, efforts and speeds, and `conversationDefaults` (or `conversation_defaults`); Apply sends `set_model`, `set_effort`, `set_fast_mode` for what changed; a draft changes nothing on the wire until its first message |
 | A tool row opened | `load_tool_outputs` for that call (history leaves outputs out) |
 
@@ -172,8 +173,13 @@ additions are the only shared edits.
   `composer::Act::{Insert(String), RestoreDraft { conv, text }, Focus}`
   (C2's message menu, D's rewind) and `ops::Act::{OpenInspector, ChatMenu,
   OpenSettings, OpenGoal, OpenActivity, OpenChrono, OpenBtw, OpenAccounts,
-  OpenSystemPrompt, OpenFind, …}` (D's commands open E's panels; the
-  unbuilt ones toast "Coming soon.").
+  OpenSystemPrompt, OpenFind, OpenUsage, OpenTokens, OpenConnection, …}`
+  (D's commands open E's panels). For commands that act directly:
+  `ops::Act::Goal(goal::Act::Set(objective, max_ms))` (`/goal`),
+  `sheets::chrono::parse(text, now_ms)` and `ops::Act::Chrono(..)`
+  (`/chrono`), `model.ask_aside(conv, query)` (`/btw`),
+  `ops::Act::{PickModel, PickEffort, PickSpeed}` (`/model`, `/effort`,
+  `/fast`).
 - **Events.** `Model::apply` settles the event's request, then every area
   sees it: `apply_list`, `apply_ops`, `apply_composer` by reference, last
   `apply_chat` by value (windows are big). An area ignores what is not its
@@ -256,7 +262,14 @@ additions are the only shared edits.
   `menu::Confirm::new(title, message, confirm, action)`,
   `toast::Snackbar::new(text, button, action, lift)`, `ui.toast(..)`,
   `reader::open(&mut ui, title, text)`. An item's action closes its menu or
-  sheet first.
+  sheet first. A `SheetContent` can say when it next changes by itself
+  (`wake`, a ticking time) and what to do once it has gone (`farewell`: the
+  stack collects them, the event loop performs them; the Accounts panel
+  stops watching so). E's panels are `sheets::panel`: rows (sections,
+  key/value, navigation, task rows, rail cards, bars, buttons) built from
+  the model each frame (`Panel::{Goal, Activity, Chrono, Btw, SystemPrompt,
+  Usage, Accounts, Connection, Tokens, Find}`), opened with
+  `model.open_panel(..)`; Settings shows panel rows too.
 - **Widgets and icons.** `ui::widgets` draws the shared chrome: `top_bar`,
   `page_rail`, `icon_button`, `ellipsis`, `button(Button { label, kind,
   icon, pressed, disabled })`, `segmented`, `switch`, `spinner`,
@@ -333,7 +346,8 @@ It posts to `moon-notifyd` (`MOON_NOTIFY_SOCKET`, else
   stopped; no `streamStopReason`), not streaming, not `notificationsMuted`;
   or a conversation's goal changing to blocked, paused by its controller, or
   complete. Subagents (`parentConversationId`) never notify.
-- **Not** while the app shows that conversation in front (below).
+- **Not** while the app shows that conversation in front (below), and at
+  most once per conversation in 5 s.
 - **What**: app `exocortex`, tag = the conversation id (or a hash of it when
   it is not a valid tag), title = its title, body = the start of the reply
   (its text without markdown, 280 characters, or the error that ended the

@@ -531,6 +531,34 @@ mod tests {
     }
 
     #[test]
+    fn a_restarting_or_offline_daemon_says_so() {
+        let mut model = open("");
+        loaded(&mut model);
+        event(
+            &mut model,
+            r#"{"type":"connectivity_status","online":false,"offlineSince":1}"#,
+        );
+        assert_eq!(says(&model).0, "⚠ offline · Opus 5.5 · high");
+        event(
+            &mut model,
+            r#"{"type":"connectivity_status","online":true}"#,
+        );
+        event(&mut model, r#"{"type":"daemon_shutdown","mode":"restart"}"#);
+        model.on_disconnected();
+        assert_eq!(
+            says(&model),
+            ("Daemon restarting…".into(), Some(Dot::Waiting))
+        );
+        model.on_connected();
+        model.on_disconnected();
+        assert_eq!(
+            says(&model).0,
+            "Reconnecting…",
+            "a new connection forgets it"
+        );
+    }
+
+    #[test]
     fn the_first_connection_says_connecting_and_a_quiet_one_nothing() {
         let model = Model::new();
         assert_eq!(says(&model), ("Connecting…".into(), Some(Dot::Waiting)));

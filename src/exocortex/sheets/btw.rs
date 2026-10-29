@@ -448,7 +448,7 @@ pub fn build(model: &Model, conv: &str) -> Built {
                 .get(conv)
                 .map(|s| s.display_title().to_owned());
             rows.push(panel::note(format!(
-                "A side question answered from {}'s context. It never enters the transcript.",
+                "A side question answered from the context of {}. It never enters the transcript.",
                 title.map_or_else(|| "this chat".to_owned(), |t| format!("“{t}”"))
             )));
         }
