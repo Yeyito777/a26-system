@@ -60,6 +60,8 @@ impl MenuItem {
             Tone::Plain => (p.secondary_accent, p.text),
             Tone::Accent => (p.accent, p.text),
             Tone::Warning => (p.warning, p.text),
+            Tone::Success => (p.success, p.text),
+            Tone::Muted => (p.muted, p.text),
             Tone::Destructive => (p.error, p.error),
         }
     }
@@ -377,6 +379,10 @@ impl Confirm {
 }
 
 impl Overlay for Confirm {
+    fn label(&self) -> String {
+        self.title.clone()
+    }
+
     fn scoped(&self) -> bool {
         true
     }

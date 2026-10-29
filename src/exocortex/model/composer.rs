@@ -1407,7 +1407,7 @@ mod tests {
     #[test]
     fn a_failed_new_chat_comes_back_as_its_folders_draft() {
         let mut model = ready(false);
-        model.sidebar.path.push("f1".into());
+        model.sidebar.draft_folder = Some("f1".into());
         model.handle(Action::Nav(Nav::NewConversation));
         assert_eq!(model.composer.key.as_deref(), Some("draft:f1"));
         type_text(&mut model, "First message");
