@@ -2222,6 +2222,187 @@ mod tests {
         assert!(model.list_refreshing());
     }
 
+    /// Pixel rows where two frames differ.
+    fn differing(a: &Canvas, b: &Canvas) -> Vec<f32> {
+        (0..H as usize)
+            .filter(|y| a.pixels[y * 1080..(y + 1) * 1080] != b.pixels[y * 1080..(y + 1) * 1080])
+            .map(|y| y as f32)
+            .collect()
+    }
+
+    /// Pixel rows in `y0..y1` where `color` is drawn (text ink).
+    fn ink(canvas: &Canvas, y0: f32, y1: f32, color: Rgb) -> Vec<f32> {
+        (y0 as usize..y1 as usize)
+            .filter(|y| canvas.pixels[y * 1080..(y + 1) * 1080].contains(&color))
+            .map(|y| y as f32)
+            .collect()
+    }
+
+    /// Taps where each row is drawn — its title's ink, its top and bottom
+    /// pixel rows, scrolled or not — land on that row; a header or a
+    /// divider takes no tap and gives none to its neighbours.
+    #[test]
+    fn taps_land_on_the_row_drawn_there() {
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        model.handle(Action::List(Act::Toggle("f".into())));
+        let text = theme::p().text;
+        for offset in [0.0, 37.0, 311.0, 1500.0] {
+            view.list_scroll.offset = offset;
+            let base = full(&mut model, &mut view, None, now);
+            let layout = model.sidebar.layout();
+            let content_top = list_top(&model) - offset;
+            let (top, bottom) = bounds(&model, H);
+            let mut checked = 0;
+            for (index, row) in layout.rows.iter().enumerate() {
+                let y = content_top + layout.tops[index];
+                // Rows wholly on screen.
+                if y < top || y + row.height() > bottom {
+                    continue;
+                }
+                let Some(action) = row_action(row, false, false) else {
+                    // A header or a divider: nothing, wherever it is drawn.
+                    for ty in [y + 1.0, y + row.height() / 2.0, y + row.height() - 1.0] {
+                        assert_eq!(
+                            hit(&mut model, &mut view, H, 300.0, ty, now),
+                            None,
+                            "{row:?} at {ty}"
+                        );
+                    }
+                    continue;
+                };
+                // Where the row is drawn: what its pressed face changes.
+                let pressed = Hit::Action(action.clone());
+                let lit = full(&mut model, &mut view, Some(&pressed), now);
+                let drawn = differing(&base, &lit);
+                let (y0, y1) = (drawn[0], *drawn.last().unwrap());
+                assert!(y1 - y0 >= ROW_H - 2.0, "{row:?} drawn at {y0}..{y1}");
+                let title = ink(&base, y0, y0 + ROW_H / 2.0, text);
+                assert!(
+                    !title.is_empty(),
+                    "{row:?}: its title is drawn in its upper half"
+                );
+                let title_mid = title[title.len() / 2];
+                for ty in [y0, title_mid, (y0 + y1) / 2.0, y1] {
+                    for tx in [60.0, 300.0, 700.0] {
+                        assert_eq!(
+                            hit(&mut model, &mut view, H, tx, ty, now),
+                            Some(pressed.clone()),
+                            "{row:?} drawn at {y0}..{y1} (title at {title_mid}), tapped at ({tx}, {ty}) with the list at {offset}"
+                        );
+                    }
+                }
+                // A folder's "+" at its right; the row elsewhere.
+                if let Row::Folder { id, .. } = row {
+                    assert_eq!(
+                        hit(
+                            &mut model,
+                            &mut view,
+                            H,
+                            FOLDER_PLUS_CX,
+                            (y0 + y1) / 2.0,
+                            now
+                        ),
+                        Some(act(Act::NewChatIn(id.clone())))
+                    );
+                }
+                checked += 1;
+            }
+            assert!(checked >= 8, "rows checked at {offset}: {checked}");
+        }
+    }
+
+    /// A long-pressed row's menu: each item answers where it is drawn (its
+    /// pressed face), the quick row's cells included.
+    #[test]
+    fn menu_items_answer_where_they_are_drawn() {
+        use crate::exocortex::gesture::Gesture;
+        use crate::exocortex::ui::overlay::Response;
+        let mut model = model();
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let layout = model.sidebar.layout();
+        let y = list_top(&model) + layout.tops[1] + 80.0;
+        let Some(menu) = long_press(&mut model, &view, H, 300.0, y, now) else {
+            panic!("a row's menu");
+        };
+        model.handle(menu);
+        view.take_ui(&mut model, now);
+        // Opened at `now` (its first layout), drawn at rest.
+        super::super::frame::record(&mut model, &mut view, None, (1080, H as i32), now);
+        let later = now + Duration::from_millis(400);
+        // As a frame is: laid out (the overlays place themselves), then drawn.
+        let draw = |model: &mut Model, view: &mut ViewState| {
+            super::super::frame::record(model, view, None, (1080, H as i32), later);
+            full(model, view, None, later)
+        };
+        let base = draw(&mut model, &mut view);
+        let expected = [
+            "Pin",
+            "Mark",
+            "Mute",
+            "Rename",
+            "MarkEmoji",
+            "MovePicker",
+            "Clone",
+            "Select",
+            "Copy",
+            "ConfirmDelete",
+        ];
+        let mut found = Vec::new();
+        // Probe a grid; each press lights one item's cell.
+        let mut seen_cells: Vec<(f32, f32, f32)> = Vec::new();
+        for gy in (150..2000).step_by(46) {
+            for gx in [120.0, 340.0, 560.0] {
+                let gy = gy as f32;
+                let mut overlays = std::mem::take(&mut view.overlays);
+                let cx = view.cx(&model, 1080.0, H, later);
+                overlays.gesture(&Gesture::Down { x: gx, y: gy }, &cx);
+                view.overlays = overlays;
+                let lit = draw(&mut model, &mut view);
+                let mut overlays = std::mem::take(&mut view.overlays);
+                let cx = view.cx(&model, 1080.0, H, later);
+                overlays.gesture(&Gesture::Cancel, &cx);
+                view.overlays = overlays;
+                let rows = differing(&base, &lit);
+                let Some((&y0, &y1)) = rows.first().zip(rows.last()) else {
+                    continue;
+                };
+                assert!(gy >= y0 && gy <= y1, "pressed at {gy}, lit {y0}..{y1}");
+                if seen_cells.contains(&(y0, y1, gx)) {
+                    continue;
+                }
+                seen_cells.push((y0, y1, gx));
+                // A tap there performs that item.
+                let mut overlays = std::mem::take(&mut view.overlays);
+                let cx = view.cx(&model, 1080.0, H, later);
+                overlays.gesture(&Gesture::Down { x: gx, y: gy }, &cx);
+                let response = overlays.gesture(&Gesture::Tap { x: gx, y: gy }, &cx);
+                let Response::Action(action) = response else {
+                    panic!("no item at {gx},{gy}: {response:?}");
+                };
+                // The variant: `List(Pin(…))` → Pin, `Ui(Copy(…))` → Copy.
+                let name = format!("{action:?}");
+                let inner = name.split_once('(').map_or("", |(_, rest)| rest);
+                let variant: String = inner.chars().take_while(|c| c.is_alphanumeric()).collect();
+                if let Some(item) = expected.iter().find(|e| **e == variant) {
+                    if !found.contains(item) {
+                        found.push(*item);
+                    }
+                }
+                // Open it again for the next probe.
+                overlays.sweep(later + Duration::from_secs(5));
+                view.overlays = overlays;
+                let again = long_press(&mut model, &view, H, 300.0, y, now).unwrap();
+                model.handle(again);
+                view.take_ui(&mut model, now);
+                super::super::frame::record(&mut model, &mut view, None, (1080, H as i32), now);
+            }
+        }
+        assert_eq!(found.len(), expected.len(), "items answered: {found:?}");
+    }
+
     #[test]
     fn rows_hit_and_long_press_where_they_are() {
         let mut model = model();
