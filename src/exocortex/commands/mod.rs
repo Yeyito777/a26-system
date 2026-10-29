@@ -28,6 +28,11 @@ pub struct Item {
     pub aliases: Vec<String>,
     /// Byte ranges of `name` the query matched (search results only).
     pub matches: Vec<(usize, usize)>,
+    /// Destructive (`/goal clear`, `/worktree clean`): submission never
+    /// expands a fragment of it, only the word typed out. On a search result:
+    /// it passes through such an argument the input did not type out, so
+    /// submission sends the text as typed.
+    pub exact: bool,
 }
 
 impl Item {
