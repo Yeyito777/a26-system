@@ -60,7 +60,7 @@ impl Item {
             Item::Head { .. } => 150.0,
             Item::Row { .. } => ACTION_ITEM,
             Item::Section(_) => 101.0,
-            Item::Lines { lines, note: false } => 22.0 + lines.len() as f32 * T_SMALL.line() + 22.0,
+            Item::Lines { lines, note: false } => 28.0 + lines.len() as f32 * T_SMALL.line() + 28.0,
             Item::Lines { lines, note: true } => {
                 11.0 + lines.len() as f32 * T_CAPTION.line() + 11.0
             }
@@ -325,7 +325,7 @@ impl SheetContent for FolderSheet {
                     } else {
                         let box_ = RectF::new(x, y + 11.0, self.width, h - 22.0);
                         widgets::boxed(canvas, box_, p.surface_background, c.rule_settings);
-                        (T_SMALL, p.text, y + 22.0)
+                        (T_SMALL, p.text, y + 28.0)
                     };
                     let lx = if *note { x } else { x + 22.0 };
                     for line in lines {

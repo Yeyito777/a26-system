@@ -215,11 +215,17 @@ impl Model {
     }
 
     fn snackbar(&mut self, text: &str, button: &str, act: Act) {
+        // Over select mode's bar, not on it.
+        let lift = if self.sidebar.selection.is_some() {
+            super::super::model::sidebar::SELECT_BAR
+        } else {
+            0.0
+        };
         self.ui.open(Box::new(Snackbar::new(
             text,
             button,
             super::super::model::Action::List(act),
-            0.0,
+            lift,
         )));
     }
 

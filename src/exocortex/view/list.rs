@@ -83,9 +83,7 @@ fn bottom(height: f32) -> f32 {
     height - reserve
 }
 
-/// Select mode's bar under the rows (PAR-077): the count, then Move, Pin,
-/// Group and Delete.
-const SELECT_BAR: f32 = 200.0;
+use super::super::model::sidebar::SELECT_BAR;
 /// The select bar's buttons' actions, left to right.
 const SELECT_ACTS: [Act; 4] = [
     Act::SelectMove,
@@ -567,6 +565,23 @@ fn text_with_hit(
         }
     }
     widgets::text(canvas, &shown, x, baseline, ty, color, 1.0)
+}
+
+/// Where the ◆ badge of these counts is (x from, x to), right to left from
+/// `right` as `draw_badges` places it.
+fn agents_badge((agents, commands, chrono): (u32, u32, u32), right: f32) -> Option<(f32, f32)> {
+    if agents == 0 {
+        return None;
+    }
+    let ty = T_CAPTION.weight(Weight::MonoBold);
+    let mut right = right;
+    for (count, symbol) in [(commands, "$"), (chrono, "◷")] {
+        if count > 0 {
+            right -= widgets::measure(&badge_label(symbol, count), ty) + GAP;
+        }
+    }
+    let w = widgets::measure(&badge_label("◆", agents), ty);
+    Some((right - w, right))
 }
 
 /// Badges ◆ $ ◷ right to left from `right`; returns where they start.
@@ -1697,8 +1712,36 @@ pub fn hit(
         (Row::Folder { id, .. }, _) if x >= W - TARGET && !selecting => {
             Some(Hit::Action(Action::List(Act::NewChatIn(id))))
         }
+        (Row::Conversation { id, .. }, _) if !selecting && on_agents(model, &id, x) => {
+            Some(Hit::Action(Action::List(Act::Subagents(id))))
+        }
         (row, _) => row_action(&row, searching, selecting).map(Hit::Action),
     }
+}
+
+/// Whether `x` is on the ◆ badge of conversation `id` (a 122 px target).
+fn on_agents(model: &mut Model, id: &str, x: f32) -> bool {
+    let Some(c) = model.sidebar.conversations.get(id) else {
+        return false;
+    };
+    if !c.tasks.iter().any(|t| t.kind == "subagent") {
+        return false;
+    }
+    let aggregates = model.sidebar.aggregates(&model.composer.queued);
+    let Some(c) = model.sidebar.conversations.get(id) else {
+        return false;
+    };
+    let folder_muted = c
+        .folder_id
+        .as_ref()
+        .is_some_and(|f| aggregates.muted.contains(f));
+    let queue = aggregates.queues.get(id).copied().unwrap_or_default();
+    let a = activity::conversation(c, queue, false, folder_muted);
+    agents_badge((a.agents, a.commands, a.chrono), RIGHT).is_some_and(|(x0, x1)| {
+        let cx = (x0 + x1) / 2.0;
+        let half = ((x1 - x0) / 2.0).max(TARGET / 2.0);
+        (x - cx).abs() <= half
+    })
 }
 
 /// The row a press held at (`x`, `y`) lifts.

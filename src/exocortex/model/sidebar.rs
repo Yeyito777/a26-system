@@ -38,6 +38,10 @@ pub enum Instructions {
     Failed(String),
 }
 
+/// Select mode's bar under the rows (PAR-077): the count, then Move, Pin,
+/// Group and Delete.
+pub const SELECT_BAR: f32 = 200.0;
+
 /// How long a folder's instructions may take (they can queue behind a big
 /// list).
 const INSTRUCTIONS_WITHIN: std::time::Duration = std::time::Duration::from_secs(30);
@@ -121,6 +125,11 @@ pub enum Act {
     SelectPin,
     SelectGroup,
     SelectDelete,
+    /// A conversation's ◆ tapped: its subagent, or a choice of them
+    /// (PAR-090).
+    Subagents(String),
+    /// Emoji mark…: the TUI's marks (PAR-083).
+    MarkEmoji(String),
     /// The folder inspector (PAR-078).
     FolderInfo(String),
     EditInstructions(String),
@@ -262,6 +271,9 @@ pub struct Sidebar {
     pub saving: HashMap<String, String>,
     /// A pull past the top far enough to refresh, the finger still down.
     pub pull_armed: bool,
+    /// Whether a conversation opened from the list was unread just before
+    /// (PAR-088; the transcript's reading position).
+    pub unread_at_open: HashMap<String, bool>,
     /// The list could not be loaded (the state's Retry asks again).
     pub error: Option<String>,
     /// A row on screen has a pulsing dot (the view's frames).
@@ -936,6 +948,23 @@ impl Model {
         changed
     }
 
+    /// Opens a conversation from the list: its row shows selected, and
+    /// whether it was unread is kept (the daemon clears it on open;
+    /// PAR-088, for the reading position).
+    fn open_from_list(&mut self, id: String) -> Vec<Value> {
+        let unread = self
+            .sidebar
+            .conversations
+            .get(&id)
+            .is_some_and(|c| c.unread);
+        if self.sidebar.unread_at_open.len() >= 50 {
+            self.sidebar.unread_at_open.clear();
+        }
+        self.sidebar.unread_at_open.insert(id.clone(), unread);
+        self.sidebar.selected = Some(id.clone());
+        self.handle(Action::Nav(Nav::OpenConversation(id)))
+    }
+
     /// The search field gives up Moon's keyboard.
     fn unfocus_search(&mut self) {
         if self.sidebar.search.focused {
@@ -950,9 +979,28 @@ impl Model {
         match act {
             Act::Open(id) => {
                 self.unfocus_search();
-                self.sidebar.selected = Some(id.clone());
-                return self.handle(Action::Nav(Nav::OpenConversation(id)));
+                return self.open_from_list(id);
             }
+            Act::Subagents(id) => {
+                let children: Vec<(String, String)> = self
+                    .sidebar
+                    .conversations
+                    .get(&id)
+                    .map(|c| {
+                        c.tasks
+                            .iter()
+                            .filter(|t| t.kind == "subagent")
+                            .map(|t| (t.id.clone(), t.title.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                match &children[..] {
+                    [] => {}
+                    [(child, _)] => return self.open_from_list(child.clone()),
+                    _ => self.subagents_sheet(children),
+                }
+            }
+            Act::MarkEmoji(id) => self.emoji_sheet(id),
             Act::Toggle(id) => {
                 let open = !self.sidebar.expanded.remove(&id);
                 if open {
@@ -1023,8 +1071,7 @@ impl Model {
                             depth: 0,
                         });
                         self.keep_list();
-                        self.sidebar.selected = Some(id.clone());
-                        return self.handle(Action::Nav(Nav::OpenConversation(id)));
+                        return self.open_from_list(id);
                     }
                     None => self.ui.toast("No unread chats."),
                 }
@@ -1879,10 +1926,7 @@ mod tests {
         );
         assert_eq!(commands[0]["items"].as_array().unwrap().len(), 2);
         list(&mut model, Act::SelectDelete);
-        assert_eq!(
-            opened(&mut model),
-            ["Move 2 conversations to undoable trash?"]
-        );
+        assert_eq!(opened(&mut model), ["Delete 2 conversations?"]);
         let keys_selected = model.sidebar.selected_keys();
         let commands = list(
             &mut model,
@@ -1982,6 +2026,42 @@ mod tests {
     }
 
     #[test]
+    fn emoji_marks_prefix_the_title_and_the_same_one_takes_it_off() {
+        let mut model = model(&[conv("a", r#""title":"🔥 Fix the build""#)], &[]);
+        list(&mut model, Act::MarkEmoji("a".into()));
+        assert_eq!(opened(&mut model), ["Emoji mark"]);
+        let commands = list(
+            &mut model,
+            Act::SetName(Key::Conv("a".into()), "🐛 Fix the build".into()),
+        );
+        assert_eq!(commands[0]["type"], "rename_conversation");
+        assert_eq!(commands[0]["title"], "🐛 Fix the build");
+        // Shown at once.
+        assert_eq!(model.sidebar.conversations["a"].title, "🐛 Fix the build");
+    }
+
+    #[test]
+    fn the_subagent_badge_opens_the_child_and_opening_keeps_unread() {
+        let mut model = model(
+            &[
+                conv(
+                    "p",
+                    r#""unread":true,"subagentCount":1,"tasks":[{"id":"k","kind":"subagent","title":"child","startedAt":1}]"#,
+                ),
+                conv("k", r#""parentConversationId":"p""#),
+            ],
+            &[],
+        );
+        let commands = list(&mut model, Act::Subagents("p".into()));
+        assert_eq!(commands[0]["convId"], "k");
+        assert_eq!(model.page, Page::Chat);
+        model.handle(Action::Nav(Nav::Back));
+        list(&mut model, Act::Open("p".into()));
+        assert_eq!(model.sidebar.unread_at_open.get("p"), Some(&true));
+        assert_eq!(model.sidebar.unread_at_open.get("k"), Some(&false));
+    }
+
+    #[test]
     fn menus_offer_what_applies() {
         let mut model = model(&[conv("a", r#""pinned":true"#)], &[folder("f", "")]);
         let rect = RectF::new(0.0, 300.0, 1080.0, 160.0);
@@ -1994,7 +2074,9 @@ mod tests {
         );
         assert_eq!(
             opened(&mut model),
-            ["menu: Unpin, Mark, Mute, Rename…, Move to folder…, Clone, Select, Copy id, Delete"]
+            [
+                "menu: Unpin, Mark, Mute, Rename…, Emoji mark…, Move to folder…, Clone, Select, Copy id, Delete"
+            ]
         );
         list(
             &mut model,

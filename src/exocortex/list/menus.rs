@@ -92,6 +92,12 @@ impl Model {
                 list(Act::Rename(key.clone())),
             ),
             MenuItem::new(
+                Icon::Sparkle,
+                "Emoji mark…",
+                Tone::Accent,
+                list(Act::MarkEmoji(id.clone())),
+            ),
+            MenuItem::new(
                 Icon::FolderMove,
                 "Move to folder…",
                 Tone::Accent,
@@ -276,8 +282,8 @@ impl Model {
             }
             (n, 0) => {
                 self.ui.open(Box::new(Confirm::new(
-                    format!("Move {n} conversations to undoable trash?"),
-                    "Undo restores them.",
+                    format!("Delete {n} conversations?"),
+                    "They move to Exocortex’s undoable trash.",
                     "Move to trash",
                     list(Act::Delete {
                         keys,
@@ -359,6 +365,69 @@ impl Model {
                 )));
             }
         }
+    }
+
+    /// Emoji mark… (PAR-083): a mark as the title's prefix (a rename);
+    /// the one it has again takes it off.
+    pub(crate) fn emoji_sheet(&mut self, id: String) {
+        let Some(c) = self.sidebar.conversations.get(&id) else {
+            return;
+        };
+        let current = activity::mark_prefix(activity::first_line(&c.title));
+        let bare = activity::strip_mark(activity::first_line(&c.title)).to_owned();
+        let bare = if bare.trim().is_empty() {
+            "Untitled chat".to_owned()
+        } else {
+            bare
+        };
+        let key = Key::Conv(id);
+        let mut items: Vec<ActionItem> = activity::MARKS
+            .iter()
+            .map(|(emoji, name)| {
+                let title = if current == Some(*emoji) {
+                    bare.clone()
+                } else {
+                    format!("{emoji} {bare}")
+                };
+                let mut label = name.to_string();
+                label[..1].make_ascii_uppercase();
+                ActionItem::new(
+                    format!("{emoji}  {label}"),
+                    list(Act::SetName(key.clone(), title)),
+                )
+                .checked(current == Some(*emoji))
+            })
+            .collect();
+        if current.is_some() {
+            items.push(
+                ActionItem::new("No mark", list(Act::SetName(key, bare)))
+                    .icon(Icon::X)
+                    .tone(Tone::Muted),
+            );
+        }
+        self.ui.open(Box::new(sheet::action_sheet(ActionList::new(
+            "Emoji mark",
+            items,
+        ))));
+    }
+
+    /// A conversation's subagents to open (PAR-090).
+    pub(crate) fn subagents_sheet(&mut self, children: Vec<(String, String)>) {
+        let items = children
+            .into_iter()
+            .map(|(id, title)| {
+                let label = if title.trim().is_empty() {
+                    id.clone()
+                } else {
+                    title
+                };
+                ActionItem::new(label, list(Act::Open(id))).icon(Icon::Chat)
+            })
+            .collect();
+        self.ui.open(Box::new(sheet::action_sheet(ActionList::new(
+            "Subagents",
+            items,
+        ))));
     }
 
     /// Move to folder… (PAR-068): the top level and every folder in tree
