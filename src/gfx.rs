@@ -214,10 +214,9 @@ impl Canvas {
     }
 
     /// Moves rows `y0..y1` by `dy` (what was at y lands at y + dy), in
-    /// blocks of `dy` rows that never overlap their source, each a
-    /// `memcpy`: `copy_within` is musl's `memmove`, which copies eight bytes
-    /// a step (four instructions); its `memcpy` copies 64. A scroll frame
-    /// moves the transcript's ~7 MB.
+    /// blocks of `dy` rows that never overlap their source, 64 bytes a
+    /// step (`copy_pixels`): `copy_within` is musl's `memmove`, which copies
+    /// eight bytes a step. A scroll frame moves the transcript's ~7 MB.
     pub fn move_rows(&mut self, y0: i32, y1: i32, dy: i32) {
         let width = self.width as usize;
         let (y0, y1) = (y0.max(0), y1.min(self.height));
@@ -232,7 +231,7 @@ impl Canvas {
             while dst < end {
                 let n = step.min(end - dst);
                 let (to, from) = self.pixels.split_at_mut((dst + step) * width);
-                to[dst * width..(dst + n) * width].copy_from_slice(&from[..n * width]);
+                copy_pixels(&mut to[dst * width..(dst + n) * width], &from[..n * width]);
                 dst += n;
             }
         } else {
@@ -242,8 +241,10 @@ impl Canvas {
                 let n = step.min(end - start);
                 let dst = end - n;
                 let (from, to) = self.pixels.split_at_mut(dst * width);
-                to[..n * width]
-                    .copy_from_slice(&from[(dst - step) * width..(dst - step + n) * width]);
+                copy_pixels(
+                    &mut to[..n * width],
+                    &from[(dst - step) * width..(dst - step + n) * width],
+                );
                 end = dst;
             }
         }
@@ -843,6 +844,19 @@ pub fn ease_spring(t: f32) -> f32 {
     let c1 = 1.2;
     let c3 = c1 + 1.0;
     1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
+/// `to.copy_from_slice(from)`, 16 pixels a step in vector registers (a
+/// slice copy is musl's `memcpy`, 16 bytes a step).
+fn copy_pixels(to: &mut [u32], from: &[u32]) {
+    let mut to = to.chunks_exact_mut(16);
+    let mut from = from.chunks_exact(16);
+    for (a, b) in (&mut to).zip(&mut from) {
+        let a: &mut [u32; 16] = a.try_into().unwrap_or_else(|_| unreachable!());
+        let b: &[u32; 16] = b.try_into().unwrap_or_else(|_| unreachable!());
+        *a = *b;
+    }
+    to.into_remainder().copy_from_slice(from.remainder());
 }
 
 #[cfg(test)]
