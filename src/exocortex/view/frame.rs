@@ -177,17 +177,7 @@ fn subtract(rows: Vec<(i32, i32)>, cut: (i32, i32)) -> Vec<(i32, i32)> {
 
 /// Moves rows `y0..y1` of the canvas by `dy` (content at y lands at y+dy).
 fn move_rows(canvas: &mut Canvas, (y0, y1): (i32, i32), dy: i32) {
-    let width = canvas.width as usize;
-    let (y0, y1) = (y0.max(0), y1.min(canvas.height));
-    let rows = y1 - y0 - dy.abs();
-    if rows <= 0 || dy == 0 {
-        return;
-    }
-    let (src, dst) = if dy > 0 { (y0, y0 + dy) } else { (y0 - dy, y0) };
-    canvas.pixels.copy_within(
-        src as usize * width..(src + rows) as usize * width,
-        dst as usize * width,
-    );
+    canvas.move_rows(y0, y1, dy);
 }
 
 /// Rows `y0..y1` moved by `dy` (`Presenter::scroll`).

@@ -213,6 +213,42 @@ impl Canvas {
         self.pixels.fill(color);
     }
 
+    /// Moves rows `y0..y1` by `dy` (what was at y lands at y + dy), in
+    /// blocks of `dy` rows that never overlap their source, each a
+    /// `memcpy`: `copy_within` is musl's `memmove`, which copies eight bytes
+    /// a step (four instructions); its `memcpy` copies 64. A scroll frame
+    /// moves the transcript's ~7 MB.
+    pub fn move_rows(&mut self, y0: i32, y1: i32, dy: i32) {
+        let width = self.width as usize;
+        let (y0, y1) = (y0.max(0), y1.min(self.height));
+        let rows = y1 - y0 - dy.abs();
+        if rows <= 0 || dy == 0 {
+            return;
+        }
+        let step = dy.unsigned_abs() as usize;
+        if dy < 0 {
+            // Up: from the top, each block from the one `step` below it.
+            let (mut dst, end) = (y0 as usize, (y0 + rows) as usize);
+            while dst < end {
+                let n = step.min(end - dst);
+                let (to, from) = self.pixels.split_at_mut((dst + step) * width);
+                to[dst * width..(dst + n) * width].copy_from_slice(&from[..n * width]);
+                dst += n;
+            }
+        } else {
+            // Down: from the bottom, each block from the one `step` above.
+            let (start, mut end) = ((y0 + dy) as usize, (y0 + dy + rows) as usize);
+            while end > start {
+                let n = step.min(end - start);
+                let dst = end - n;
+                let (from, to) = self.pixels.split_at_mut(dst * width);
+                to[..n * width]
+                    .copy_from_slice(&from[(dst - step) * width..(dst - step + n) * width]);
+                end = dst;
+            }
+        }
+    }
+
     pub fn copy_from(&mut self, other: &Canvas) {
         if other.pixels.len() == self.pixels.len() {
             self.pixels.copy_from_slice(&other.pixels);
@@ -812,6 +848,35 @@ pub fn ease_spring(t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rows moved in blocks are what `copy_within` makes of them.
+    #[test]
+    fn rows_move_like_copy_within() {
+        for (y0, y1, dy) in [
+            (10, 90, -1i32),
+            (10, 90, -7),
+            (0, 100, 33),
+            (5, 60, 1),
+            (5, 60, -54),
+            (20, 30, 200),
+        ] {
+            let mut canvas = Canvas::new(7, 100);
+            for (index, pixel) in canvas.pixels.iter_mut().enumerate() {
+                *pixel = index as u32;
+            }
+            let mut expected = canvas.pixels.clone();
+            let rows = y1 - y0 - dy.abs();
+            if rows > 0 {
+                let (src, dst) = if dy > 0 { (y0, y0 + dy) } else { (y0 - dy, y0) };
+                expected.copy_within(
+                    src as usize * 7..(src + rows) as usize * 7,
+                    dst as usize * 7,
+                );
+            }
+            canvas.move_rows(y0, y1, dy);
+            assert!(canvas.pixels == expected, "{y0} {y1} {dy}");
+        }
+    }
 
     /// A mask drawn across the canvas's edges and clip draws what the clip
     /// shows, the same pixels as one pixel at a time would.

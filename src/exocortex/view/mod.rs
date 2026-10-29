@@ -425,18 +425,10 @@ pub fn draw_chat_update(
         (top, bottom),
     ));
     if shift != 0 {
-        let width = canvas.width as usize;
+        canvas.move_rows(top, bottom, -shift);
         if shift > 0 {
-            canvas.pixels.copy_within(
-                (top + shift) as usize * width..bottom as usize * width,
-                top as usize * width,
-            );
             redraw.push((bottom - shift, bottom));
         } else {
-            canvas.pixels.copy_within(
-                top as usize * width..(bottom + shift) as usize * width,
-                (top - shift) as usize * width,
-            );
             redraw.push((top, top - shift));
         }
         damage.moved = Some((top, bottom, -shift));
