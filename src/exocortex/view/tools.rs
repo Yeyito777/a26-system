@@ -120,40 +120,60 @@ pub(crate) fn tool_run(blocks: &[Block], from: usize) -> (usize, Vec<usize>) {
     (end, calls)
 }
 
-/// What an opened row's body shows.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum Output {
+/// What an opened row's body shows (borrowed: outputs can be megabytes,
+/// and every layout pass asks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Output<'a> {
     /// Still running (no result yet).
     Running,
     /// The output (known, fetched or empty).
-    Text(String),
+    Text(&'a str),
     Loading,
-    Failed(String),
+    Failed(&'a str),
     /// Not asked for yet (asked for as the row opens).
     Unknown,
 }
 
+impl Output<'_> {
+    /// What a piece's key needs of it: a tool's output never changes once
+    /// known, so its length names it (no hashing megabytes).
+    pub(crate) fn key(&self) -> (u8, usize, u64) {
+        match self {
+            Output::Running => (0, 0, 0),
+            Output::Text(text) => (1, text.len(), 0),
+            Output::Loading => (2, 0, 0),
+            Output::Failed(message) => (3, 0, super::hash_of(message)),
+            Output::Unknown => (4, 0, 0),
+        }
+    }
+}
+
 /// The output a call's result has here.
-pub(crate) fn output_state(chat: &Chat, tool: &ToolRef, blocks: &[Block], live: bool) -> Output {
+pub(crate) fn output_state<'a>(
+    chat: &'a Chat,
+    tool: &ToolRef,
+    blocks: &'a [Block],
+    live: bool,
+) -> Output<'a> {
     let Some(Block::ToolResult { output, .. }) = tool.result.map(|at| &blocks[at]) else {
         return Output::Running;
     };
     let id = tool.key.trim_start_matches("tool:");
     if !output.is_empty() {
-        return Output::Text(output.clone());
+        return Output::Text(output);
     }
     if let Some(fetched) = chat.outputs.get(id) {
-        return Output::Text(fetched.clone());
+        return Output::Text(fetched);
     }
     if let Some(error) = chat.output_errors.get(id) {
-        return Output::Failed(error.clone());
+        return Output::Failed(error);
     }
     if chat.outputs_requested.contains(id) {
         return Output::Loading;
     }
     // Streamed results carry their output: empty is empty.
     if live {
-        Output::Text(String::new())
+        Output::Text("")
     } else {
         Output::Unknown
     }
@@ -491,8 +511,8 @@ fn body(
         Output::Failed(message) => {
             let lines = wrap(
                 &[Span {
-                    text: if message == OUTPUT_MISSING || message.ends_with("Tap to retry.") {
-                        message.clone()
+                    text: if *message == OUTPUT_MISSING || message.ends_with("Tap to retry.") {
+                        (*message).to_owned()
                     } else {
                         format!("{message} Tap to retry.")
                     },

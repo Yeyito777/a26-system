@@ -1277,17 +1277,29 @@ impl Model {
                     .as_ref()
                     .and_then(|id| self.chat.outputs_inflight.remove(id));
                 if self.chat.id.as_deref() == Some(&conv_id) {
+                    // A folded row shows only whether there is output: an
+                    // answer that changes nothing on screen (prefetched for
+                    // folded rows) lays nothing out again.
+                    let defaults = Disclosure::of(&self.persist);
+                    let shows =
+                        |chat: &Chat, tool: &str| chat.is_open(&format!("tool:{tool}"), defaults);
+                    let mut changed = false;
                     for output in outputs {
                         self.chat.outputs_requested.remove(&output.tool_call_id);
+                        changed |= output.output.trim().is_empty()
+                            || shows(&self.chat, &output.tool_call_id);
                         self.chat.outputs.insert(output.tool_call_id, output.output);
                     }
                     // Asked for and not there: gone from the daemon.
                     for tool in asked.unwrap_or_default() {
                         if self.chat.outputs_requested.remove(&tool) {
+                            changed |= shows(&self.chat, &tool);
                             self.chat.output_errors.insert(tool, OUTPUT_MISSING.into());
                         }
                     }
-                    self.chat.touch();
+                    if changed {
+                        self.chat.touch();
+                    }
                 }
                 Vec::new()
             }
