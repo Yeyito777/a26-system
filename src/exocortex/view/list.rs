@@ -2259,6 +2259,9 @@ mod tests {
             parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
             now,
         );
+        // Relative times read the frames' clock, pinned to the wall time
+        // the rows are stamped from: no label turns over while a test runs.
+        let wall = crate::exocortex::model::now_ms();
         let conversations: Vec<String> = (0..52)
             .map(|i| {
                 let folder = match i {
@@ -2275,7 +2278,7 @@ mod tests {
                     i % 5 == 0,
                     i % 11 == 0,
                     i * 37,
-                    crate::exocortex::model::now_ms() - i as u64 * 3_600_000,
+                    wall - i as u64 * 3_600_000,
                     i % 4,
                 )
             })
@@ -2287,6 +2290,7 @@ mod tests {
             )),
             now,
         );
+        model.sidebar.clock = Some((now, wall));
         model
     }
 
