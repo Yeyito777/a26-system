@@ -31,8 +31,10 @@ pub enum Owner {
     App,
     /// The conversation list (B).
     Sidebar,
-    /// The open conversation (C1, C2).
+    /// The open conversation (C2).
     Chat,
+    /// Rich content: image previews (C1).
+    Rich,
     /// Sending and the queue (D).
     Composer,
     /// Models, settings and the operations panels (E).
