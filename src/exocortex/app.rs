@@ -912,6 +912,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         redraw |= model.tick(now);
         redraw |= model.expire(now);
         redraw |= view.take_ui(&mut model, now);
+        // Image previews near the screen (C1), asked for nearest first.
+        if mapped && model.connected {
+            let wants = view.image_wants(&model, height, now);
+            for command in model.want_images(&wants, now) {
+                link.send(command);
+            }
+        }
         let dots = mapped && model.page == Page::Chat && model.streaming();
         if dots && now >= next_dots {
             view.dots = view.dots.wrapping_add(1);

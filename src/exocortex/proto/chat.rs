@@ -238,9 +238,11 @@ pub struct BlockRange {
     pub blocks: Vec<Block>,
 }
 
-/// `image_data`: an image's bounded preview.
+/// `image_data`: an image's bounded preview. Its PNG is decoded while the
+/// event is parsed (on the link thread, not the UI's): `pixels`, and
+/// `base64` is then left empty.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(from = "RawImageData")]
 pub struct ImageData {
     pub req_id: Option<String>,
     pub image_id: String,
@@ -248,7 +250,138 @@ pub struct ImageData {
     pub format: String,
     pub width: u32,
     pub height: u32,
+    /// The encoded preview, when it could not be decoded (else empty).
     pub base64: String,
+    /// The preview decoded, None when it could not be.
+    pub pixels: Option<Pixels>,
+}
+
+/// Decoded pixels: premultiplied ARGB, row by row (`gfx::Image`'s layout).
+#[derive(Clone, Default, PartialEq)]
+pub struct Pixels {
+    pub width: u32,
+    pub height: u32,
+    pub argb: Vec<u32>,
+}
+
+impl std::fmt::Debug for Pixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pixels({}x{})", self.width, self.height)
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct RawImageData {
+    req_id: Option<String>,
+    image_id: String,
+    format: String,
+    width: u32,
+    height: u32,
+    base64: String,
+}
+
+impl From<RawImageData> for ImageData {
+    fn from(raw: RawImageData) -> Self {
+        let pixels = match raw.format.as_str() {
+            "png" => base64_decode(&raw.base64).and_then(|bytes| decode_png(&bytes)),
+            "rgba" => base64_decode(&raw.base64)
+                .and_then(|bytes| rgba_pixels(raw.width, raw.height, &bytes)),
+            _ => None,
+        };
+        Self {
+            req_id: raw.req_id,
+            image_id: raw.image_id,
+            format: raw.format,
+            width: raw.width,
+            height: raw.height,
+            base64: if pixels.is_some() {
+                String::new()
+            } else {
+                raw.base64
+            },
+            pixels,
+        }
+    }
+}
+
+/// Standard base64 (padding optional, whitespace skipped); None when it is
+/// not base64.
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut buffer = 0_u32;
+    let mut bits = 0;
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => break,
+            b' ' | b'\n' | b'\r' | b'\t' => continue,
+            _ => return None,
+        };
+        buffer = buffer << 6 | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// A PNG decoded into premultiplied ARGB.
+pub fn decode_png(data: &[u8]) -> Option<Pixels> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buffer).ok()?;
+    let channels = info.color_type.samples();
+    let argb = buffer[..info.buffer_size()]
+        .chunks_exact(channels)
+        .map(|p| match channels {
+            4 => premultiply(p[0], p[1], p[2], p[3]),
+            3 => opaque(p[0], p[1], p[2]),
+            2 => premultiply(p[0], p[0], p[0], p[1]),
+            _ => opaque(p[0], p[0], p[0]),
+        })
+        .collect();
+    Some(Pixels {
+        width: info.width,
+        height: info.height,
+        argb,
+    })
+}
+
+fn rgba_pixels(width: u32, height: u32, bytes: &[u8]) -> Option<Pixels> {
+    if bytes.len() != width as usize * height as usize * 4 {
+        return None;
+    }
+    let argb = bytes
+        .chunks_exact(4)
+        .map(|p| premultiply(p[0], p[1], p[2], p[3]))
+        .collect();
+    Some(Pixels {
+        width,
+        height,
+        argb,
+    })
+}
+
+fn opaque(r: u8, g: u8, b: u8) -> u32 {
+    0xff00_0000 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
+}
+
+fn premultiply(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    if a == 255 {
+        return opaque(r, g, b);
+    }
+    let a32 = u32::from(a);
+    let pre = |c: u8| (u32::from(c) * a32 + 127) / 255;
+    a32 << 24 | pre(r) << 16 | pre(g) << 8 | pre(b)
 }
 
 /// `file_link_resolved`: a local path in a reply, on the daemon's host.
