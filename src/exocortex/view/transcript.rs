@@ -246,6 +246,10 @@ pub struct TranscriptView {
     fold: Option<Folding>,
     /// The live reply's plan, and its folding (by what it was made from).
     live_plan: Option<LivePlan>,
+    /// Where the live reply's settled pieces end (its last block's
+    /// segments are laid out again), by what they were placed from; where
+    /// the reply starts and the space above its blocks' first piece.
+    live_placed: Option<(u64, f32, f32, Resume)>,
     live_fold: Option<(u64, Rc<fold::LiveFold>)>,
     /// A fold just tapped: its first row goes where the tapped row was.
     pin: Option<Pin>,
@@ -602,6 +606,8 @@ pub(crate) struct LivePlan {
     /// The plan, without the images (`images`: they follow it).
     plan: Plan,
     images: bool,
+    /// This pass kept the first this many segments of the last's.
+    kept: usize,
 }
 
 /// What a block's text is long (a live text or thinking block grows at its
@@ -633,7 +639,9 @@ impl LivePlan {
                 })
         });
         if let Some(lp) = &mut kept {
+            lp.kept = lp.keep;
             if lp.blocks == blocks.len() && lp.last_len == last_len {
+                lp.kept = lp.plan.segments.len() - usize::from(lp.images);
                 if !lp.images {
                     return kept.unwrap();
                 }
@@ -661,6 +669,7 @@ impl LivePlan {
                 from: 0,
                 plan: Plan { segments },
                 images: false,
+                kept: 0,
             }
         });
         // The last block's segments (a text block is a segment for each
@@ -741,6 +750,21 @@ struct EntryLaid {
     h: f32,
     tail_gap: f32,
     any: bool,
+    /// Where `Shown::record` asked: the placement at that segment's start.
+    recorded: Option<Resume>,
+}
+
+/// A placement stopped at the start of a segment (`Shown::record`), to go
+/// on from there (`Shown::resume`): the segment, the lists' lengths, the
+/// height and the piece index so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Resume {
+    segment: usize,
+    items: usize,
+    marks: usize,
+    tools: usize,
+    h: f32,
+    index: u32,
 }
 
 /// What of an entry shows (`Shown::default()`: all of it, unfolded).
@@ -758,6 +782,11 @@ pub(crate) struct Shown<'a> {
     pub(crate) summary: Option<(&'a str, &'a str, bool)>,
     /// The space above its first piece (something is above it).
     pub(crate) gap: f32,
+    /// Record the placement at the start of this segment.
+    pub(crate) record: Option<usize>,
+    /// Go on from a placement: from its segment, below its height (the
+    /// pieces before it are in the layout).
+    pub(crate) resume: Option<Resume>,
 }
 
 impl Shown<'_> {
@@ -865,11 +894,13 @@ impl ViewState {
         let mut at = Placer {
             layout,
             y,
-            h: 0.0,
-            index: 0,
+            h: shown.resume.map_or(0.0, |r| r.h),
+            index: shown.resume.map_or(0, |r| r.index),
             stamp,
             first_gap: shown.gap,
         };
+        let from = shown.resume.map_or(0, |r| r.segment);
+        let mut recorded = None;
         let mut tail_gap = ROW_GAP;
         let chat = context.chat;
         let open_at = |key: &str| chat.is_open(key, context.disclosure);
@@ -880,7 +911,17 @@ impl ViewState {
             });
             at.put(piece);
         }
-        for segment in &plan.segments {
+        for (number, segment) in plan.segments.iter().enumerate().skip(from) {
+            if shown.record == Some(number) {
+                recorded = Some(Resume {
+                    segment: number,
+                    items: at.layout.items.len(),
+                    marks: at.layout.marks.len(),
+                    tools: at.layout.tools.len(),
+                    h: at.h,
+                    index: at.index,
+                });
+            }
             match segment {
                 Segment::User { automated, relay } => {
                     let Some(Entry::User { text, .. }) = entry else {
@@ -1091,6 +1132,7 @@ impl ViewState {
             h: at.h,
             tail_gap,
             any: at.index > 0,
+            recorded,
         }
     }
 
@@ -1261,12 +1303,11 @@ impl ViewState {
             .filter(|history| history.key == history_key);
         let full = kept.is_none();
         let history = match kept {
-            Some(history) => {
-                layout.truncate(&history);
-                history
-            }
+            // What follows it goes as far as `lay_rest` keeps it.
+            Some(history) => history,
             None => {
                 layout = ChatLayout::default();
+                self.transcript.live_placed = None;
                 self.lay_history(&mut layout, &context, fold.as_deref(), history_key)
             }
         };
@@ -1481,8 +1522,57 @@ impl ViewState {
         let model = context.model;
         let chat = context.chat;
         let folding = fold.is_some();
+        let live_plan = chat
+            .live
+            .as_ref()
+            .map(|live| LivePlan::of(live, self.transcript.live_plan.take()));
+        let live_fold = match (
+            chat.live.as_ref(),
+            fold.and_then(|f| f.live_base.as_ref()),
+            fold_key,
+        ) {
+            (Some(live), Some(base), Some(key)) => Some(self.live_folding(base, key, live)),
+            _ => None,
+        };
+        // The live reply's settled pieces stay when only its last block
+        // changed since they were placed: the same reply, the same plan
+        // before that block, the same folding and status lines.
+        let placed_key = chat.live.as_ref().map(|live| {
+            hash_of((
+                history.key,
+                live.stamp,
+                live.rewrites,
+                live_fold.as_ref().map(|lf| Rc::as_ptr(lf) as usize),
+                chat.status.any(),
+            ))
+        });
+        let resume = self
+            .transcript
+            .live_placed
+            .take()
+            .filter(|(key, _, _, resume)| {
+                Some(*key) == placed_key
+                    && live_plan
+                        .as_ref()
+                        .is_some_and(|lp| resume.segment <= lp.kept)
+                    && resume.items >= history.items
+                    && resume.items <= layout.items.len()
+            });
+        match &resume {
+            Some((_, _, _, resume)) => {
+                layout.items.truncate(resume.items);
+                layout.marks.truncate(resume.marks);
+                layout.tools.truncate(resume.tools);
+            }
+            None => layout.truncate(history),
+        }
         let (mut y, mut gap) = (history.y, history.gap);
-        for echo in &chat.echoes {
+        if let Some((_, live_y, _, _)) = resume {
+            // All before the live reply's last block is in place.
+            y = live_y;
+            gap = 0.0;
+        }
+        for echo in chat.echoes.iter().filter(|_| resume.is_none()) {
             y += gap;
             let key = hash_of(("echo", &echo.text));
             y = self.single(layout, y, key, Role::Other, &|| {
@@ -1490,14 +1580,10 @@ impl ViewState {
             });
             gap = ROW_GAP;
         }
-        if let Some(live) = &chat.live {
+        if let (Some(live), Some(plan)) = (&chat.live, live_plan) {
             let live_context = Context {
                 live: true,
                 ..*context
-            };
-            let live_fold = match (fold.and_then(|f| f.live_base.as_ref()), fold_key) {
-                (Some(base), Some(key)) => Some(self.live_folding(base, key, live)),
-                _ => None,
             };
             let live_fold = live_fold.as_deref();
             let status = &chat.status;
@@ -1509,6 +1595,7 @@ impl ViewState {
             // it (a tap opens it), then its newest step (PAR-404).
             if let Some(lf) = live_fold
                 && !status.any()
+                && resume.is_none()
             {
                 let (laid, marks) = self.piece(
                     hash_of(("working fold", &lf.summary, &lf.turn, lf.open)),
@@ -1534,6 +1621,7 @@ impl ViewState {
             }
             if let Some((msg, block)) = live_fold.and_then(|lf| lf.revealed)
                 && let (Some(entry), Some(stamp)) = (chat.entries.get(msg), chat.stamps.get(msg))
+                && resume.is_none()
             {
                 let plan = self.plan(*stamp, entry);
                 let blocks = match entry {
@@ -1560,16 +1648,26 @@ impl ViewState {
                     next_gap = BLOCK_GAP;
                 }
             }
-            let plan = LivePlan::of(live, self.transcript.live_plan.take());
+            // Placed from the reply's top, so a later pass can go on from
+            // any of its segments.
+            let start = Resume {
+                h,
+                ..Resume::default()
+            };
+            if let Some((_, _, gap, _)) = resume {
+                next_gap = gap;
+            }
             let shown = Shown {
                 hidden: live_fold.and_then(|lf| lf.hidden.as_ref()),
                 folding,
                 gap: next_gap,
+                record: Some(plan.keep),
+                resume: Some(resume.map_or(start, |(_, _, _, resume)| resume)),
                 ..Shown::default()
             };
             let placed = self.place(
                 layout,
-                y + h,
+                y,
                 &plan.plan,
                 None,
                 live.stamp,
@@ -1578,9 +1676,10 @@ impl ViewState {
                 shown,
             );
             self.transcript.live_plan = Some(plan);
-            if placed.any {
-                h += placed.h;
+            if let (Some(key), Some(recorded)) = (placed_key, placed.recorded) {
+                self.transcript.live_placed = Some((key, y, next_gap, recorded));
             }
+            h = placed.h;
             let push = |view: &mut Self,
                         layout: &mut ChatLayout,
                         h: &mut f32,
@@ -1672,6 +1771,7 @@ impl ViewState {
             }
         } else {
             self.transcript.live_plan = None;
+            self.transcript.live_placed = None;
             if !chat.echoes.is_empty() {
                 y += BLOCK_GAP;
                 y = self.single(layout, y, hash_of("working"), Role::Other, &lay_working);
@@ -3572,6 +3672,14 @@ mod tests {
             result("x2"),
             block("text"),
             text("After the calls."),
+            text(" And then some more words,"),
+            r#"{"type":"tokens_update","convId":"c","tokens":80}"#.to_owned(),
+            text(" enough\\n\\nto make a second paragraph"),
+            text(" grow over lines and lines of text that wrap a few times on the phone"),
+            call("x4"),
+            result("x4"),
+            block("text"),
+            text("Next."),
             r#"{"type":"system_message","convId":"c","text":"Claude account switched","color":"warning"}"#.to_owned(),
             block("thinking"),
             think("More."),
@@ -3603,6 +3711,10 @@ mod tests {
                     shown(&whole),
                     "show all {show_all}, after event {at}: {event}"
                 );
+                // A chunk kept what was settled.
+                if event.contains("text_chunk") && model.chat.live.is_some() {
+                    assert!(view.transcript.live_placed.is_some(), "after event {at}");
+                }
             }
         }
     }
