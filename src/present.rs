@@ -25,10 +25,10 @@ use crate::gfx::Canvas;
 /// x11rb never needs BIG-REQUESTS (whose negotiation is a reply wait).
 const MAX_REQUEST_BYTES: usize = 200 * 1024;
 const BAND_ROWS: i32 = 16;
-/// A frame changing at least this much goes through the shared buffer
-/// (`Shared`); a smaller one is cheaper through the socket, which never
-/// waits for the server.
-const SHM_FROM_BYTES: usize = 512 * 1024;
+/// A frame changing at least this much (a fifth of the screen) goes
+/// through the shared buffer (`Shared`); a smaller one (a scroll strip, a
+/// streamed line) through the socket, which never waits for the server.
+const SHM_FROM_BYTES: usize = 2 * 1024 * 1024;
 const CHUNK: usize = 64;
 
 pub struct Presenter {
