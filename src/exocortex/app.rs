@@ -1294,7 +1294,7 @@ fn draw_frame(
     renderer.frame = Some(record);
     let (drawn, kind) = match update {
         // Nothing on screen changed.
-        Some(damage) if damage.rows.is_empty() && damage.moved.is_none() => return Ok(()),
+        Some(damage) if damage.is_empty() => return Ok(()),
         Some(damage) => {
             if let Some((y0, y1, dy)) = damage.moved {
                 renderer.presenter.scroll(conn, y0, y1, dy)?;
@@ -1303,6 +1303,9 @@ fn draw_frame(
             renderer
                 .presenter
                 .present_rows(conn, &renderer.canvas, 0, &damage.rows)?;
+            renderer
+                .presenter
+                .present_areas(conn, &renderer.canvas, 0, &damage.areas)?;
             if env_flag("EXOCORTEX_APP_VERIFY") {
                 verify(&renderer.canvas, model, view, pressed, now, &damage);
             }
