@@ -177,7 +177,12 @@ fn call_lines(
     let mut shown = String::new();
     let mut rest_rows = 0;
     for (index, line) in detail.split('\n').enumerate() {
-        let chars = line.chars().count() + if index == 0 { label.chars().count() + 1 } else { 0 };
+        let chars = line.chars().count()
+            + if index == 0 {
+                label.chars().count() + 1
+            } else {
+                0
+            };
         if index <= keep {
             if index > 0 {
                 shown.push('\n');
@@ -255,9 +260,9 @@ pub(crate) fn lay_tool(
         context.styles,
         presentation.as_ref().and_then(|p| p.tool_style.as_ref()),
     );
-    let failed = tool.result.is_some_and(|at| {
-        matches!(&blocks[at], Block::ToolResult { is_error: true, .. })
-    });
+    let failed = tool
+        .result
+        .is_some_and(|at| matches!(&blocks[at], Block::ToolResult { is_error: true, .. }));
     let x0 = MARGIN + indent;
     let x1 = W - MARGIN;
     let width = x1 - x0;
@@ -305,7 +310,11 @@ pub(crate) fn lay_tool(
     if failed {
         let err = ty.weight(Weight::MonoBold);
         let w = super::super::ui::widgets::measure("ERR", err);
-        let right = if expand { chevron_cx - CHEVRON / 2.0 - 17.0 } else { x1 - HAIRLINE - PAD.1 };
+        let right = if expand {
+            chevron_cx - CHEVRON / 2.0 - 17.0
+        } else {
+            x1 - HAIRLINE - PAD.1
+        };
         ops.push(text_op(right - w, ty.baseline(top), "ERR", err, p.error));
     }
     if matches!(output, Output::Running) && context.live {
@@ -314,7 +323,7 @@ pub(crate) fn lay_tool(
             h: SPINNER + 4.0,
             kind: MarkKind::Spinner {
                 cx: chevron_cx,
-                cy: SPINNER / 2.0 + 2.0,
+                cy: first_cy,
                 size: SPINNER,
                 color: p.accent,
                 background: mix(color, 5, app),
@@ -342,7 +351,12 @@ pub(crate) fn lay_tool(
     let mut h = head;
     if open {
         ops.push(Op::Rect {
-            rect: RectF::new(x0 + HAIRLINE, h - HAIRLINE, width - 2.0 * HAIRLINE, HAIRLINE),
+            rect: RectF::new(
+                x0 + HAIRLINE,
+                h - HAIRLINE,
+                width - 2.0 * HAIRLINE,
+                HAIRLINE,
+            ),
             radius: 0.0,
             color: mix(color, 22, app),
             alpha: 1.0,
@@ -386,14 +400,24 @@ fn body(
     let ops = &mut piece.laid.ops;
     match output {
         Output::Text(text) if text.trim().is_empty() => {
-            ops.push(text_op(tx, ty.baseline(top + 22.0), "No output.", ty, p.muted));
+            ops.push(text_op(
+                tx,
+                ty.baseline(top + 22.0),
+                "No output.",
+                ty,
+                p.muted,
+            ));
             22.0 + ty.line() + 22.0
         }
         Output::Text(text) => {
             // Read full output, Copy.
             let mut x = tx;
             for (label, icon, action) in [
-                ("Read full output", Icon::FileText, chat::Act::ReadOutput(tool.into())),
+                (
+                    "Read full output",
+                    Icon::FileText,
+                    chat::Act::ReadOutput(tool.into()),
+                ),
                 ("Copy", Icon::Copy, chat::Act::CopyOutput(tool.into())),
             ] {
                 let w = 39.0 + 14.0 + super::super::ui::widgets::measure(label, ty);
@@ -449,7 +473,7 @@ fn body(
                 h: theme::SPINNER + 4.0,
                 kind: MarkKind::Spinner {
                     cx: tx + theme::SPINNER / 2.0,
-                    cy: theme::SPINNER / 2.0 + 2.0,
+                    cy,
                     size: theme::SPINNER,
                     color: p.accent,
                     background: c.tool_bg,
@@ -486,7 +510,13 @@ fn body(
             h
         }
         Output::Running => {
-            ops.push(text_op(tx, ty.baseline(top + 22.0), "Running…", ty, p.muted));
+            ops.push(text_op(
+                tx,
+                ty.baseline(top + 22.0),
+                "Running…",
+                ty,
+                p.muted,
+            ));
             22.0 + ty.line() + 22.0
         }
     }
@@ -546,7 +576,13 @@ pub(crate) fn lay_group(
     let label = format!("{} tool calls", calls.len());
     let x = MARGIN + 33.0 + 22.0;
     let label_w = super::super::ui::widgets::measure(&label, T_EYEBROW);
-    ops.push(text_op(x, T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0), &label, T_EYEBROW, p.muted));
+    ops.push(text_op(
+        x,
+        T_EYEBROW.baseline(cy - T_EYEBROW.line() / 2.0),
+        &label,
+        T_EYEBROW,
+        p.muted,
+    ));
     let mut detail = names.join(", ");
     if failed > 0 {
         detail = format!("{detail} · {failed} failed");

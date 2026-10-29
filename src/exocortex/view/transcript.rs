@@ -24,7 +24,7 @@ use super::super::anim::{Animator, Tween};
 use super::super::footer;
 use super::super::markdown::{self, MdBlock};
 use super::super::model::chat::{
-    COMPACTION_KIND, merged_thinking, order_queued, queue_label, thinking_key, visible,
+    COMPACTION_KIND, Disclosure, merged_thinking, order_queued, queue_label, thinking_key, visible,
 };
 use super::super::model::{Action, Chat, Model, Page, chat, rich::Rich};
 use super::super::proto::{Block, Entry, Metadata, ToolStyle};
@@ -34,10 +34,10 @@ use super::super::theme::{
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets;
 use super::blocks::{
-    Edge, FOOTER_GAP, Mark, Piece, StatusKind, Tone, draw_mark, lay_bubble,
-    lay_context, lay_divider, lay_edge, lay_footer, lay_live_footer, lay_load_error, lay_md_piece,
-    lay_notice, lay_notification, lay_status, lay_thinking, lay_working, mark_frames, mark_key,
-    notice_color, wall_ms,
+    Edge, FOOTER_GAP, Mark, Piece, StatusKind, Tone, draw_mark, lay_bubble, lay_context,
+    lay_divider, lay_edge, lay_footer, lay_live_footer, lay_load_error, lay_md_piece, lay_notice,
+    lay_notification, lay_status, lay_thinking, lay_working, mark_frames, mark_key, notice_color,
+    wall_ms,
 };
 use super::markdown_layout::md_gap;
 use super::media::{Strip, lay_strip};
@@ -136,6 +136,8 @@ pub(crate) struct Context<'a> {
     pub(crate) styles_version: u64,
     /// Laying out the live reply.
     pub(crate) live: bool,
+    /// What opens by default.
+    pub(crate) disclosure: Disclosure,
 }
 
 // ----- Plans ---------------------------------------------------------------------------
@@ -268,13 +270,12 @@ fn notification_preview(text: &str) -> String {
     }
     let mut text = text.trim_start();
     // The envelope.
-    for head in ["[notification]", "[external notification"] {
-        if let Some(rest) = text.strip_prefix(head) {
-            text = rest.split_once(']').map_or(rest, |(_, after)| after);
-            break;
-        }
-    }
-    if let Some(rest) = text.strip_prefix("[chrono ")
+    if let Some(rest) = text.strip_prefix("[notification]") {
+        text = rest;
+    } else if let Some(rest) = text
+        .strip_prefix("[external notification")
+        .or_else(|| text.strip_prefix("[chrono wake:"))
+        .or_else(|| text.strip_prefix("[chrono hard wake:"))
         && let Some((_, after)) = rest.split_once(']')
     {
         text = after;
@@ -459,7 +460,14 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
                             call,
                             result,
                             key: format!("tool:{tool_call_id}"),
-                            hash: hash_of(("tool", tool_call_id, tool_name, summary, detail, outcome)),
+                            hash: hash_of((
+                                "tool",
+                                tool_call_id,
+                                tool_name,
+                                summary,
+                                detail,
+                                outcome,
+                            )),
                         })
                     })
                     .collect();
@@ -480,6 +488,24 @@ pub(crate) fn plan_blocks(blocks: &[Block]) -> Plan {
         segments.push(Segment::Images { strip, gap });
     }
     Plan { segments }
+}
+
+/// Today's local day number (what "today" and "yesterday" in footers turn
+/// on), looked up at most once a second.
+fn today() -> i64 {
+    use std::cell::Cell;
+    thread_local! {
+        static TODAY: Cell<Option<(Instant, i64)>> = const { Cell::new(None) };
+    }
+    let now = Instant::now();
+    TODAY.with(|cell| match cell.get() {
+        Some((at, day)) if now.duration_since(at) < Duration::from_secs(1) => day,
+        _ => {
+            let day = footer::local_day(wall_ms(now));
+            cell.set(Some((now, day)));
+            day
+        }
+    })
 }
 
 /// More pieces and plans than this are kept, the least recently used go.
@@ -563,28 +589,29 @@ impl ViewState {
         let mut h = 0.0;
         let mut index = 0;
         let mut tail_gap = ROW_GAP;
-        let mut put = |layout: &mut ChatLayout, h: &mut f32, (laid, marks): (Rc<Laid>, Rc<[Mark]>)| {
-            if laid.h > 0.0 {
-                let top = y + *h;
-                for mark in marks.iter() {
-                    layout.marks.push(PlacedMark {
-                        top,
-                        mark: mark.clone(),
+        let mut put =
+            |layout: &mut ChatLayout, h: &mut f32, (laid, marks): (Rc<Laid>, Rc<[Mark]>)| {
+                if laid.h > 0.0 {
+                    let top = y + *h;
+                    for mark in marks.iter() {
+                        layout.marks.push(PlacedMark {
+                            top,
+                            mark: mark.clone(),
+                        });
+                    }
+                    layout.items.push(Placed {
+                        y: top,
+                        laid: laid.clone(),
+                        stamp,
+                        index,
+                        role: Role::Message,
                     });
+                    index += 1;
+                    *h += laid.h;
                 }
-                layout.items.push(Placed {
-                    y: top,
-                    laid: laid.clone(),
-                    stamp,
-                    index,
-                    role: Role::Message,
-                });
-                index += 1;
-                *h += laid.h;
-            }
-        };
+            };
         let chat = context.chat;
-        let expanded = &chat.expanded;
+        let open_at = |key: &str| chat.is_open(key, context.disclosure);
         let model = context.model;
         for segment in &plan.segments {
             match segment {
@@ -594,12 +621,13 @@ impl ViewState {
                     };
                     let bubble_label = |a: &Automated| {
                         let source = match a.kind.as_str() {
-                            "exo_send" => Some(
-                                a.source
-                                    .as_deref()
-                                    .map_or_else(|| "another conversation".to_owned(), |id| title_of(model, id)),
-                            ),
-                            "subagent_completion" => a.source.as_deref().map(|id| title_of(model, id)),
+                            "exo_send" => Some(a.source.as_deref().map_or_else(
+                                || "another conversation".to_owned(),
+                                |id| title_of(model, id),
+                            )),
+                            "subagent_completion" => {
+                                a.source.as_deref().map(|id| title_of(model, id))
+                            }
                             "external_notification" => a.channel.clone(),
                             _ => None,
                         };
@@ -611,7 +639,8 @@ impl ViewState {
                     match automated {
                         // Images alone: their strip, no empty bubble.
                         None if text.trim().is_empty()
-                            && matches!(entry, Some(Entry::User { images, .. }) if !images.is_empty()) => {}
+                            && matches!(entry, Some(Entry::User { images, .. }) if !images.is_empty()) =>
+                            {}
                         None => {
                             let piece = self.piece(hash_of(("bubble", text, Tone::Own)), || {
                                 lay_bubble(text, Tone::Own, None, false)
@@ -621,7 +650,10 @@ impl ViewState {
                         // A parent's delegation is this conversation's prompt.
                         Some(a)
                             if a.kind == "exo_send"
-                                && !a.source.as_deref().is_some_and(|id| own_subagent(model, id)) =>
+                                && !a
+                                    .source
+                                    .as_deref()
+                                    .is_some_and(|id| own_subagent(model, id)) =>
                         {
                             let label = bubble_label(a);
                             let piece = self.piece(hash_of(("auto", text, &label)), || {
@@ -631,10 +663,11 @@ impl ViewState {
                         }
                         Some(a) => {
                             let key = format!("u:{}", hash_of(text));
-                            let open = expanded.contains(&key);
-                            let piece = self.piece(hash_of(("note", &key, a.label, &a.preview, open)), || {
-                                lay_notification(a.label, &a.preview, &key, open)
-                            });
+                            let open = open_at(&key);
+                            let piece = self
+                                .piece(hash_of(("note", &key, a.label, &a.preview, open)), || {
+                                    lay_notification(a.label, &a.preview, &key, open)
+                                });
                             put(layout, &mut h, piece);
                             tail_gap = ROW_GAP - NOTIFICATION_TRIM;
                             if open {
@@ -651,18 +684,22 @@ impl ViewState {
                 }
                 Segment::Notice { key, muted } => {
                     let (text, color) = match entry {
-                        Some(Entry::System { text, color, .. }) => (text, notice_color(color.as_deref())),
+                        Some(Entry::System { text, color, .. }) => {
+                            (text, notice_color(color.as_deref()))
+                        }
                         Some(Entry::User { text, .. }) => (text, theme::p().muted),
                         _ => continue,
                     };
-                    let open = expanded.contains(key);
-                    let piece = self.piece(hash_of(("notice", key, text, color, *muted, open, stamp)), || {
-                        lay_notice(text, color, *muted, key, stamp, open)
-                    });
+                    let open = open_at(key);
+                    let piece = self.piece(
+                        hash_of(("notice", key, text, color, *muted, open, stamp)),
+                        || lay_notice(text, color, *muted, key, stamp, open),
+                    );
                     put(layout, &mut h, piece);
                 }
                 Segment::Divider => {
-                    let piece = self.piece(hash_of("divider"), || lay_divider("Compaction finished"));
+                    let piece =
+                        self.piece(hash_of("divider"), || lay_divider("Compaction finished"));
                     put(layout, &mut h, piece);
                 }
                 Segment::Markdown { block, hash, gap } => {
@@ -686,7 +723,7 @@ impl ViewState {
                     gap,
                 } => {
                     h += gap;
-                    let open = expanded.contains(key);
+                    let open = open_at(key);
                     let growing = context.live && *end == blocks.len();
                     let (_, text) = merged_thinking(blocks, *index);
                     let piece = self.piece(hash_of((hash, open, growing, stamp)), || {
@@ -698,7 +735,7 @@ impl ViewState {
                     h += gap;
                     let indent = match group {
                         Some((key, hash)) => {
-                            let open = expanded.contains(key);
+                            let open = open_at(key);
                             let piece = self
                                 .piece(hash_of((hash, open, context.styles_version)), || {
                                     lay_group(blocks, calls, key, open, context)
@@ -716,7 +753,7 @@ impl ViewState {
                             h += 17.0;
                         }
                         let output = output_state(chat, tool, blocks, context.live);
-                        let open = expanded.contains(&tool.key) && expandable(&output);
+                        let open = open_at(&tool.key) && expandable(&output);
                         if matches!(output, Output::Unknown) {
                             let id = tool.key.trim_start_matches("tool:").to_owned();
                             layout.tools.push((y + h, id));
@@ -755,8 +792,10 @@ impl ViewState {
     pub(crate) fn layout(&mut self, model: &Model) {
         self.check_generation();
         let chat = &model.chat;
-        let day = footer::local_day(wall_ms(Instant::now()));
+        let day = today();
+        let disclosure = Disclosure::of(&model.persist);
         let key = hash_of((
+            disclosure,
             chat.version,
             chat.id.as_deref(),
             chat.loaded,
@@ -777,6 +816,7 @@ impl ViewState {
             styles: &model.ops.tool_styles,
             styles_version: model.ops.styles_version,
             live: false,
+            disclosure,
         };
         let mut layout = ChatLayout::default();
         let mut y = TRANSCRIPT_TOP;
@@ -816,9 +856,14 @@ impl ViewState {
             } else {
                 Edge::Beginning
             };
-            y = single(self, &mut layout, y, hash_of(("edge", &edge)), Role::Other, &|| {
-                lay_edge(&edge)
-            });
+            y = single(
+                self,
+                &mut layout,
+                y,
+                hash_of(("edge", &edge)),
+                Role::Other,
+                &|| lay_edge(&edge),
+            );
             gap = ROW_GAP;
         }
         let live_follows = chat.live.is_some() && chat.echoes.is_empty();
@@ -834,7 +879,15 @@ impl ViewState {
                 _ => &[],
             };
             let top = y + gap - plan.lead();
-            let placed = self.place(&mut layout, top, &plan, Some(entry), *stamp, blocks, &context);
+            let placed = self.place(
+                &mut layout,
+                top,
+                &plan,
+                Some(entry),
+                *stamp,
+                blocks,
+                &context,
+            );
             if placed.h <= 0.0 && footers[at].is_none() {
                 continue;
             }
@@ -873,9 +926,21 @@ impl ViewState {
             };
             y += gap;
             let plan = plan_blocks(&live.blocks);
-            let placed = self.place(&mut layout, y, &plan, None, live.stamp, &live.blocks, &live_context);
+            let placed = self.place(
+                &mut layout,
+                y,
+                &plan,
+                None,
+                live.stamp,
+                &live.blocks,
+                &live_context,
+            );
             let mut h = placed.h;
-            let push = |view: &mut Self, layout: &mut ChatLayout, h: &mut f32, key: u64, make: &dyn Fn() -> Piece| {
+            let push = |view: &mut Self,
+                        layout: &mut ChatLayout,
+                        h: &mut f32,
+                        key: u64,
+                        make: &dyn Fn() -> Piece| {
                 if *h > 0.0 {
                     *h += BLOCK_GAP;
                 }
@@ -906,16 +971,25 @@ impl ViewState {
                 (status.wait.is_some(), StatusKind::Wait),
             ] {
                 if on {
-                    push(self, &mut layout, &mut h, hash_of(("status", format!("{kind:?}"))), &|| {
-                        lay_status(kind)
-                    });
+                    push(
+                        self,
+                        &mut layout,
+                        &mut h,
+                        hash_of(("status", format!("{kind:?}"))),
+                        &|| lay_status(kind),
+                    );
                 }
             }
             // The footer row: no gap above it.
-            let base = if live_follows { live_base.clone() } else { None };
-            let (laid, marks) = self.piece(hash_of(("live footer", live.stamp, format!("{base:?}"))), || {
-                lay_live_footer(live.stamp, base.clone())
-            });
+            let base = if live_follows {
+                live_base.clone()
+            } else {
+                None
+            };
+            let (laid, marks) = self.piece(
+                hash_of(("live footer", live.stamp, format!("{base:?}"))),
+                || lay_live_footer(live.stamp, base.clone()),
+            );
             for mark in marks.iter() {
                 layout.marks.push(PlacedMark {
                     top: y + h,
@@ -934,7 +1008,14 @@ impl ViewState {
             gap = FOOTER_GAP;
         } else if !chat.echoes.is_empty() {
             y += BLOCK_GAP;
-            y = single(self, &mut layout, y, hash_of("working"), Role::Other, &lay_working);
+            y = single(
+                self,
+                &mut layout,
+                y,
+                hash_of("working"),
+                Role::Other,
+                &lay_working,
+            );
             gap = ROW_GAP;
         }
         let queued = model.queued_here();
@@ -959,9 +1040,14 @@ impl ViewState {
             && !empty
         {
             y += gap;
-            y = single(self, &mut layout, y, hash_of(("error", error)), Role::Other, &|| {
-                lay_load_error(error)
-            });
+            y = single(
+                self,
+                &mut layout,
+                y,
+                hash_of(("error", error)),
+                Role::Other,
+                &|| lay_load_error(error),
+            );
         }
         layout.marks.sort_by(|a, b| a.top.total_cmp(&b.top));
         layout.tools.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -1212,7 +1298,11 @@ pub(crate) fn frame(
         })
         .map(|m| {
             let (y0, y1) = m.rows();
-            (y0.floor() as i32, y1.ceil() as i32, mark_key(&m.mark, model, now))
+            (
+                y0.floor() as i32,
+                y1.ceil() as i32,
+                mark_key(&m.mark, model, now),
+            )
         })
         .collect();
     TranscriptFrame {
@@ -1407,10 +1497,22 @@ fn draw_jump(canvas: &mut Canvas, view: &ViewState, now: Instant) {
     let c = theme::c();
     let rect = jump_rect(view.transcript.bounds.1);
     jump_shadow(canvas, rect, 0.4 * a);
-    canvas.fill_rect(rect.x as i32, rect.y as i32, rect.w as i32, rect.h as i32, p.app_background, a);
+    canvas.fill_rect(
+        rect.x as i32,
+        rect.y as i32,
+        rect.w as i32,
+        rect.h as i32,
+        p.app_background,
+        a,
+    );
     let b = theme::HAIRLINE as i32;
     let (x, y, w, h) = (rect.x as i32, rect.y as i32, rect.w as i32, rect.h as i32);
-    for (x, y, w, h) in [(x, y, w, b), (x, y + h - b, w, b), (x, y + b, b, h - 2 * b), (x + w - b, y + b, b, h - 2 * b)] {
+    for (x, y, w, h) in [
+        (x, y, w, b),
+        (x, y + h - b, w, b),
+        (x, y + b, b, h - 2 * b),
+        (x + w - b, y + b, b, h - 2 * b),
+    ] {
         canvas.fill_rect(x, y, w, h, c.jump_border, a);
     }
     icons::draw_styled(
@@ -1448,15 +1550,35 @@ fn jump_shadow(canvas: &mut Canvas, rect: RectF, alpha: f32) {
                         continue;
                     }
                     let sy = by - dy as i32;
-                    let ox = if bx < 0 { -bx } else if bx >= rw { bx - rw + 1 } else { 0 };
-                    let oy = if sy < 0 { -sy } else if sy >= rh { sy - rh + 1 } else { 0 };
+                    let ox = if bx < 0 {
+                        -bx
+                    } else if bx >= rw {
+                        bx - rw + 1
+                    } else {
+                        0
+                    };
+                    let oy = if sy < 0 {
+                        -sy
+                    } else if sy >= rh {
+                        sy - rh + 1
+                    } else {
+                        0
+                    };
                     let a = (2.0 * falloff(ox as f32) * falloff(oy as f32)).min(1.0);
                     mask[(my * w + mx) as usize] = (a * 255.0).round() as u8;
                 }
             }
             mask
         });
-        canvas.draw_mask(rect.x as i32 - b, rect.y as i32 - b, w, h, mask, 0x000000, alpha);
+        canvas.draw_mask(
+            rect.x as i32 - b,
+            rect.y as i32 - b,
+            w,
+            h,
+            mask,
+            0x000000,
+            alpha,
+        );
     });
 }
 
@@ -1475,8 +1597,23 @@ pub(crate) fn draw_band(
 ) {
     let outer = canvas.clip();
     canvas.set_clip(x0.max(outer.0), outer.1, outer.2, outer.3);
-    canvas.fill_rect(x0, y0, W as i32 - x0, y1 - y0, theme::p().app_background, 1.0);
-    draw_transcript(canvas, model, view, pressed, (y0 as f32, y1 as f32), offset, now);
+    canvas.fill_rect(
+        x0,
+        y0,
+        W as i32 - x0,
+        y1 - y0,
+        theme::p().app_background,
+        1.0,
+    );
+    draw_transcript(
+        canvas,
+        model,
+        view,
+        pressed,
+        (y0 as f32, y1 as f32),
+        offset,
+        now,
+    );
     canvas.set_clip(outer.0, outer.1, outer.2, outer.3);
 }
 
@@ -1495,7 +1632,10 @@ pub fn stateful(model: &Model) -> bool {
 }
 
 /// The state block's Retry button, when it has one.
-fn state_button(model: &Model, (top, bottom): (f32, f32)) -> Option<(RectF, widgets::Button<'static>)> {
+fn state_button(
+    model: &Model,
+    (top, bottom): (f32, f32),
+) -> Option<(RectF, widgets::Button<'static>)> {
     model.chat.error.as_ref()?;
     let button = widgets::Button::new("Retry", widgets::ButtonKind::Secondary);
     let w = button.width();
@@ -1520,8 +1660,24 @@ pub(crate) fn draw_state(
     let cy = ((top + bottom) / 2.0).round();
     if !model.chat.loaded {
         let label = "Loading conversation…";
-        widgets::spinner(canvas, cx, cy - 40.0, theme::SPINNER, p.accent, p.app_background, now);
-        widgets::text_centered(canvas, label, cx, theme::T_NOTE.baseline(cy), theme::T_NOTE, p.muted, 1.0);
+        widgets::spinner(
+            canvas,
+            cx,
+            cy - 40.0,
+            theme::SPINNER,
+            p.accent,
+            p.app_background,
+            now,
+        );
+        widgets::text_centered(
+            canvas,
+            label,
+            cx,
+            theme::T_NOTE.baseline(cy),
+            theme::T_NOTE,
+            p.muted,
+            1.0,
+        );
         return;
     }
     match (&model.chat.error, state_button(model, (top, bottom))) {
@@ -1529,7 +1685,15 @@ pub(crate) fn draw_state(
             let lines = widgets::wrap_plain(error, theme::T_NOTE, W - 2.0 * theme::S4 * 2.0);
             let mut y = rect.y - 34.0 - lines.len() as f32 * theme::T_NOTE.line();
             for line in &lines {
-                widgets::text_centered(canvas, line, cx, theme::T_NOTE.baseline(y), theme::T_NOTE, p.error, 1.0);
+                widgets::text_centered(
+                    canvas,
+                    line,
+                    cx,
+                    theme::T_NOTE.baseline(y),
+                    theme::T_NOTE,
+                    p.error,
+                    1.0,
+                );
                 y += theme::T_NOTE.line();
             }
             let down = pressed == Some(&Action::Chat(chat::Act::Retry));
@@ -1552,12 +1716,20 @@ pub(crate) fn draw_state(
 /// What a touch on the state block hits (its Retry).
 pub(crate) fn state_hit(model: &Model, bounds: (f32, f32), x: f32, y: f32) -> Option<Action> {
     let (rect, _) = state_button(model, bounds)?;
-    rect.contains(x, y).then_some(Action::Chat(chat::Act::Retry))
+    rect.contains(x, y)
+        .then_some(Action::Chat(chat::Act::Retry))
 }
 
 /// What a touch at (`x`, `y`) hits in the transcript: the jump button,
 /// then a piece's target.
-pub(crate) fn hit(view: &mut ViewState, model: &Model, (top, bottom): (f32, f32), x: f32, y: f32, now: Instant) -> Option<Action> {
+pub(crate) fn hit(
+    view: &mut ViewState,
+    model: &Model,
+    (top, bottom): (f32, f32),
+    x: f32,
+    y: f32,
+    now: Instant,
+) -> Option<Action> {
     if jump_alpha(view, now) > 16 && jump_rect(bottom).contains(x, y) {
         return Some(Action::Chat(chat::Act::JumpToLatest));
     }
@@ -1604,5 +1776,535 @@ pub(crate) fn long_press(
         Role::Message if item.stamp != 0 => Some(Action::Chat(chat::Act::MessageMenu(item.stamp))),
         Role::Queued(id) => Some(Action::Chat(chat::Act::QueuedMenu(id.clone()))),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exocortex::model::Nav;
+    use crate::exocortex::proto::parse_event;
+    use crate::exocortex::view::{Hit, chat_frame, draw, draw_chat_update};
+    use crate::gfx::Canvas;
+
+    const HEIGHT: f32 = 2216.0;
+
+    /// A conversation open on `entries` (JSON, comma-separated).
+    fn open_with(entries: &str) -> Model {
+        let mut model = Model::new();
+        let commands = model.on_connected();
+        let ping = commands.last().unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        model.apply(
+            parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
+            Instant::now(),
+        );
+        model.apply(
+            parse_event(r#"{"type":"conversation_updated","summary":{"id":"c","provider":"anthropic","model":"claude-opus-5-5","effort":"high","title":"Test","pinned":false,"sortOrder":0,"streaming":false,"unread":false}}"#),
+            Instant::now(),
+        );
+        let commands = model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        let request = commands
+            .iter()
+            .find(|c| c["type"] == "load_conversation")
+            .unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        model.apply(
+            parse_event(&format!(
+                r#"{{"type":"conversation_loaded","reqId":"{request}","convId":"c","entries":[{entries}],"historyStartIndex":0,"hasOlderHistory":false}}"#
+            )),
+            Instant::now(),
+        );
+        model
+    }
+
+    fn feed(model: &mut Model, lines: &[&str]) {
+        for line in lines {
+            model.apply(parse_event(line), Instant::now());
+        }
+    }
+
+    fn long_entries(n: usize) -> String {
+        (0..n)
+            .map(|i| format!(r#"{{"type":"user","text":"Question {i}"}},{{"type":"ai","blocks":[{{"type":"text","text":"Answer {i}, which runs over a couple of lines so the transcript is long enough to scroll well past one screen."}}],"metadata":{{"startedAt":{},"endedAt":{},"model":"claude-opus-5-5","tokens":10}}}}"#, 1000 + i * 10, 1005 + i * 10))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Draws at `t0`, changes, then draws the next frame incrementally at
+    /// `t1`: it must equal a full redraw and change nothing outside its
+    /// damage. Returns the damaged rows.
+    fn update(
+        model: &mut Model,
+        view: &mut ViewState,
+        (t0, t1): (Instant, Instant),
+        change: impl FnOnce(&mut Model, &mut ViewState),
+    ) -> crate::exocortex::view::FrameDamage {
+        let mut canvas = Canvas::new(1080, HEIGHT as i32);
+        canvas.clear(0);
+        let old = chat_frame(model, view, None, HEIGHT, t0).expect("a chat frame");
+        draw(&mut canvas, model, view, None, t0);
+        let mut shadow = canvas.pixels.clone();
+        change(model, view);
+        let new = chat_frame(model, view, None, HEIGHT, t1).expect("a chat frame");
+        let damage =
+            draw_chat_update(&mut canvas, model, view, &old, &new, t1).expect("incremental");
+        let mut full = Canvas::new(1080, HEIGHT as i32);
+        full.clear(0);
+        draw(&mut full, model, view, None, t1);
+        let width = 1080usize;
+        for y in 0..HEIGHT as usize {
+            let row = y * width..(y + 1) * width;
+            assert!(
+                full.pixels[row.clone()] == canvas.pixels[row],
+                "row {y} differs from a full redraw: {damage:?}"
+            );
+        }
+        if let Some((y0, y1, dy)) = damage.moved {
+            let rows = y1 - y0 - dy.abs();
+            let (src, dst) = if dy > 0 { (y0, y0 + dy) } else { (y0 - dy, y0) };
+            shadow.copy_within(
+                src as usize * width..(src + rows) as usize * width,
+                dst as usize * width,
+            );
+        }
+        for y in 0..HEIGHT as i32 {
+            if damage.rows.iter().any(|(a, b)| (*a..*b).contains(&y)) {
+                continue;
+            }
+            let row = y as usize * width..(y as usize + 1) * width;
+            assert!(
+                shadow[row.clone()] == canvas.pixels[row],
+                "row {y} changed outside the damage"
+            );
+        }
+        damage
+    }
+
+    /// Rows damaged in the transcript (the header pulses on its own).
+    fn rows(damage: &crate::exocortex::view::FrameDamage) -> i32 {
+        let top = CHAT_TOP as i32;
+        damage
+            .rows
+            .iter()
+            .map(|(a, b)| (b - a.max(&top)).max(0))
+            .sum()
+    }
+
+    const START: &str = r#"{"type":"streaming_started","convId":"c","provider":"anthropic","model":"claude-opus-5-5","startedAt":5000,"snapshotKind":"start"}"#;
+
+    #[test]
+    fn completion_keeps_the_reply_its_pieces_and_its_height() {
+        let mut model = open_with(r#"{"type":"user","text":"Write"}"#);
+        feed(
+            &mut model,
+            &[
+                START,
+                r#"{"type":"text_chunk","convId":"c","text":"First.\n\nSecond paragraph."}"#,
+            ],
+        );
+        let mut view = ViewState::new();
+        view.layout(&model);
+        let live: Vec<(f32, Rc<Laid>)> = view
+            .layout
+            .items
+            .iter()
+            .map(|i| (i.y, i.laid.clone()))
+            .collect();
+        let height = view.layout.height;
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"message_complete","convId":"c","blocks":[{"type":"text","text":"First.\n\nSecond paragraph."}],"endedAt":9000,"tokens":5}"#,
+            ],
+        );
+        view.layout(&model);
+        assert_eq!(view.layout.height, height, "no height change at completion");
+        let done: Vec<(f32, Rc<Laid>)> = view
+            .layout
+            .items
+            .iter()
+            .map(|i| (i.y, i.laid.clone()))
+            .collect();
+        assert_eq!(live.len(), done.len());
+        // Every piece but the footer's row is the same, at the same place.
+        for ((y0, a), (y1, b)) in live.iter().zip(&done).take(live.len() - 1) {
+            assert!(y0 == y1 && Rc::ptr_eq(a, b));
+        }
+        // The daemon's copy changes nothing on screen.
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"history_updated","convId":"c","entries":[{"type":"user","text":"Write"},{"type":"ai","blocks":[{"type":"text","text":"First.\n\nSecond paragraph."}],"metadata":{"startedAt":5000,"endedAt":9000,"model":"claude-opus-5-5","tokens":5}}],"historyStartIndex":0,"pendingAI":null}"#,
+            ],
+        );
+        view.layout(&model);
+        assert_eq!(view.layout.height, height);
+        let settled: Vec<(f32, Rc<Laid>)> = view
+            .layout
+            .items
+            .iter()
+            .map(|i| (i.y, i.laid.clone()))
+            .collect();
+        assert!(
+            done.iter()
+                .zip(&settled)
+                .all(|((y0, a), (y1, b))| y0 == y1 && Rc::ptr_eq(a, b))
+        );
+    }
+
+    #[test]
+    fn the_reader_stays_put_through_completion_and_keyboard() {
+        let mut model = open_with(&long_entries(12));
+        feed(
+            &mut model,
+            &[
+                START,
+                r#"{"type":"text_chunk","convId":"c","text":"Streaming now."}"#,
+            ],
+        );
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let max = view.chat_max(&model, HEIGHT);
+        view.follow = false;
+        view.chat_scroll.offset = (max / 2.0).round();
+        let screen_y = |view: &mut ViewState, model: &Model, laid: &Rc<Laid>| {
+            view.layout(model);
+            let item = view
+                .layout
+                .items
+                .iter()
+                .find(|i| Rc::ptr_eq(&i.laid, laid))
+                .unwrap();
+            item.y - view.chat_scroll.value(now)
+        };
+        view.layout(&model);
+        let first = view
+            .layout
+            .items
+            .iter()
+            .find(|i| i.y >= view.chat_scroll.offset && i.stamp != 0)
+            .unwrap()
+            .laid
+            .clone();
+        let at = screen_y(&mut view, &model, &first);
+        // Completion and the daemon's copy below it.
+        let before = view.before(&model, now);
+        feed(
+            &mut model,
+            &[
+                r#"{"type":"message_complete","convId":"c","blocks":[{"type":"text","text":"Streaming now."}],"endedAt":9999,"tokens":3}"#,
+            ],
+        );
+        view.settle(&model, before, HEIGHT, now);
+        assert_eq!(screen_y(&mut view, &model, &first), at);
+        // Keyboard up (the window shrinks), then down again.
+        for height in [HEIGHT - 900.0, HEIGHT] {
+            let before = view.before(&model, now);
+            view.settle(&model, before, height, now);
+            assert_eq!(screen_y(&mut view, &model, &first), at);
+        }
+        // Following the tail, the tail stays in view as the window shrinks.
+        view.follow = true;
+        let before = view.before(&model, now);
+        view.settle(&model, before, HEIGHT - 900.0, now);
+        let max = view.chat_max(&model, HEIGHT - 900.0);
+        assert_eq!(view.chat_scroll.offset, max);
+    }
+
+    #[test]
+    fn following_resumes_within_twelve_points_of_the_tail() {
+        let model = open_with(&long_entries(12));
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let max = view.chat_max(&model, HEIGHT);
+        view.follow = false;
+        view.chat_scroll.offset = max - 40.0;
+        let before = view.before(&model, now);
+        view.settle(&model, before, HEIGHT, now);
+        assert!(!view.follow);
+        view.chat_scroll.offset = max - 30.0;
+        let before = view.before(&model, now);
+        view.settle(&model, before, HEIGHT, now);
+        assert!(view.follow);
+    }
+
+    #[test]
+    fn the_jump_button_shows_far_from_the_tail_and_not_while_loading() {
+        let mut model = open_with(&long_entries(12));
+        let mut view = ViewState::new();
+        let t0 = Instant::now();
+        let max = view.chat_max(&model, HEIGHT);
+        view.follow = false;
+        view.chat_scroll.offset = max - 300.0;
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
+        assert_eq!(
+            jump_alpha(&view, t0 + JUMP_FADE),
+            0,
+            "within 120 pt: hidden"
+        );
+        view.chat_scroll.offset = max - 400.0;
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
+        let shown = t0 + JUMP_FADE;
+        assert_eq!(jump_alpha(&view, shown), 32);
+        // Its tap jumps to the newest message.
+        let (top, bottom) = transcript_bounds(&model, HEIGHT, false);
+        let rect = jump_rect(bottom);
+        assert_eq!(
+            hit(
+                &mut view,
+                &model,
+                (top, bottom),
+                rect.x + 60.0,
+                rect.y + 60.0,
+                shown
+            ),
+            Some(Action::Chat(chat::Act::JumpToLatest))
+        );
+        // Hidden while older history loads.
+        model.chat.has_older = true;
+        model.chat.older_request = Some("r".into());
+        model.chat.touch();
+        chat_frame(&model, &mut view, None, HEIGHT, shown);
+        assert_eq!(jump_alpha(&view, shown + JUMP_FADE), 0);
+    }
+
+    #[test]
+    fn scrolling_under_the_jump_button_matches_a_full_redraw() {
+        let mut model = open_with(&long_entries(16));
+        let mut view = ViewState::new();
+        let t0 = Instant::now();
+        let max = view.chat_max(&model, HEIGHT);
+        view.follow = false;
+        view.chat_scroll.offset = (max / 2.0).round();
+        chat_frame(&model, &mut view, None, HEIGHT, t0);
+        let t = t0 + JUMP_FADE;
+        for to in [37.0, -20.0, 5.0, 120.0] {
+            let damage = update(&mut model, &mut view, (t, t), |_, view| {
+                view.chat_scroll.offset += to;
+            });
+            assert!(damage.moved.is_some());
+            // The strip the move uncovered and the button's rows.
+            assert!(
+                rows(&damage) <= to.abs() as i32 + 122 + 2 * 44 + 11 + 2 * to.abs() as i32 + 4,
+                "{damage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_footer_ticks_in_its_own_rows() {
+        let mut model = open_with(r#"{"type":"user","text":"Go"}"#);
+        feed(
+            &mut model,
+            &[
+                START,
+                r#"{"type":"text_chunk","convId":"c","text":"Working on it."}"#,
+            ],
+        );
+        let mut view = ViewState::new();
+        view.chat_max(&model, HEIGHT);
+        let t0 = Instant::now();
+        // Two seconds later: only the footer's line changed.
+        let damage = update(
+            &mut model,
+            &mut view,
+            (t0, t0 + Duration::from_millis(2000)),
+            |_, _| {},
+        );
+        assert!(damage.moved.is_none());
+        assert!(rows(&damage) <= 2 * 40 + 2, "{damage:?}");
+        assert!(rows(&damage) > 0, "the clock moved");
+        // A new rate (tokens_update) without a layout pass.
+        let damage = update(&mut model, &mut view, (t0, t0), |model, _| {
+            model.apply(
+                parse_event(r#"{"type":"tokens_update","convId":"c","tokens":40,"generationThroughput":{"provider":"anthropic","model":"claude-opus-5-5","rates":[61.5]}}"#),
+                Instant::now(),
+            );
+        });
+        assert!(rows(&damage) <= 2 * 40 + 2, "{damage:?}");
+    }
+
+    #[test]
+    fn a_running_tool_spins_in_its_own_rows() {
+        let mut model = open_with(r#"{"type":"user","text":"Go"}"#);
+        feed(
+            &mut model,
+            &[
+                START,
+                r#"{"type":"tool_call","convId":"c","toolCallId":"t1","toolName":"Bash","input":{"command":"sleep 5"},"summary":"sleep 5"}"#,
+            ],
+        );
+        let mut view = ViewState::new();
+        view.chat_max(&model, HEIGHT);
+        assert!(
+            view.layout
+                .marks
+                .iter()
+                .any(|m| matches!(m.mark.kind, super::super::blocks::MarkKind::Spinner { .. }))
+        );
+        let t0 = Instant::now();
+        for step in 1..4 {
+            let at = t0 + Duration::from_millis(step * 100);
+            let damage = update(&mut model, &mut view, (t0, at), |_, _| {});
+            assert!(
+                rows(&damage) <= 2 * (28 + 4) + 2 * 40 + 4,
+                "spinner and clock only: {damage:?}"
+            );
+        }
+        // Its result: the row keeps its height; the spinner goes.
+        let damage = update(&mut model, &mut view, (t0, t0), |model, _| {
+            model.apply(
+                parse_event(r#"{"type":"tool_result","convId":"c","toolCallId":"t1","toolName":"Bash","output":"ok","isError":false}"#),
+                Instant::now(),
+            );
+        });
+        assert!(rows(&damage) < 200, "the row alone: {damage:?}");
+        assert!(
+            view.layout
+                .marks
+                .iter()
+                .all(|m| !matches!(m.mark.kind, super::super::blocks::MarkKind::Spinner { .. }))
+        );
+    }
+
+    #[test]
+    fn status_lines_show_under_the_live_reply() {
+        let mut model = open_with(r#"{"type":"user","text":"Go"}"#);
+        feed(
+            &mut model,
+            &[
+                START,
+                r#"{"type":"stream_retry","convId":"c","attempt":1,"maxAttempts":5,"errorMessage":"Overloaded","delaySec":30}"#,
+                r#"{"type":"connection_wait_status","convId":"c","active":true,"startedAt":1}"#,
+            ],
+        );
+        let mut view = ViewState::new();
+        view.chat_max(&model, HEIGHT);
+        let kinds: Vec<StatusKind> = view
+            .layout
+            .marks
+            .iter()
+            .filter_map(|m| match m.mark.kind {
+                super::super::blocks::MarkKind::Status(kind) => Some(kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, [StatusKind::Retry, StatusKind::Wait]);
+        // No WORKING while a status speaks for the reply.
+        assert!(!view.layout.marks.iter().any(|m| matches!(&m.mark.kind, super::super::blocks::MarkKind::Shimmer { text, .. } if text == "WORKING")));
+        let t0 = Instant::now();
+        update(
+            &mut model,
+            &mut view,
+            (t0, t0 + Duration::from_millis(1100)),
+            |_, _| {},
+        );
+    }
+
+    #[test]
+    fn notifications_fold_notices_show_and_model_only_ones_do_not() {
+        let mut model = open_with(
+            r#"{"type":"user","text":"[notification] Discord/main · dm\nHello there from Discord","metadata":{"startedAt":1,"model":"","tokens":0,"automation":{"kind":"external_notification"}}},{"type":"system","text":"Claude account switched from main to max2","color":"warning","metadata":{"startedAt":2,"model":"","tokens":0,"kind":"provider_notice"}},{"type":"system","text":"client host info","metadata":{"startedAt":3,"model":"","tokens":0,"kind":"client_host"}},{"type":"system","text":"--- Compaction finished ---","metadata":{"startedAt":4,"model":"","tokens":0,"kind":"context_compaction_finished","system":true}}"#,
+        );
+        let mut view = ViewState::new();
+        view.layout(&model);
+        // The edge, the notification row, the notice, the divider.
+        assert_eq!(view.layout.items.len(), 4);
+        let toggle = view.layout.items[1].laid.hits[0].1.clone();
+        let Action::Chat(chat::Act::ToggleExpanded(key)) = &toggle else {
+            panic!("{toggle:?}");
+        };
+        assert!(key.starts_with("u:"));
+        let notice = view.layout.items[2].laid.h;
+        assert!(notice >= super::super::blocks::HEAD);
+        model.handle(toggle);
+        view.layout(&model);
+        // Opened: the automated bubble under its row.
+        assert_eq!(view.layout.items.len(), 5);
+        let text: Vec<String> = view.layout.items[2]
+            .laid
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                crate::exocortex::view::ops::Op::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text.iter()
+                .any(|t| t.contains("Notification · from Discord/main · dm")),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_press_opens_the_message_menu_and_the_footer_too() {
+        let mut model = open_with(&long_entries(2));
+        let mut view = ViewState::new();
+        let now = Instant::now();
+        let bounds = transcript_bounds(&model, HEIGHT, false);
+        view.layout(&model);
+        let bubble = view.layout.items.iter().find(|i| i.stamp != 0).unwrap();
+        let (stamp, y) = (
+            bubble.stamp,
+            bounds.0 + bubble.y + 10.0 - view.chat_scroll.value(now),
+        );
+        assert_eq!(
+            long_press(&model, &mut view, bounds, y, now),
+            Some(Action::Chat(chat::Act::MessageMenu(stamp)))
+        );
+        model.handle(Action::Chat(chat::Act::MessageMenu(stamp)));
+        assert_eq!(model.ui.opening.len(), 1);
+        // The footer's row is a tap target for the same menu.
+        let footer = view
+            .layout
+            .items
+            .iter()
+            .find(|i| i.index == u32::MAX)
+            .unwrap();
+        assert!(matches!(
+            footer.laid.hits[0].1,
+            Action::Chat(chat::Act::MessageMenu(_))
+        ));
+        let _ = Hit::Transcript;
+    }
+
+    #[test]
+    fn states_show_loading_empty_and_errors() {
+        let mut model = open_with("");
+        assert!(stateful(&model));
+        let bounds = transcript_bounds(&model, HEIGHT, false);
+        assert_eq!(state_hit(&model, bounds, 540.0, 1000.0), None);
+        model.chat.error = Some("The conversation did not respond.".into());
+        let (rect, _) = state_button(&model, bounds).unwrap();
+        assert_eq!(
+            state_hit(&model, bounds, rect.x + 5.0, rect.y + 5.0),
+            Some(Action::Chat(chat::Act::Retry))
+        );
+        let mut canvas = Canvas::new(1080, HEIGHT as i32);
+        let mut view = ViewState::new();
+        draw(&mut canvas, &mut model, &mut view, None, Instant::now());
+        assert!(canvas.pixels.contains(&theme::p().error));
+    }
+
+    #[test]
+    fn legacy_prompts_and_previews() {
+        assert!(legacy_automated("[notification] x"));
+        assert!(legacy_automated("[chrono wake: deploy] check"));
+        assert!(legacy_automated("[Discord Notification] hi"));
+        assert!(legacy_automated("[external notification] x"));
+        assert!(!legacy_automated("[external notifications] x"));
+        assert!(!legacy_automated("Hello [notification]"));
+        assert_eq!(
+            notification_preview(
+                "[notification] Discord/main · dm\n→ Ana [ch:1] <@42> said hi\n\nAction: reply"
+            ),
+            "Discord/main · dm → Ana said hi"
+        );
     }
 }

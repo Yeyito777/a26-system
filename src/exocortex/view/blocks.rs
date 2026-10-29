@@ -88,7 +88,10 @@ pub(crate) enum MarkKind {
     },
     /// The live reply's footer line, its duration ticking: the run's
     /// metadata before the live reply (`base`) and the live reply's.
-    LiveFooter { baseline: f32, base: Option<Metadata> },
+    LiveFooter {
+        baseline: f32,
+        base: Option<Metadata>,
+    },
     /// A live status line (PAR-144).
     Status(StatusKind),
 }
@@ -217,8 +220,20 @@ pub(crate) fn lay_md_piece(block: &MdBlock) -> Piece {
 /// A text block that starts `[Context:` (PAR-133): plain, dim.
 pub(crate) fn lay_context(text: &str) -> Piece {
     let mut laid = Laid::default();
-    let lines = wrap_text(text.trim_start_matches('\n').trim_end(), T_CAPTION, W - 2.0 * MARGIN);
-    laid.h = push_runs(&mut laid.ops, &lines, MARGIN, 0.0, T_CAPTION, Some(theme::p().muted), 1.0);
+    let lines = wrap_text(
+        text.trim_start_matches('\n').trim_end(),
+        T_CAPTION,
+        W - 2.0 * MARGIN,
+    );
+    laid.h = push_runs(
+        &mut laid.ops,
+        &lines,
+        MARGIN,
+        0.0,
+        T_CAPTION,
+        Some(theme::p().muted),
+        1.0,
+    );
     laid.into()
 }
 
@@ -245,7 +260,13 @@ pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool
     let app = p.app_background;
     let fade = |color: Rgb, percent: u32| mix(color, percent, app);
     let (fill, border, rail, ink, meta) = match tone {
-        Tone::Own => (p.user_message_background, c.bubble_border, p.accent, p.text, p.muted),
+        Tone::Own => (
+            p.user_message_background,
+            c.bubble_border,
+            p.accent,
+            p.text,
+            p.muted,
+        ),
         Tone::Sending => (
             fade(p.user_message_background, 86),
             fade(c.bubble_border, 86),
@@ -277,8 +298,13 @@ pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool
     } else {
         (wrap_text(trimmed, ty, inner), ink)
     };
-    let widest = lines.iter().map(|line| line_width(line)).fold(0.0, f32::max);
-    let width = (widest + 2.0 * BUBBLE_PAD_X + 2.0 * HAIRLINE).ceil().min(BUBBLE_MAX);
+    let widest = lines
+        .iter()
+        .map(|line| line_width(line))
+        .fold(0.0, f32::max);
+    let width = (widest + 2.0 * BUBBLE_PAD_X + 2.0 * HAIRLINE)
+        .ceil()
+        .min(BUBBLE_MAX);
     let h = lines.len().max(1) as f32 * ty.line() + 2.0 * BUBBLE_PAD_Y + 2.0 * HAIRLINE;
     let x = (W - MARGIN - width).round();
     let bubble = RectF::new(x, 0.0, width, h);
@@ -310,7 +336,8 @@ pub(crate) fn lay_bubble(text: &str, tone: Tone, label: Option<&str>, gear: bool
         let w = widgets::measure(label, ty);
         let top = h + 17.0;
         let right = W - MARGIN;
-        laid.ops.push(text_op(right - w, ty.baseline(top), label, ty, meta));
+        laid.ops
+            .push(text_op(right - w, ty.baseline(top), label, ty, meta));
         if gear {
             laid.ops.push(icon_op(
                 Icon::Gear,
@@ -345,7 +372,13 @@ pub(crate) fn lay_notification(label: &str, preview: &str, key: &str, open: bool
     let ty = T_EYEBROW.weight(theme::T_ITALIC);
     let x = MARGIN + 33.0 + 22.0;
     let w = widgets::measure(label, ty);
-    laid.ops.push(text_op(x, ty.baseline(cy - ty.line() / 2.0), label, ty, p.muted));
+    laid.ops.push(text_op(
+        x,
+        ty.baseline(cy - ty.line() / 2.0),
+        label,
+        ty,
+        p.muted,
+    ));
     if !open && !preview.is_empty() {
         let px = x + w + 22.0;
         let shown = widgets::fit(preview, T_SMALL, W - MARGIN - px);
@@ -416,7 +449,13 @@ pub(crate) fn lay_thinking(text: &str, key: &str, stamp: u64, open: bool, growin
     if open {
         let w = widgets::measure("Open", T_EYEBROW);
         let right = x1 - HAIRLINE - 34.0;
-        ops.push(text_op(right - w, baseline, "Open", T_EYEBROW, p.secondary_accent));
+        ops.push(text_op(
+            right - w,
+            baseline,
+            "Open",
+            T_EYEBROW,
+            p.secondary_accent,
+        ));
         let target = (w + 68.0).max(TARGET);
         head_hit = width - target;
         piece.laid.hits.push((
@@ -424,7 +463,11 @@ pub(crate) fn lay_thinking(text: &str, key: &str, stamp: u64, open: bool, growin
             Action::Chat(chat::Act::ReadThinking(stamp, key.to_owned())),
         ));
     } else if growing {
-        let last = text.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("");
+        let last = text
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("");
         let px = label_x + label_w + 22.0;
         let shown = widgets::fit(last.trim(), T_SMALL, x1 - HAIRLINE - 28.0 - px);
         ops.push(text_op(
@@ -445,13 +488,25 @@ pub(crate) fn lay_thinking(text: &str, key: &str, stamp: u64, open: bool, growin
     let mut h = HEAD;
     if open {
         ops.push(Op::Rect {
-            rect: RectF::new(x0 + HAIRLINE, h - HAIRLINE, width - 2.0 * HAIRLINE, HAIRLINE),
+            rect: RectF::new(
+                x0 + HAIRLINE,
+                h - HAIRLINE,
+                width - 2.0 * HAIRLINE,
+                HAIRLINE,
+            ),
             radius: 0.0,
             color: c.rule_box,
             alpha: 1.0,
         });
         h += 22.0;
-        h = lay_note_markdown(ops, text, x0 + HAIRLINE + 34.0, width - 2.0 * HAIRLINE - 68.0, h, c.thinking_text);
+        h = lay_note_markdown(
+            ops,
+            text,
+            x0 + HAIRLINE + 34.0,
+            width - 2.0 * HAIRLINE - 68.0,
+            h,
+            c.thinking_text,
+        );
         h += 28.0;
     }
     if let Op::Rect { rect, .. } = &mut ops[0] {
@@ -486,14 +541,22 @@ fn lay_note_markdown(
             MdBlock::Paragraph(spans) | MdBlock::Quote(spans) | MdBlock::Heading(_, spans) => {
                 (0.0, None, spans.clone())
             }
-            MdBlock::Item(depth, marker, spans) => {
-                (f32::from(*depth) * 30.0, Some(marker.clone()), spans.clone())
-            }
+            MdBlock::Item(depth, marker, spans) => (
+                f32::from(*depth) * 30.0,
+                Some(marker.clone()),
+                spans.clone(),
+            ),
             MdBlock::Code(lines) => (0.0, None, plain(&lines.join("\n"))),
             MdBlock::Rule => (0.0, None, plain("———")),
         };
         let marker_w = if let Some(marker) = &marker {
-            ops.push(text_op(x + indent, ty.baseline(y), marker, ty, theme::p().accent));
+            ops.push(text_op(
+                x + indent,
+                ty.baseline(y),
+                marker,
+                ty,
+                theme::p().accent,
+            ));
             (widgets::measure(marker, ty) + 16.0).max(34.0)
         } else {
             0.0
@@ -564,7 +627,13 @@ pub(crate) fn lay_notice(
         p.muted,
     ));
     let bottom = if open {
-        ops.push(text_op(tx, T_EYEBROW.baseline(first_cy - T_EYEBROW.line() / 2.0), "System notice", T_EYEBROW, color));
+        ops.push(text_op(
+            tx,
+            T_EYEBROW.baseline(first_cy - T_EYEBROW.line() / 2.0),
+            "System notice",
+            T_EYEBROW,
+            color,
+        ));
         top + ty.line()
     } else {
         let mut lines = wrap_text(text.trim(), ty, text_w);
@@ -591,11 +660,24 @@ pub(crate) fn lay_notice(
     let mut h = head;
     if open {
         let body = mix(color, 70, p.text);
-        h = lay_note_markdown(ops, text.trim(), tx, x1 - HAIRLINE - 34.0 - tx, h - 22.0, body);
+        h = lay_note_markdown(
+            ops,
+            text.trim(),
+            tx,
+            x1 - HAIRLINE - 34.0 - tx,
+            h - 22.0,
+            body,
+        );
         // Copy.
         let label = "Copy";
         let w = 39.0 + 14.0 + widgets::measure(label, T_SMALL);
-        ops.push(icon_op(Icon::Copy, tx + 19.5, h + TARGET / 2.0, 39.0, p.secondary_accent));
+        ops.push(icon_op(
+            Icon::Copy,
+            tx + 19.5,
+            h + TARGET / 2.0,
+            39.0,
+            p.secondary_accent,
+        ));
         ops.push(text_op(
             tx + 53.0,
             T_SMALL.baseline(h + (TARGET - T_SMALL.line()) / 2.0),
@@ -631,7 +713,8 @@ pub(crate) fn lay_divider(label: &str) -> Piece {
     let top = 28.0;
     let cy = top + ty.line() / 2.0;
     let tx = ((W - w) / 2.0).round();
-    laid.ops.push(text_op(tx, ty.baseline(top), label, ty, p.muted));
+    laid.ops
+        .push(text_op(tx, ty.baseline(top), label, ty, p.muted));
     for (from, to) in [(MARGIN, tx - 28.0), (tx + w + 28.0, W - MARGIN)] {
         laid.ops.push(Op::Rect {
             rect: RectF::new(from, (cy - HAIRLINE / 2.0).round(), to - from, HAIRLINE),
@@ -652,7 +735,12 @@ pub(crate) fn lay_load_error(message: &str) -> Piece {
     // No disclosure: Retry instead.
     piece.laid.hits.clear();
     let top = piece.laid.h + 22.0;
-    let button = retry_button("Retry", top, Action::Chat(chat::Act::Retry), &mut piece.laid);
+    let button = retry_button(
+        "Retry",
+        top,
+        Action::Chat(chat::Act::Retry),
+        &mut piece.laid,
+    );
     piece.laid.h = button.y + button.h;
     piece
 }
@@ -661,9 +749,16 @@ pub(crate) fn lay_load_error(message: &str) -> Piece {
 fn retry_button(label: &str, top: f32, action: Action, laid: &mut Laid) -> RectF {
     let p = theme::p();
     let ty = T_NOTE.weight(Weight::MonoSemiBold);
-    let w = (widgets::measure(label, ty) + 88.0).round().min(W - 2.0 * MARGIN);
+    let w = (widgets::measure(label, ty) + 88.0)
+        .round()
+        .min(W - 2.0 * MARGIN);
     let rect = RectF::new(((W - w) / 2.0).round(), top, w, TARGET);
-    boxed(&mut laid.ops, rect, p.app_background, mix(p.accent, 50, p.app_background));
+    boxed(
+        &mut laid.ops,
+        rect,
+        p.app_background,
+        mix(p.accent, 50, p.app_background),
+    );
     let shown = widgets::fit(label, ty, w - 44.0);
     let tw = widgets::measure(&shown, ty);
     laid.ops.push(text_op(
@@ -736,7 +831,12 @@ pub(crate) fn lay_edge(edge: &Edge) -> Piece {
         }
         Edge::More => piece.laid.h = EDGE_H,
         Edge::Failed(message) => {
-            let rect = retry_button(message, 0.0, Action::Chat(chat::Act::RetryOlder), &mut piece.laid);
+            let rect = retry_button(
+                message,
+                0.0,
+                Action::Chat(chat::Act::RetryOlder),
+                &mut piece.laid,
+            );
             piece.laid.h = rect.h;
         }
     }
@@ -754,7 +854,8 @@ pub(crate) fn lay_footer(line: &str, stamp: u64, suspended: bool) -> Piece {
     let ty = T_FOOTER;
     let color = if suspended { p.warning } else { c.text_meta };
     let shown = widgets::fit(line, ty, W - 2.0 * MARGIN);
-    laid.ops.push(text_op(MARGIN, footer_baseline(), &shown, ty, color));
+    laid.ops
+        .push(text_op(MARGIN, footer_baseline(), &shown, ty, color));
     laid.hits.push((
         RectF::new(0.0, 0.0, W, FOOTER_H),
         Action::Chat(chat::Act::MessageMenu(stamp)),
@@ -793,7 +894,8 @@ pub(crate) fn lay_working() -> Piece {
     let p = theme::p();
     let mut laid = Laid::default();
     let baseline = T_EYEBROW.baseline((STATUS_H - T_EYEBROW.line()) / 2.0);
-    laid.ops.push(text_op(MARGIN, baseline, "Working", T_EYEBROW, p.muted));
+    laid.ops
+        .push(text_op(MARGIN, baseline, "Working", T_EYEBROW, p.muted));
     laid.h = STATUS_H;
     Piece {
         laid,
@@ -914,7 +1016,10 @@ fn status_text(kind: StatusKind, model: &Model, now: Instant) -> Option<(String,
             let wait = status.wait.as_ref()?;
             let label = wait.label.as_deref().unwrap_or("Waiting for connection…");
             Some((
-                format!("{label} {}", footer::format_duration(wall - wait.started_at)),
+                format!(
+                    "{label} {}",
+                    footer::format_duration(wall - wait.started_at)
+                ),
                 p.warning,
                 true,
             ))
@@ -932,7 +1037,10 @@ pub(crate) fn mark_key(mark: &Mark, model: &Model, now: Instant) -> u64 {
         MarkKind::Status(kind) => {
             let text = status_text(*kind, model, now);
             let spins = text.as_ref().is_some_and(|(_, _, spins)| *spins);
-            hash_of((text.map(|(text, ..)| text), spins.then(|| spinner_step(now))))
+            hash_of((
+                text.map(|(text, ..)| text),
+                spins.then(|| spinner_step(now)),
+            ))
         }
     }
 }
@@ -981,7 +1089,15 @@ pub(crate) fn draw_mark(canvas: &mut Canvas, mark: &Mark, dy: f32, model: &Model
         MarkKind::LiveFooter { baseline, base } => {
             if let Some(line) = live_footer_text(base.as_ref(), model, now) {
                 let line = widgets::fit(&line, T_FOOTER, W - 2.0 * MARGIN);
-                widgets::text(canvas, &line, MARGIN, baseline + dy, T_FOOTER, theme::c().text_meta, 1.0);
+                widgets::text(
+                    canvas,
+                    &line,
+                    MARGIN,
+                    baseline + dy,
+                    T_FOOTER,
+                    theme::c().text_meta,
+                    1.0,
+                );
             }
         }
         MarkKind::Status(kind) => {
@@ -992,18 +1108,42 @@ pub(crate) fn draw_mark(canvas: &mut Canvas, mark: &Mark, dy: f32, model: &Model
             let mut x = MARGIN;
             if spins {
                 let at = (anim::phase(now, 700) * 21.0).floor() / 21.0;
-                spinner_at(canvas, x + STATUS_SPINNER / 2.0, cy, STATUS_SPINNER, color, p.app_background, at);
+                spinner_at(
+                    canvas,
+                    x + STATUS_SPINNER / 2.0,
+                    cy,
+                    STATUS_SPINNER,
+                    color,
+                    p.app_background,
+                    at,
+                );
                 x += STATUS_SPINNER + 22.0;
             }
             let shown = widgets::fit(&text, T_META, W - MARGIN - x);
-            widgets::text(canvas, &shown, x, T_META.baseline(cy - T_META.line() / 2.0), T_META, color, 1.0);
+            widgets::text(
+                canvas,
+                &shown,
+                x,
+                T_META.baseline(cy - T_META.line() / 2.0),
+                T_META,
+                color,
+                1.0,
+            );
         }
     }
 }
 
 /// A spinner at a turn's fraction `at` (`widgets::spinner` at a fixed
 /// phase, so a frame's key names exactly what it draws).
-fn spinner_at(canvas: &mut Canvas, cx: f32, cy: f32, size: f32, color: Rgb, background: Rgb, at: f32) {
+fn spinner_at(
+    canvas: &mut Canvas,
+    cx: f32,
+    cy: f32,
+    size: f32,
+    color: Rgb,
+    background: Rgb,
+    at: f32,
+) {
     let stroke = theme::SPINNER_STROKE * size / theme::SPINNER;
     let radius = (size - stroke) / 2.0;
     let track = mix(theme::p().text, 25, background);

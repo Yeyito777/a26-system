@@ -66,7 +66,9 @@ fn for_aggregation(entry: &Entry) -> Option<&Metadata> {
         return None;
     };
     let metadata = metadata.as_ref()?;
-    let span = metadata.ended_at.map_or(0.0, |end| end - metadata.started_at);
+    let span = metadata
+        .ended_at
+        .map_or(0.0, |end| end - metadata.started_at);
     let summary = blocks.iter().any(
         |block| matches!(block, super::proto::Block::Text { text } if text.starts_with("[Summary")),
     );
@@ -223,7 +225,10 @@ pub fn format_finish_time(ended_at: f64, now: f64) -> Option<String> {
     let (year, month, day, hour, minute) = local(ended_at);
     let (now_year, now_month, now_day, _, _) = local(now);
     let half = if hour < 12 { "am" } else { "pm" };
-    let time = format!("{}:{minute:02}{half}", if hour % 12 == 0 { 12 } else { hour % 12 });
+    let time = format!(
+        "{}:{minute:02}{half}",
+        if hour % 12 == 0 { 12 } else { hour % 12 }
+    );
     let days = day_number(now_year, now_month, now_day) - day_number(year, month, day);
     Some(match days {
         0 => time,
@@ -250,14 +255,21 @@ pub fn text(metadata: &Metadata, now: f64, active: bool) -> String {
     let rate = tokens_per_second(throughput).or_else(|| metadata.ended_at.is_none().then_some(0.0));
     let rate = rate.map_or_else(|| "—".to_owned(), |rate| format!("{rate:.1}"));
     let model = display_name(&metadata.model);
-    let model = if model.is_empty() { "—".to_owned() } else { model };
+    let model = if model.is_empty() {
+        "—".to_owned()
+    } else {
+        model
+    };
     let end = if active {
         now
     } else {
         metadata.ended_at.unwrap_or(now)
     };
-    let duration =
-        format_duration(end - metadata.work_timer_started_at.unwrap_or(metadata.started_at));
+    let duration = format_duration(
+        end - metadata
+            .work_timer_started_at
+            .unwrap_or(metadata.started_at),
+    );
     let when = if active {
         duration
     } else {
@@ -329,12 +341,20 @@ mod tests {
         let a = meta(1000.0, Some(5000.0), 10);
         let b = meta(6000.0, Some(9000.0), 5);
         let both = combine_segment(Some(&a), Some(&b)).unwrap();
-        assert_eq!((both.started_at, both.ended_at, both.tokens), (1000.0, Some(9000.0), 15));
+        assert_eq!(
+            (both.started_at, both.ended_at, both.tokens),
+            (1000.0, Some(9000.0), 15)
+        );
         // The same turn's fragments: tokens already cumulative.
         let again = combine(Some(&a), Some(&meta(1000.0, Some(6000.0), 12))).unwrap();
         assert_eq!(again.tokens, 12);
         // Live: no end yet.
-        assert_eq!(combine(Some(&a), Some(&meta(6000.0, None, 1))).unwrap().ended_at, None);
+        assert_eq!(
+            combine(Some(&a), Some(&meta(6000.0, None, 1)))
+                .unwrap()
+                .ended_at,
+            None
+        );
         let late = meta(5000.0 + 3.0 * 3600.0 * 1000.0, None, 1);
         assert_eq!(combine_segment(Some(&a), Some(&late)).unwrap(), late);
     }
@@ -407,7 +427,11 @@ mod tests {
         let noon = 1_767_225_600_000.0 + 10.0 * day + 12.0 * 3_600_000.0;
         let today = format_finish_time(noon, noon).unwrap();
         assert!(!today.contains(' '), "{today}");
-        assert!(format_finish_time(noon - day, noon).unwrap().starts_with("yesterday "));
+        assert!(
+            format_finish_time(noon - day, noon)
+                .unwrap()
+                .starts_with("yesterday ")
+        );
         let older = format_finish_time(noon - 5.0 * day, noon).unwrap();
         assert!(older.starts_with("Jan "), "{older}");
         let last_year = format_finish_time(noon - 60.0 * day, noon).unwrap();

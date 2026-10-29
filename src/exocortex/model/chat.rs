@@ -279,7 +279,12 @@ fn subtract_committed(canonical: &[Block], committed: &[Block]) -> Vec<Block> {
             }
             (
                 Block::ToolCall { tool_call_id, .. } | Block::ToolResult { tool_call_id, .. },
-                Block::ToolCall { tool_call_id: id, .. } | Block::ToolResult { tool_call_id: id, .. },
+                Block::ToolCall {
+                    tool_call_id: id, ..
+                }
+                | Block::ToolResult {
+                    tool_call_id: id, ..
+                },
             ) if std::mem::discriminant(first) == std::mem::discriminant(done)
                 && tool_call_id == id =>
             {
@@ -323,7 +328,8 @@ pub struct Chat {
     /// colour), until the next turn starts.
     pub suspended: Option<u64>,
     pub echoes: Vec<Echo>,
-    /// Tool calls, thinking blocks, notices the user opened.
+    /// Disclosures (tool calls, thinking, notices) the user toggled away
+    /// from their default (`Chat::is_open`).
     pub expanded: HashSet<String>,
     /// Tool outputs fetched on demand (history leaves them out).
     pub outputs: HashMap<String, String>,
@@ -337,7 +343,35 @@ pub struct Chat {
     pub error: Option<String>,
 }
 
+/// What opens by default (Settings: Expand thinking, Expand tool calls).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Disclosure {
+    pub thinking: bool,
+    pub tools: bool,
+}
+
+impl Disclosure {
+    /// As the settings say (read field by field: the layout asks often).
+    pub fn of(persist: &super::super::store::Persist) -> Self {
+        use super::super::store::SETTINGS;
+        Self {
+            thinking: persist.section(SETTINGS, "expandThinking"),
+            tools: persist.section(SETTINGS, "expandToolCalls"),
+        }
+    }
+
+    fn default_open(self, key: &str) -> bool {
+        (self.thinking && key.starts_with("think:")) || (self.tools && key.starts_with("tool:"))
+    }
+}
+
 impl Chat {
+    /// Whether the disclosure at `key` is open: its default, unless the
+    /// user toggled it.
+    pub fn is_open(&self, key: &str, defaults: Disclosure) -> bool {
+        defaults.default_open(key) != self.expanded.contains(key)
+    }
+
     pub(crate) fn touch(&mut self) {
         self.version = self.version.wrapping_add(1);
     }
@@ -695,7 +729,9 @@ pub fn blocks_text(chat: &Chat, blocks: &[Block], label: &dyn Fn(&str) -> String
     let mut parts: Vec<String> = Vec::new();
     for block in blocks {
         let text = match block {
-            Block::Text { text } | Block::Thinking { text, .. } => text.trim_matches('\n').to_owned(),
+            Block::Text { text } | Block::Thinking { text, .. } => {
+                text.trim_matches('\n').to_owned()
+            }
             Block::ToolCall {
                 tool_name,
                 summary,
@@ -872,11 +908,14 @@ impl Model {
                 let mut commands = Vec::new();
                 if !self.chat.expanded.remove(&key) {
                     self.chat.expanded.insert(key.clone());
-                    if let Some(tool) = key.strip_prefix("tool:") {
-                        self.chat.output_errors.remove(tool);
-                        if self.wants_output(tool) {
-                            commands.extend(self.fetch_outputs(vec![tool.to_owned()]));
-                        }
+                }
+                let defaults = Disclosure::of(&self.persist);
+                if self.chat.is_open(&key, defaults)
+                    && let Some(tool) = key.strip_prefix("tool:")
+                {
+                    self.chat.output_errors.remove(tool);
+                    if self.wants_output(tool) {
+                        commands.extend(self.fetch_outputs(vec![tool.to_owned()]));
                     }
                 }
                 self.chat.touch();
@@ -991,9 +1030,11 @@ impl Model {
     fn message_menu(&mut self, stamp: u64) {
         let label = |name: &str| self.tool_label(name);
         let (text, title, user) = match &self.chat.live {
-            Some(live) if live.stamp == stamp => {
-                (blocks_text(&self.chat, &live.blocks, &label), "Response", false)
-            }
+            Some(live) if live.stamp == stamp => (
+                blocks_text(&self.chat, &live.blocks, &label),
+                "Response",
+                false,
+            ),
             _ => {
                 let Some(entry) = self.chat.by_stamp(stamp) else {
                     return;
@@ -1591,7 +1632,9 @@ impl Model {
                     let last_tool = live
                         .blocks
                         .iter()
-                        .rposition(|b| matches!(b, Block::ToolCall { .. } | Block::ToolResult { .. }))
+                        .rposition(|b| {
+                            matches!(b, Block::ToolCall { .. } | Block::ToolResult { .. })
+                        })
                         .map_or(0, |at| at + 1);
                     live.blocks.truncate(last_tool);
                 }
@@ -1793,7 +1836,10 @@ pub fn queue_label(queued: &proto::Queued, provider: Option<&str>, now: f64) -> 
                 } else {
                     now
                 };
-                format!("queued: at {}", due_time(created + delay, now, delay < 3_600_000.0))
+                format!(
+                    "queued: at {}",
+                    due_time(created + delay, now, delay < 3_600_000.0)
+                )
             }
             "conversation" => format!("queued: after {label}"),
             "folder" => format!("queued: after folder {label}"),
@@ -1867,8 +1913,14 @@ mod tests {
     fn chat_with(entries: &str) -> Model {
         let mut model = Model::new();
         let commands = model.on_connected();
-        let ping = commands.last().unwrap()["reqId"].as_str().unwrap().to_owned();
-        model.apply(parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)), Instant::now());
+        let ping = commands.last().unwrap()["reqId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        model.apply(
+            parse_event(&format!(r#"{{"type":"pong","reqId":"{ping}"}}"#)),
+            Instant::now(),
+        );
         let commands = model.handle(Action::Nav(Nav::OpenConversation("c".into())));
         let request = commands
             .iter()
@@ -1910,14 +1962,23 @@ mod tests {
         assert_eq!(live.meta.work_timer_started_at, Some(900.0));
         feed(
             &mut model,
-            &[r#"{"type":"message_complete","convId":"c","blocks":[{"type":"text","text":"Hello"}],"endedAt":5000,"tokens":20}"#],
+            &[
+                r#"{"type":"message_complete","convId":"c","blocks":[{"type":"text","text":"Hello"}],"endedAt":5000,"tokens":20}"#,
+            ],
         );
         assert!(model.chat.live.is_none());
         assert_eq!(*model.chat.stamps.last().unwrap(), stamp);
-        let Some(Entry::Ai { metadata: Some(meta), .. }) = model.chat.entries.last() else {
+        let Some(Entry::Ai {
+            metadata: Some(meta),
+            ..
+        }) = model.chat.entries.last()
+        else {
             panic!("committed");
         };
-        assert_eq!((meta.ended_at, meta.tokens, meta.started_at), (Some(5000.0), 20, 1000.0));
+        assert_eq!(
+            (meta.ended_at, meta.tokens, meta.started_at),
+            (Some(5000.0), 20, 1000.0)
+        );
         // The daemon's copy (same blocks, its own metadata) keeps the stamp.
         model.apply(
             parse_event(r#"{"type":"history_updated","convId":"c","entries":[{"type":"user","text":"q"},{"type":"ai","blocks":[{"type":"text","text":"Hello"}],"metadata":{"startedAt":1000,"endedAt":5001,"model":"claude-opus-5-5","tokens":20}}],"historyStartIndex":0}"#),
@@ -1970,10 +2031,15 @@ mod tests {
                 r#"{"type":"streaming_started","convId":"c","provider":"a","model":"m","startedAt":1,"snapshotKind":"heartbeat","blocks":[{"type":"text","text":"Hello"}]}"#,
             ],
         );
-        assert_eq!(model.chat.live.as_ref().unwrap().blocks, vec![Block::text("Hello there")]);
+        assert_eq!(
+            model.chat.live.as_ref().unwrap().blocks,
+            vec![Block::text("Hello there")]
+        );
         feed(
             &mut model,
-            &[r#"{"type":"streaming_started","convId":"c","provider":"a","model":"m","startedAt":1,"snapshotKind":"catchup","blocks":[{"type":"text","text":"Hello there, friend"}]}"#],
+            &[
+                r#"{"type":"streaming_started","convId":"c","provider":"a","model":"m","startedAt":1,"snapshotKind":"catchup","blocks":[{"type":"text","text":"Hello there, friend"}]}"#,
+            ],
         );
         assert_eq!(
             model.chat.live.as_ref().unwrap().blocks,
@@ -1998,7 +2064,10 @@ mod tests {
         assert_eq!(model.chat.entries.len(), 1);
         let retry = model.chat.status.retry.as_ref().unwrap();
         assert_eq!((retry.attempt, retry.max_attempts), (2, 5));
-        feed(&mut model, &[r#"{"type":"text_chunk","convId":"c","text":"Back."}"#]);
+        feed(
+            &mut model,
+            &[r#"{"type":"text_chunk","convId":"c","text":"Back."}"#],
+        );
         assert!(model.chat.status.retry.is_none());
         feed(
             &mut model,
@@ -2017,13 +2086,17 @@ mod tests {
             ],
         );
         assert!(!model.chat.status.any());
-        assert!(matches!(model.chat.entries.last(), Some(Entry::System { metadata: Some(m), .. })
-            if m.kind.as_deref() == Some(COMPACTION_KIND)));
+        assert!(
+            matches!(model.chat.entries.last(), Some(Entry::System { metadata: Some(m), .. })
+            if m.kind.as_deref() == Some(COMPACTION_KIND))
+        );
         // Once only.
         let count = model.chat.entries.len();
         feed(
             &mut model,
-            &[r#"{"type":"context_compaction_status","convId":"c","active":false,"completedAt":9}"#],
+            &[
+                r#"{"type":"context_compaction_status","convId":"c","active":false,"completedAt":9}"#,
+            ],
         );
         assert_eq!(model.chat.entries.len(), count);
     }
@@ -2036,7 +2109,10 @@ mod tests {
         let commands = model.prefetch_outputs(&["t1", "t2"]);
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0]["toolCallIds"], serde_json::json!(["t1", "t2"]));
-        assert!(model.prefetch_outputs(&["t1", "t2"]).is_empty(), "one batch at a time");
+        assert!(
+            model.prefetch_outputs(&["t1", "t2"]).is_empty(),
+            "one batch at a time"
+        );
         let request = commands[0]["reqId"].as_str().unwrap();
         model.apply(
             parse_event(&format!(
@@ -2046,7 +2122,10 @@ mod tests {
         );
         assert_eq!(model.chat.output_of("t1"), Some("files"));
         assert_eq!(model.chat.output_errors["t2"], OUTPUT_MISSING);
-        assert!(model.prefetch_outputs(&["t2"]).is_empty(), "not again on its own");
+        assert!(
+            model.prefetch_outputs(&["t2"]).is_empty(),
+            "not again on its own"
+        );
         let commands = model.handle(Action::Chat(Act::RetryOutput("t2".into())));
         assert_eq!(commands[0]["toolCallIds"], serde_json::json!(["t2"]));
         // Timed out.
@@ -2091,7 +2170,10 @@ mod tests {
             "global-idle",
             Some(serde_json::json!({"type":"conversation","label":"Deploy"})),
         );
-        assert_eq!(queue_label(&next, Some("anthropic"), 0.0), "queued: next turn");
+        assert_eq!(
+            queue_label(&next, Some("anthropic"), 0.0),
+            "queued: next turn"
+        );
         assert_eq!(queue_label(&next, Some("openai"), 0.0), "queued: steer");
         assert_eq!(queue_label(&end, None, 0.0), "queued: message end");
         assert_eq!(queue_label(&idle, None, 0.0), "queued: global idle");
@@ -2121,6 +2203,9 @@ mod tests {
         assert_eq!(thinking_key(&blocks, 2), "think:t:1");
         assert_eq!(thinking_key(&blocks[1..], 1), "think:t:1");
         assert_eq!(merged_thinking(&blocks, 2), (4, "b\n\nc".into()));
-        assert_eq!(thinking_text(&blocks, "think:t:1").as_deref(), Some("b\n\nc"));
+        assert_eq!(
+            thinking_text(&blocks, "think:t:1").as_deref(),
+            Some("b\n\nc")
+        );
     }
 }

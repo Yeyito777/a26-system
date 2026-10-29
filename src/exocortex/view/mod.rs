@@ -976,7 +976,12 @@ mod tests {
         // (The footer's row stays, its line now the finish clock.)
         assert_eq!(after.len(), committed.len());
         let rows = after.len() - 1;
-        assert!(after[..rows].iter().zip(&committed[..rows]).all(|(a, b)| Rc::ptr_eq(a, b)));
+        assert!(
+            after[..rows]
+                .iter()
+                .zip(&committed[..rows])
+                .all(|(a, b)| Rc::ptr_eq(a, b))
+        );
         assert_eq!(after[rows].h, committed[rows].h);
     }
 
@@ -1199,7 +1204,10 @@ mod tests {
             // columns) as the transcript moves under it.
             let jump = 122 + 44 + 55 + 2 * 60;
             let redrawn: i32 = damage.rows.iter().map(|(a, b)| b - a).sum();
-            assert!(redrawn <= 200 + jump, "only the uncovered strip: {damage:?}");
+            assert!(
+                redrawn <= 200 + jump,
+                "only the uncovered strip: {damage:?}"
+            );
         }
         // Unchanged: nothing to draw.
         let damage = update_matches(&mut model, &mut view, height, |_, _| {});
