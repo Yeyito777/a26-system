@@ -320,6 +320,9 @@ impl Context<'_> {
                 Effect::Paste => self.model.paste_text(clipboard::paste()),
                 Effect::Dictate(what) => dictation::command(what),
                 Effect::StatusBar => ui::status_bar(&theme::status_bar()),
+                Effect::Reveal(stamp) => {
+                    self.view.reveal(self.model, stamp, self.height);
+                }
             }
             changed = true;
         }

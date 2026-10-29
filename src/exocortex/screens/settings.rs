@@ -833,7 +833,8 @@ pub fn hit(model: &Model, view: &ViewState, x: f32, y: f32, now: Instant) -> Opt
         Row::TextSize(step) => {
             let (small, track, large) = text_size_parts();
             let last = ops::TEXT_SIZES.len() - 1;
-            if x >= large.x - 20.0 {
+            // The track's ends are its own: the knob's last place is near.
+            if x >= large.x {
                 Some(Action::Ops(ops::Act::TextSize((step + 1).min(last))))
             } else if x >= track.x {
                 let nearest = (0..=last)
@@ -1064,6 +1065,18 @@ mod tests {
             hit(&model, &view, 1030.0, 60.0, now),
             Some(Action::Nav(Nav::CloseSettings))
         );
+        // Text size: the track's ends are its first and last steps, the
+        // A's a step down and up.
+        let size = at(&model, |r| matches!(r, Row::TextSize(_))) + 20.0;
+        let (small, track, large) = text_size_parts();
+        let tap = |x: f32| match hit(&model, &view, x, size, now) {
+            Some(Action::Ops(ops::Act::TextSize(step))) => Some(step),
+            _ => None,
+        };
+        assert_eq!(tap(track.x + 4.0), Some(0));
+        assert_eq!(tap(track.x + track.w - 4.0), Some(5));
+        assert_eq!(tap(large.x + 50.0), Some(3));
+        assert_eq!(tap(small.x + 50.0), Some(1));
     }
 
     #[test]

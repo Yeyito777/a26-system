@@ -1,14 +1,15 @@
 //! Find in chat (WP-E; PAR-331; the iPhone's `ui/chat/search.tsx`): the
-//! loaded history searched for a phrase (case-insensitive, C1's find
-//! engine), matches listed with their context; one opens its message in the
-//! reader.
+//! loaded history searched for a phrase (case- and accent-insensitive,
+//! C1's find engine), matches listed with their context; tapping one scrolls
+//! the chat to its message.
 
 use serde_json::Value;
 
 use super::super::find;
-use super::super::model::{Action, Model, UiAct, ops};
+use super::super::model::{Action, Effect, Model, ops};
 use super::super::proto::{Block, Entry};
 use super::super::theme;
+use super::super::ui::Haptic;
 use super::super::ui::sheet::{Prompt, prompt_sheet};
 use super::panel::{self, Btn, Built, Kind, Row, Style, Tap};
 
@@ -20,7 +21,7 @@ pub enum Act {
     /// The phrase prompt.
     Ask,
     Search(String),
-    /// A match's message, in the reader.
+    /// The chat scrolled to a match's message.
     Open(usize),
 }
 
@@ -84,15 +85,9 @@ impl Model {
                 }
             }
             Act::Open(index) => {
-                if let Some((who, text)) = self.chat.entries.get(index).and_then(entry_text) {
-                    self.handle(Action::Ui(UiAct::Read {
-                        title: match who {
-                            "USER" => "Your message".into(),
-                            "ASSISTANT" => "Reply".into(),
-                            other => other.to_lowercase(),
-                        },
-                        text,
-                    }));
+                if let Some(&stamp) = self.chat.stamps.get(index) {
+                    self.ui.haptic(Haptic::Selection);
+                    self.ui.effects.push(Effect::Reveal(stamp));
                 }
             }
         }
@@ -182,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn finding_asks_then_lists_then_reads() {
+    fn finding_asks_then_lists_then_shows_the_message() {
         use crate::exocortex::model::Nav;
         let mut model = Model::new();
         model.handle(Action::Nav(Nav::OpenConversation("c".into())));
@@ -202,8 +197,36 @@ mod tests {
         assert!(matches!(&built.rows[1], Row::Hit { role, .. } if role == "USER"));
         model.handle(Action::Ops(ops::Act::Find(Act::Open(0))));
         assert_eq!(
-            model.ui.opening.pop().unwrap().label(),
-            "reader: Your message"
+            model.ui.effects.last(),
+            Some(&Effect::Reveal(model.chat.stamps[0]))
         );
+    }
+
+    #[test]
+    fn a_match_is_scrolled_to() {
+        use crate::exocortex::model::Nav;
+        use crate::exocortex::view::ViewState;
+        let mut model = Model::new();
+        model.handle(Action::Nav(Nav::OpenConversation("c".into())));
+        for n in 0..40 {
+            model.chat.push(Entry::User {
+                text: format!("message {n}"),
+                images: Vec::new(),
+                metadata: None,
+            });
+        }
+        let mut view = ViewState::new();
+        let height = 2400.0;
+        let max = view.chat_max(&model, height);
+        assert!(max > 0.0);
+        assert!(view.reveal(&model, model.chat.stamps[20], height));
+        let middle = view.chat_scroll.offset;
+        assert!(middle > 0.0 && middle < max, "{middle} of {max}");
+        assert!(!view.follow);
+        assert!(view.reveal(&model, model.chat.stamps[0], height));
+        assert!(view.chat_scroll.offset < middle);
+        assert!(view.reveal(&model, model.chat.stamps[39], height));
+        assert_eq!(view.chat_scroll.offset, max);
+        assert!(!view.reveal(&model, u64::MAX, height));
     }
 }
