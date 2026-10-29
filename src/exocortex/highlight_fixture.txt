@@ -1,0 +1,4830 @@
+ts
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=....fp.pp.kkkkkk.nnnn.t.nnnnn.t.nnnn.t.np..t....p.........ssssssss
+ts
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p.fffffptp.....................ff.pnp.np.tt.........
+ts
+><!doctype html><div class="a">&amp; text</div>
+=tt............tt....kkkkk.ssstt...p.....tt...t
+ts
+>--- a/file.ts
+=ttt..t....p..
+ts
+>+++ b/file.ts
+=ttt..t....p..
+ts
+>@@ -1,2 +1,3 @@ fn
+=pp.tnpn.tnpn.pp...
+ts
+>+added
+=t.....
+ts
+>-removed
+=t.......
+ts
+>diff --git a/x b/x
+=.....tt.....t...t.
+ts
+>## Heading
+=pp........
+ts
+>  - item
+=..t.....
+ts
+>  12. item
+=..nnp.....
+ts
+>> quote
+=t......
+ts
+>***
+=ttt
+ts
+>[table.sub]
+=p.....p...p
+ts
+>key = "value" # c
+=......sssssss.p..
+ts
+>#include <stdio.h>
+=p........t.....p.t
+ts
+>  # define X 1
+=..p..........n
+ts
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=...ffffpp.p.kkk......pssssspp........tpssssp.ssspp.p
+ts
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p...pt.p..p....p.t......t..ssss.tt......n.p.....
+ts
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psssp.pnp.nnnp.tnnnp.kkkkp.ttttpp.sssp.ssssssp
+ts
+>key: value # yaml
+=...p.......p.....
+ts
+>...
+=ttt
+ts
+>---
+=ttt
+ts
+>
+=
+ts
+> 
+=.
+ts
+>		
+=..
+ts
+>é漢字😀 'unterminated
+=..................
+ts
+>"unterminated string
+=..............tttttt
+ts
+>/* open comment
+=tt.............
+ts
+>`template ${x}`
+=sssssssssssssss
+ts
+>x = 'y' # 1 <a>
+=....sss.p.n.t.t
+ts
+>SELECT def fn func let int // -- /* ; {}
+=...................kkk.....ccccccccccccc
+ts
+>--- +a -b @@ ## > [t] key: v
+=ttt.t..t..pp.pp.t.p.p....p..
+ts
+>#include x
+=p.........
+ts
+>"k": true
+=sssp.kkkk
+ts
+>SeLeCt 1
+=.......n
+ts
+>a.b?.c ?? d >>>= 2 => {...x}
+=.p.tt..tt...tttt.n.tt.pttt.p
+ts
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=....tsssssssss.t.kkk.....p....fpt....p.tt.....p.........p.p
+ts
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=.....p.p...p.......p.t....np...p.p.............p..p......p..p.fffp.p.p.p
+ts
+>date = 1979-05-27T07:32:00Z
+=.......nnnntnnt.....pnnp...
+ts
+>a = +1_000.5e3
+=....t.....pnnn
+ts
+>import { expect, test } from "bun:test";
+=kkkkkk.p.......p......p.kkkk.ssssssssssp
+ts
+>  };
+=..pp
+ts
+>  return {
+=..kkkkkk.p
+ts
+> * usage with the time to each reset; a short word replaces the bars when the
+=.t..................................p........................................
+ts
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ts
+>  // With a single account the answer only explains; don't flash a loading card first.
+=..cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ts
+>  formatIntegrationDeliveryStatus,
+=.................................p
+ts
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.....p.ssssssssp......p.ssssssssp......p.sssssssss.pp
+ts
+>      sourceId: "group:ops",
+=..............p.sssssssssssp
+ts
+>function stateWithDisabledTools() {
+=kkkkkkkk.ffffffffffffffffffffffpp.p
+ts
+>/** Blank column separating wrapped history from the task-panel border. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ts
+>  const goal = state.goal;
+=..kkkkk.............p....p
+ts
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ts
+>
+=
+ts
+>  }
+=..p
+ts
+>
+=
+ts
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=..kkkkkk.p........p......p......p..........p.tnp..........p.ssp.....p.ss.pp
+ts
+> */
+=.tt
+ts
+>/** Check if a character is whitespace (space, newline, tab). */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ts
+> *
+=.t
+ts
+>  return pieces.map(piece => piece.type === "shell"
+=..kkkkkk.......pfffp......tt......pkkkk.ttt.sssssss
+ts
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....ffffffpfffffpffffffffffffffffffpsssssssssssssppppfffffffppp......p.pssssp.sssssssssp.pppp
+ts
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p......p.pssssssssssssssssssssssssssssssp.pp
+ts
+>}
+=p
+ts
+>    if (ch === "\\" && i + 1 < line.length) {
+=....kk.p...ttt.ssss.tt...t.n.t.....p......p.p
+ts
+>    if (frame.kind === "'") {
+=....kk.p.....p.....ttt.sssp.p
+ts
+>      .toEqual([
+=......pfffffffpp
+ts
+> *
+=.t
+ts
+>    }
+=....p
+ts
+>      ? ";"
+=......t.sss
+ts
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=..kkkkkk.....pfffffffpt.....ppntnppt.t.p.sspp
+ts
+>  test("includes tool name and error status in content identity", () => {
+=..ffffpsssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.pp.tt.p
+ts
+>    for (let cols = 12; cols <= 90; cols++) {
+=....kkk.pkkk........nnp......tt.nnp.....ttp.p
+ts
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=nt.tt.ptptn.....ppp..t...ppnnp.......t.
+ts
+>[(0E{>z'y<7>l678 9blE+ass8
+=pp..pt...tnt.........t....
+ts
+>%BE{#>b.XO+so
+=t..ppt.p..t..
+ts
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=..pp.ttntt.....sssst.p...tnp.t....tp...p....ttt.tp.......
+ts
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......tfp.....p..p.....ttt...p..pn......
+ts
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=np..t.tt..t.....tt.nnn.npppnp..........p..t
+ts
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=p.tpnp.tp.pt.tfpt..p...p...pttt.ppt.........tp...p.t..t.ttn
+ts
+>'_~9d漢$
+=..t....
+ts
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=..tp.....t..tt....p.....t...tp.tt..nt.p........
+ts
+>,x/
+=p.t
+ts
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=pp..t..pnpt.....t.......p..p.tt....tpt...t........p...t...
+ts
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=pn....t...t..pptp......tffp.fffppp....t...p...p..t.p..n
+ts
+>9d6!B|+>,^1|y
+=...t.tttptnt.
+ts
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=....ffp.tsssssssssssssssssssssssssp
+ts
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p.p....pn..t.p...p...tptp
+ts
+>%y+$E"8]
+=t.t...np
+ts
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p.ptpt.p.t.....pnt..t.......t...p.t
+ts
+>
+=
+ts
+>o漢;(C+bB漢\,a	S+@]-
+=..pp.t....p...tppt
+ts
+>s\*>&d3>	/69];&eEé*bo
+=..ttt..t.tnnppt...t..
+ts
+>=::l@|ea
+=.pp.pt..
+ts
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p.tp.t.tpnnnnnp.p.pt.t..pn
+ts
+>xfE$s!4+s&` e*
+=.....tnt.t...t
+ts
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=...t.npppt.p.tp..........p..
+ts
+>E7!beBlO=_Cl'`B0as']E` 
+=..t.........sssssssp...
+ts
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=p...p...p....ssssssss...pt...p..
+ts
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=.ttp........t.....ntp....t....p....p...tpn.
+ts
+>_aL9bd+;l.é6s|d'5-T+}dC
+=......tp.p...t..nt.tp..
+ts
+>X0
+=..
+ts
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.p...t.pt.t.tt.ssssssssssssssssssssssssssss.....p.p..ptn
+ts
+>漢@\	';|@@eOa#x"
+=.p...ptpp...p..
+ts
+> L"/! ]1b5/'\%8T
+=...tt.p...t..t..
+ts
+>*d^d\	/f% yE-'5XOzcd\T/
+=t.t...t.t...t.........t
+ts
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=.t.tt.tt..pt.tfffp....ppp...pt.
+ts
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=nttssssssssssssssssssssst....p.
+ts
+>a,2c{*(:xz_;'
+=.p..ptpp...p.
+ts
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p.tt....pnp.p..........t.t..p.p.......t.
+ts
+>\ ;9s|xE[O@4CSx!s
+=..p..t..p.p....t.
+ts
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p...tpp....t.............pp.ppp.ptt........
+ts
+>;e(4cel		|_xefxS8~S
+=pfp......t.......t.
+python
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=kkk.fp.pp.kkkkkk.nnnn.t.nnnnn.t.nnnn.t.nnnnnnn..cccccccccccccccccc
+python
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p.fffffptp.....................ff.pnp.np.tt.........
+python
+><!doctype html><div class="a">&amp; text</div>
+=t.............tt....kkkkkpssstt...p.....tt...t
+python
+>--- a/file.ts
+=ttt..t....p..
+python
+>+++ b/file.ts
+=ttt..t....p..
+python
+>@@ -1,2 +1,3 @@ fn
+=tt.tnpn.tnpn.tt...
+python
+>+added
+=t.....
+python
+>-removed
+=t.......
+python
+>diff --git a/x b/x
+=.....tt.....t...t.
+python
+>## Heading
+=cccccccccc
+python
+>  - item
+=..t.....
+python
+>  12. item
+=..nnp.....
+python
+>> quote
+=t......
+python
+>***
+=ttt
+python
+>[table.sub]
+=p.....p...p
+python
+>key = "value" # c
+=....p.sssssss.ccc
+python
+>#include <stdio.h>
+=cccccccccccccccccc
+python
+>  # define X 1
+=..cccccccccccc
+python
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=...ffffpp.p.......p..ccccccccccccccccccccccccccccccc
+python
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p...pt.p..p....p.t......t..ssss.tt......n.cccccc
+python
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psssp.pnp.nnnp.tnnnp.....p.....pp.sssp.ssssssp
+python
+>key: value # yaml
+=...p.......cccccc
+python
+>...
+=ppp
+python
+>---
+=ttt
+python
+>
+=
+python
+> 
+=.
+python
+>		
+=..
+python
+>é漢字😀 'unterminated
+=..................
+python
+>"unterminated string
+=....................
+python
+>/* open comment
+=tt.............
+python
+>`template ${x}`
+=...........p.p.
+python
+>x = 'y' # 1 <a>
+=..p.sss.ccccccc
+python
+>SELECT def fn func let int // -- /* ; {}
+=.......kkk.............ttt.tt.tt.tt.p.pp
+python
+>--- +a -b @@ ## > [t] key: v
+=ttt.t..t..tt.ccccccccccccccc
+python
+>#include x
+=cccccccccc
+python
+>"k": true
+=sssp.....
+python
+>SeLeCt 1
+=.......n
+python
+>a.b?.c ?? d >>>= 2 => {...x}
+=.p..p.......tttt.n.pt.pppp.p
+python
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=....tsssssssss.t.kkk.....p....fptkkkkp.tt.....p.........p.p
+python
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=.....p.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+python
+>date = 1979-05-27T07:32:00Z
+=.....p.nnnntnnt.....pnnp...
+python
+>a = +1_000.5e3
+=..p.tnnnnnnnnn
+python
+>import { expect, test } from "bun:test";
+=kkkkkk.p.......p......p.kkkk.ssssssssssp
+python
+>  };
+=..pp
+python
+>  return {
+=..kkkkkk.p
+python
+> * usage with the time to each reset; a short word replaces the bars when the
+=.t.......kkkk.......................p........................................
+python
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=ttt.....................................................................kk........p.tt
+python
+>  // With a single account the answer only explains; don't flash a loading card first.
+=..tt...............................................p.................................p
+python
+>  formatIntegrationDeliveryStatus,
+=.................................p
+python
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.....p.ssssssssp......p.ssssssssp......p.sssssssss.pp
+python
+>      sourceId: "group:ops",
+=..............p.sssssssssssp
+python
+>function stateWithDisabledTools() {
+=.........ffffffffffffffffffffffpp.p
+python
+>/** Blank column separating wrapped history from the task-panel border. */
+=ttt.........................................kkkk.........t............p.tt
+python
+>  const goal = state.goal;
+=.............p......p....p
+python
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=ttt...............................................................................p.tt
+python
+>
+=
+python
+>  }
+=..p
+python
+>
+=
+python
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=..kkkkkk.p........p......p......p..........p.tnp..........p.ssp.....p.ss.pp
+python
+> */
+=.tt
+python
+>/** Check if a character is whitespace (space, newline, tab). */
+=ttt.......kk.............kk.ffffffffff.p.....p........p....pp.tt
+python
+> *
+=.t
+python
+>  return pieces.map(piece => piece.type === "shell"
+=..kkkkkk.......pfffp......pt......ptttt.ttp.sssssss
+python
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....ffffffpfffffpffffffffffffffffffpsssssssssssssppppfffffffppp......p.pssssp.sssssssssp.pppp
+python
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p......p.p............t....p....ttsssss.p.pp
+python
+>}
+=p
+python
+>    if (ch === "\\" && i + 1 < line.length) {
+=....kk.p...ttp.ssss.tt...t.n.t.....p......p.p
+python
+>    if (frame.kind === "'") {
+=....kk.p.....p.....ttp.sssp.p
+python
+>      .toEqual([
+=......pfffffffpp
+python
+> *
+=.t
+python
+>    }
+=....p
+python
+>      ? ";"
+=........sss
+python
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=..kkkkkk.....pfffffffpt.....ppntnppt.t.p.sspp
+python
+>  test("includes tool name and error status in content identity", () => {
+=..ffffpsssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.pp.pt.p
+python
+>    for (let cols = 12; cols <= 90; cols++) {
+=....kkk.p.........p.nnp......tt.nnp.....ttp.p
+python
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=nt.tt.ptptn.....tpp..t...ppnnp.......t.
+python
+>[(0E{>z'y<7>l678 9blE+ass8
+=pp..pt...tnt.........t....
+python
+>%BE{#>b.XO+so
+=t..pccccccccc
+python
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=..pcccccccccccccccccccccccccccccccccccccccccccccccccccccc
+python
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......tfp.....p..ccccccccccccccccccccccc
+python
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=np..t.tt..t.....tt.nnn.nppccccccccccccccccc
+python
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=fftpnt.tp.pt.tfpt..p...p...pttt.ppt.........tp...fft..t.ttn
+python
+>'_~9d漢$
+=..t....
+python
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=..tp...p.t..t.....p.....t....p.tt..nt.p..p.....
+python
+>,x/
+=p.t
+python
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=tffft..pnpt.....t.......p..p.tt....tpt...t........p...t...
+python
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=ff....t...t..pptp......tffp.fffppp........p...p..t.p..n
+python
+>9d6!B|+>,^1|y
+=.....tttptnt.
+python
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=......p.tsssssssssssssssssssssssssp
+python
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p.ffff.pn..t.p...p...tptp
+python
+>%y+$E"8]
+=t.t...np
+python
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p.ptpt.p.t.....pnt..t..........pp..
+python
+>
+=
+python
+>o漢;(C+bB漢\,a	S+@]-
+=..pp.t....p...ttpt
+python
+>s\*>&d3>	/69];&eEé*bo
+=..ttt..t.tnnppt...t..
+python
+>=::l@|ea
+=ppp.tt..
+python
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p.tp.t.tffffffp.p.pt.t..pn
+python
+>xfE$s!4+s&` e*
+=......nt.t...t
+python
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=.....npppt.pptp..........p..
+python
+>E7!beBlO=_Cl'`B0as']E` 
+=........p...sssssssp...
+python
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=p...p...p..p.ssssssss...pt...p..
+python
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=pttp........t.....ntp.p..t....p....p...tpn.
+python
+>_aL9bd+;l.é6s|d'5-T+}dC
+=......tp.p...t..nt.tp..
+python
+>X0
+=..
+python
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.p...t.pt.t.tt..t.np....ffttpccccccccccccccccccccccccccc
+python
+>漢@\	';|@@eOa#x"
+=.t...pttffffccc
+python
+> L"/! ]1b5/'\%8T
+=...t..p...t..t..
+python
+>*d^d\	/f% yE-'5XOzcd\T/
+=t.t...t.t...t.........t
+python
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=pt.tt.tt..pt.tfffp....ppp...pt.
+python
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=nttssssssssssssssssssssst....p.
+python
+>a,2c{*(:xz_;'
+=.p..ptpp...p.
+python
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p.tt....pnp.p..........t.t..p.tt......t.
+python
+>\ ;9s|xE[O@4CSx!s
+=..p..t..p.fffff..
+python
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p...tpp....t.............pp.ppp.ptt........
+python
+>;e(4cel		|_xefxS8~S
+=pfp......t.......t.
+rust
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=....fp.pp.kkkkkk.nnnn.t.nnnnn.t.nnnn.t.np..t....p.........ttttttt.
+rust
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p.fffffptp.....................ff.pnp.np.tt.........
+rust
+><!doctype html><div class="a">&amp; text</div>
+=tt............tt..........ssstt...p.fffftt...t
+rust
+>--- a/file.ts
+=ttt..t....p..
+rust
+>+++ b/file.ts
+=ttt..t....p..
+rust
+>@@ -1,2 +1,3 @@ fn
+=pp.tnpn.tnpn.pp.kk
+rust
+>+added
+=t.....
+rust
+>-removed
+=t.......
+rust
+>diff --git a/x b/x
+=.....tt.....t...t.
+rust
+>## Heading
+=pp........
+rust
+>  - item
+=..t.....
+rust
+>  12. item
+=..nnp.....
+rust
+>> quote
+=t......
+rust
+>***
+=ttt
+rust
+>[table.sub]
+=p.....p...p
+rust
+>key = "value" # c
+=......sssssss.p..
+rust
+>#include <stdio.h>
+=pfffffff.t.....p.t
+rust
+>  # define X 1
+=..p..........n
+rust
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=kk.ffffpp.p.kkk......pssssspp.ffffffffpssssp.ssspp.p
+rust
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p...pt.p..p....p.t......t...t...tt......n.p.....
+rust
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psssp.pnp.nnnp.tnnnp.kkkkp.....pp.sssp.ssssssp
+rust
+>key: value # yaml
+=...p.......p.....
+rust
+>...
+=ttt
+rust
+>---
+=ttt
+rust
+>
+=
+rust
+> 
+=.
+rust
+>		
+=..
+rust
+>é漢字😀 'unterminated
+=.....ttttttttttttt
+rust
+>"unterminated string
+=....................
+rust
+>/* open comment
+=tt.............
+rust
+>`template ${x}`
+=...........p.p.
+rust
+>x = 'y' # 1 <a>
+=....sss.p.n.t.t
+rust
+>SELECT def fn func let int // -- /* ; {}
+=...........kk......kkk.....ccccccccccccc
+rust
+>--- +a -b @@ ## > [t] key: v
+=ttt.t..t..pp.pp.t.p.p....p..
+rust
+>#include x
+=p.........
+rust
+>"k": true
+=sssp.kkkk
+rust
+>SeLeCt 1
+=.......n
+rust
+>a.b?.c ?? d >>>= 2 => {...x}
+=.p..p.......tttt.n.tt.pttt.p
+rust
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=kkkktttt.ffftttt.kkk.....p.kk.fptkkkkp.tt.ttt.p.nnnnnnn.p.p
+rust
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=.....p.p...p.......p.t....np...p.p.............p..p......p..p.fffp.p.p.p
+rust
+>date = 1979-05-27T07:32:00Z
+=.......nnnntnnt.....pnnp...
+rust
+>a = +1_000.5e3
+=....tnnnnnnnnn
+rust
+>import { expect, test } from "bun:test";
+=.......p.......p......p......ssssssssssp
+rust
+>  };
+=..pp
+rust
+>  return {
+=..kkkkkk.p
+rust
+> * usage with the time to each reset; a short word replaces the bars when the
+=.t..................................p........................................
+rust
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+rust
+>  // With a single account the answer only explains; don't flash a loading card first.
+=..cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+rust
+>  formatIntegrationDeliveryStatus,
+=.................................p
+rust
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.....p.ssssssssp......p.ssssssssp......p.sssssssss.pp
+rust
+>      sourceId: "group:ops",
+=..............p.sssssssssssp
+rust
+>function stateWithDisabledTools() {
+=.........ffffffffffffffffffffffpp.p
+rust
+>/** Blank column separating wrapped history from the task-panel border. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+rust
+>  const goal = state.goal;
+=..kkkkk.............p....p
+rust
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+rust
+>
+=
+rust
+>  }
+=..p
+rust
+>
+=
+rust
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=..kkkkkk.p........p......p......p..........p.tnp..........p.ssp.....p.ss.pp
+rust
+> */
+=.tt
+rust
+>/** Check if a character is whitespace (space, newline, tab). */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+rust
+> *
+=.t
+rust
+>  return pieces.map(piece => piece.type === "shell"
+=..kkkkkk.......pfffp......tt......pkkkk.tt..sssssss
+rust
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....ffffffpfffffpffffffffffffffffffpsssssssssssssppppfffffffppp......p.pssssp.sssssssssp.pppp
+rust
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p......p.p............t....pfff.tttttt..p.pp
+rust
+>}
+=p
+rust
+>    if (ch === "\\" && i + 1 < line.length) {
+=....kk.p...tt..ssss.tt...t.n.t.....p......p.p
+rust
+>    if (frame.kind === "'") {
+=....kk.p.....p.....tt..sssp.p
+rust
+>      .toEqual([
+=......pfffffffpp
+rust
+> *
+=.t
+rust
+>    }
+=....p
+rust
+>      ? ";"
+=........sss
+rust
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=..kkkkkk.....pfffffffpt.....ppntnppt.t.p.sspp
+rust
+>  test("includes tool name and error status in content identity", () => {
+=..ffffpsssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.pp.tt.p
+rust
+>    for (let cols = 12; cols <= 90; cols++) {
+=....kkk.pkkk........nnp.ffff.tt.nnp.....ttp.p
+rust
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=nt.tt.ptptn..tttppp..t...ppnnp.......t.
+rust
+>[(0E{>z'y<7>l678 9blE+ass8
+=pp..pt.tttnt.........t....
+rust
+>%BE{#>b.XO+so
+=t..ppt.p..t..
+rust
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=..pp.ttntt.....sssst.p...tnp.t....tp...p....ttt.tp.......
+rust
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......tfp.....p..p......tt...p..pn......
+rust
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=np..tftt........tt.nnn.npppnp..........p..t
+rust
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=p.tpnp.tp.pt.tfpt..p...p...p.tt.pp..........tp...p.t..t.ttn
+rust
+>'_~9d漢$
+=tt.....
+rust
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=..tp....ft..tt....p.....t...tp.tt..nt.p........
+rust
+>,x/
+=p.t
+rust
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=pp..t..pnpt.....t.......p..p.tt....tpt............p...t...
+rust
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=pn....t...t..pptp......tffp.fffppp....t...p...p..t.p..n
+rust
+>9d6!B|+>,^1|y
+=...t.tttptnt.
+rust
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=......p.ttt.........p..p..........p
+rust
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p.p....pn..t.p...p...tptp
+rust
+>%y+$E"8]
+=t.t...np
+rust
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p.ptpt.p.......pnt..t.......t...pff
+rust
+>
+=
+rust
+>o漢;(C+bB漢\,a	S+@]-
+=..pp.t....p...tppt
+rust
+>s\*>&d3>	/69];&eEé*bo
+=..ttt..t.tnnppt...t..
+rust
+>=::l@|ea
+=.pp.pt..
+rust
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........pftp.t..pnnnnnp.p.pt....pn
+rust
+>xfE$s!4+s&` e*
+=....ffnt.t...t
+rust
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=...t.npppt.p.tp..........p..
+rust
+>E7!beBlO=_Cl'`B0as']E` 
+=fff................p...
+rust
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=p...p...p.....pftp..sss.pt...p..
+rust
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=.ttp........t.....ntp....t....p....p...tpn.
+rust
+>_aL9bd+;l.é6s|d'5-T+}dC
+=......tp.p...t..nt.tp..
+rust
+>X0
+=..
+rust
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.p.....pt.t.tt..t.np....p.ttpp.........t.t......p.p..ptn
+rust
+>漢@\	';|@@eOa#x"
+=.p...ptpp...p..
+rust
+> L"/! ]1b5/'\%8T
+=...tt.p...t..t..
+rust
+>*d^d\	/f% yE-'5XOzcd\T/
+=t.t...t.t...t.........t
+rust
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=.t.tt.tt..pt.tfffp....ppp...pt.
+rust
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=ntt.p..p...ssssss..ppp.......p.
+rust
+>a,2c{*(:xz_;'
+=.p..ptpp...p.
+rust
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p.tt....pnp.p..........t.t..p.p.......t.
+rust
+>\ ;9s|xE[O@4CSx!s
+=..p..t..p.p....t.
+rust
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p...tpp....t.............pp.ppp.ptt........
+rust
+>;e(4cel		|_xefxS8~S
+=pfp......t.........
+go
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=....fp.pp.kkkkkk.nnnn.t.nnnnn.t.nnnn.t.np..t......................
+go
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p.fffffptp.....................ff.pnp.np.tt.........
+go
+><!doctype html><div class="a">&amp; text</div>
+=t.............tt..........ssstt...p.....tt...t
+go
+>--- a/file.ts
+=ttt..t....p..
+go
+>+++ b/file.ts
+=ttt..t....p..
+go
+>@@ -1,2 +1,3 @@ fn
+=pp.tnpn.tnpn.pp...
+go
+>+added
+=t.....
+go
+>-removed
+=t.......
+go
+>diff --git a/x b/x
+=.....tt.....t...t.
+go
+>## Heading
+=..........
+go
+>  - item
+=..t.....
+go
+>  12. item
+=..nnp.....
+go
+>> quote
+=t......
+go
+>***
+=ttt
+go
+>[table.sub]
+=p.....p...p
+go
+>key = "value" # c
+=......sssssss....
+go
+>#include <stdio.h>
+=.........t.....p.t
+go
+>  # define X 1
+=.............n
+go
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=...ffffpp.p...........sssss.p.kkkkkkk.pssssp.ssspp.p
+go
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p...pt.p..p....p.t......t...t...tt......n.......
+go
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psssp.pnp.nnnp.tnnnp.kkkkp.....pp.sssp.ssssssp
+go
+>key: value # yaml
+=...p.............
+go
+>...
+=ttt
+go
+>---
+=ttt
+go
+>
+=
+go
+> 
+=.
+go
+>		
+=..
+go
+>é漢字😀 'unterminated
+=..................
+go
+>"unterminated string
+=..............tttttt
+go
+>/* open comment
+=tt.............
+go
+>`template ${x}`
+=sssssssssssssss
+go
+>x = 'y' # 1 <a>
+=....sss...n.t.t
+go
+>SELECT def fn func let int // -- /* ; {}
+=..............kkkk.....ttt.ccccccccccccc
+go
+>--- +a -b @@ ## > [t] key: v
+=ttt.t..t..pp....t.p.p....p..
+go
+>#include x
+=..........
+go
+>"k": true
+=sssp.kkkk
+go
+>SeLeCt 1
+=.......n
+go
+>a.b?.c ?? d >>>= 2 => {...x}
+=.p..p.......tttt.n..t.pttt.p
+go
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=....t..t....t..t.kkk.....p....fpt....p.tt.....p.........p.p
+go
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=.....p.....p.......p.t....np...p.p.............p..p......p..p.fffp.p.p.p
+go
+>date = 1979-05-27T07:32:00Z
+=.......nnnntnnt.....pnnp...
+go
+>a = +1_000.5e3
+=....tnnnnnnnnn
+go
+>import { expect, test } from "bun:test";
+=kkkkkk.p.......p......p......ssssssssssp
+go
+>  };
+=..pp
+go
+>  return {
+=..kkkkkk.p
+go
+> * usage with the time to each reset; a short word replaces the bars when the
+=.t..................................p........................................
+go
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+go
+>  // With a single account the answer only explains; don't flash a loading card first.
+=..cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+go
+>  formatIntegrationDeliveryStatus,
+=.................................p
+go
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.....p.ssssssssp......p.ssssssssp......p.sssssssss.pp
+go
+>      sourceId: "group:ops",
+=..............p.sssssssssssp
+go
+>function stateWithDisabledTools() {
+=.........ffffffffffffffffffffffpp.p
+go
+>/** Blank column separating wrapped history from the task-panel border. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+go
+>  const goal = state.goal;
+=..kkkkk.............p....p
+go
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+go
+>
+=
+go
+>  }
+=..p
+go
+>
+=
+go
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=..kkkkkk.p........p......p......p..........p.tnp..........p.ssp.....p.ss.pp
+go
+> */
+=.tt
+go
+>/** Check if a character is whitespace (space, newline, tab). */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+go
+> *
+=.t
+go
+>  return pieces.map(piece => piece.type === "shell"
+=..kkkkkk.......pkkkp.......t......pkkkk.tt..sssssss
+go
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....ffffffpfffffpffffffffffffffffffpsssssssssssssppppfffffffppp......p.pssssp.sssssssssp.pppp
+go
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p......p.pssssssssssssssssssssssssssssssp.pp
+go
+>}
+=p
+go
+>    if (ch === "\\" && i + 1 < line.length) {
+=....kk.p...tt..ssss.tt...t.n.t.....p......p.p
+go
+>    if (frame.kind === "'") {
+=....kk.p.....p.....tt..sssp.p
+go
+>      .toEqual([
+=......pfffffffpp
+go
+> *
+=.t
+go
+>    }
+=....p
+go
+>      ? ";"
+=........sss
+go
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=..kkkkkk.....pfffffffpt.....ppntnppt.t.p.sspp
+go
+>  test("includes tool name and error status in content identity", () => {
+=..ffffpsssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.pp..t.p
+go
+>    for (let cols = 12; cols <= 90; cols++) {
+=....kkk.p...........nnp......tt.nnp.....ttp.p
+go
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=nt.tt.ptptn.....ppp..t...ppnnp.......t.
+go
+>[(0E{>z'y<7>l678 9blE+ass8
+=pp..pt...tnt.........t....
+go
+>%BE{#>b.XO+so
+=t..p.t.p..t..
+go
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=..p..ttntt.....sssst.p...tnp.t....tp...p....ttt.ttt......
+go
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......tfp.....p.........tt...p..pn......
+go
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=np..t.tt........tt.nnn.npp.np..........p...
+go
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=p.tpnp.tp.pt.tfpt..p...p...p.tt.pp..........tp...p.t..t.ttn
+go
+>'_~9d漢$
+=.......
+go
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=..tp.....t..t.....p.....t....p.tt..nt.p........
+go
+>,x/
+=p.t
+go
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=pp..t..pnpt.....t.......p..p.tt....tpt............p...t...
+go
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=pn....t...t..pptp......tffp.fffppp........p...p..t.p..n
+go
+>9d6!B|+>,^1|y
+=.....tttptnt.
+go
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=......p.t...........p..p..........p
+go
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p.p....pn..t.p...p...tptp
+go
+>%y+$E"8]
+=t.t...np
+go
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p.ptpt.p.......pnt..t...........p..
+go
+>
+=
+go
+>o漢;(C+bB漢\,a	S+@]-
+=..pp.t....p...tppt
+go
+>s\*>&d3>	/69];&eEé*bo
+=..ttt..t.tnnppt...t..
+go
+>=::l@|ea
+=.pp.pt..
+go
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p.tp.t..pnnnnnp.p.pt....pn
+go
+>xfE$s!4+s&` e*
+=......nt.t...t
+go
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=.....npppt.p.tp..........p..
+go
+>E7!beBlO=_Cl'`B0as']E` 
+=.............sssssssss.
+go
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=p...p...p.....p.tp..sss.pt...p..
+go
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=.ttp........t.....ntp....t....p....p...tpn.
+go
+>_aL9bd+;l.é6s|d'5-T+}dC
+=......tp.p...t..nt.tp..
+go
+>X0
+=..
+go
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.p.....pt.t.tt.ssssssssssssssssssssssssssss.....p.p..ptn
+go
+>漢@\	';|@@eOa#x"
+=.p...ptpp......
+go
+> L"/! ]1b5/'\%8T
+=...t..p...t..t..
+go
+>*d^d\	/f% yE-'5XOzcd\T/
+=t.t...t.t...t.........t
+go
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=.t.tt.tt..pt.tfffp....ppp...pt.
+go
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=ntt.p..p...ssssss..p.p.......p.
+go
+>a,2c{*(:xz_;'
+=.p..ptpp...p.
+go
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p.tt....pnp.p..........t.t..p.p.......t.
+go
+>\ ;9s|xE[O@4CSx!s
+=..p..t..p.p......
+go
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p...tpp....t.............pp.ppp.ptt........
+go
+>;e(4cel		|_xefxS8~S
+=pfp......t.........
+bash
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=.....p.p..kkkkkk.......................n........cccccccccccccccccc
+bash
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p......p.p........................pnp.np............
+bash
+><!doctype html><div class="a">&amp; text</div>
+=tt............tt.........tssstt...t.....t....t
+bash
+>--- a/file.ts
+=.............
+bash
+>+++ b/file.ts
+=.............
+bash
+>@@ -1,2 +1,3 @@ fn
+=....npn..npn......
+bash
+>+added
+=......
+bash
+>-removed
+=........
+bash
+>diff --git a/x b/x
+=.......fff........
+bash
+>## Heading
+=cccccccccc
+bash
+>  - item
+=........
+bash
+>  12. item
+=..nn......
+bash
+>> quote
+=t......
+bash
+>***
+=...
+bash
+>[table.sub]
+=p.........p
+bash
+>key = "value" # c
+=....t.sssssss.ccc
+bash
+>#include <stdio.h>
+=cccccccccccccccccc
+bash
+>  # define X 1
+=..cccccccccccc
+bash
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=.......pp.p.......t..ccccccccccccccccccccccccccccccc
+bash
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=ffff.sssssss.ttttttttt..p....p.t.ffff....ssss.tt.kkkk.n.cccccc
+bash
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psss..pnp.nnnp.....p.kkkkp.....pp.sss..ssssssp
+bash
+>key: value # yaml
+=...........cccccc
+bash
+>...
+=...
+bash
+>---
+=...
+bash
+>
+=
+bash
+> 
+=.
+bash
+>		
+=..
+bash
+>é漢字😀 'unterminated
+=..................
+bash
+>"unterminated string
+=....................
+bash
+>/* open comment
+=...............
+bash
+>`template ${x}`
+=..........tttt.
+bash
+>x = 'y' # 1 <a>
+=..t.sss.ccccccc
+bash
+>SELECT def fn func let int // -- /* ; {}
+=....................................t.pp
+bash
+>--- +a -b @@ ## > [t] key: v
+=.............ccccccccccccccc
+bash
+>#include x
+=cccccccccc
+bash
+>"k": true
+=sss..kkkk
+bash
+>SeLeCt 1
+=.......n
+bash
+>a.b?.c ?? d >>>= 2 => {...x}
+=............tttt.n.tt.p....p
+bash
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=....tsssssssss.t.kkk.....p.....pt....p..t.....p.........p.p
+bash
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=.......ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+bash
+>date = 1979-05-27T07:32:00Z
+=.....t.nnnn.nn.......nn....
+bash
+>a = +1_000.5e3
+=..t...........
+bash
+>import { expect, test } from "bun:test";
+=.......p.......p.ffff.p......sssssssssst
+bash
+>  };
+=..pt
+bash
+>  return {
+=..kkkkkk.p
+bash
+> * usage with the time to each reset; a short word replaces the bars when the
+=....................................t........................................
+bash
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=......................................................................................
+bash
+>  // With a single account the answer only explains; don't flash a loading card first.
+=...................................................t..................................
+bash
+>  formatIntegrationDeliveryStatus,
+=.................................p
+bash
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.......ssssssssp........ssssssssp........sssssssss.pp
+bash
+>      sourceId: "group:ops",
+=................sssssssssssp
+bash
+>function stateWithDisabledTools() {
+=kkkkkkkk.......................pp.p
+bash
+>/** Blank column separating wrapped history from the task-panel border. */
+=..........................................................................
+bash
+>  const goal = state.goal;
+=.............t...........t
+bash
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=......................................................................................
+bash
+>
+=
+bash
+>  }
+=..p
+bash
+>
+=
+bash
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=..kkkkkk.p......................p.............np............ssp.......ss.pt
+bash
+> */
+=...
+bash
+>/** Check if a character is whitespace (space, newline, tab). */
+=..........kk...........................p.....p........p....p....
+bash
+> *
+=..
+bash
+>  return pieces.map(piece => piece.type === "shell"
+=..kkkkkk...........p......tt............ttt.sssssss
+bash
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=..........p.....p..................psssssssssssssppp........ppp........pssssp.sssssssssp.pppt
+bash
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p........p.fff.............pfff.ttsssss.p.pp
+bash
+>}
+=p
+bash
+>    if (ch === "\\" && i + 1 < line.length) {
+=....kk.p...ttt.ssss.tt.....n.t............p.p
+bash
+>    if (frame.kind === "'") {
+=....kk.p...........ttt.sssp.p
+bash
+>      .toEqual([
+=..............pp
+bash
+> *
+=..
+bash
+>    }
+=....p
+bash
+>      ? ";"
+=........sss
+bash
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=..kkkkkk.............p......ppn.ntp....p.sspt
+bash
+>  test("includes tool name and error status in content identity", () => {
+=..ffffpsssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.pp.tt.p
+bash
+>    for (let cols = 12; cols <= 90; cols++) {
+=....kkk.p.........t.nnt......tt.nnt.......p.p
+bash
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=n..tt.ptptntt....pp..t....pnnp.........
+bash
+>[(0E{>z'y<7>l678 9blE+ass8
+=pp..pt...tnt..............
+bash
+>%BE{#>b.XO+so
+=...pccccccccc
+bash
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=..tcccccccccccccccccccccccccccccccccccccccccccccccccccccc
+bash
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......t.ptt...p..ccccccccccccccccccccccc
+bash
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=np..t.tt........t..nnn.nppccccccccccccccccc
+bash
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=...tn......t...pt..p....tttp.tt.pp...........t............n
+bash
+>'_~9d漢$
+=.......
+bash
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=...p...t.t..tt....p........ttp....tt..t..t.....
+bash
+>,x/
+=p..
+bash
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=....t..pnp..............p....tt....tp.............t.......
+bash
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.n............p.p.........p....p......t...p...p....t..n
+bash
+>9d6!B|+>,^1|y
+=...t.t.tp.nt.
+bash
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=......p.tsssssssssssssssssssssssssp
+bash
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p.......n........p....p.p
+bash
+>%y+$E"8]
+=...tt.np
+bash
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p.t.pt.p.......tnt..........t..tp.t
+bash
+>
+=
+bash
+>o漢;(C+bB漢\,a	S+@]-
+=..tp......p.....p.
+bash
+>s\*>&d3>	/69];&eEé*bo
+=...tt..t..nnptt......
+bash
+>=::l@|ea
+=t....t..
+bash
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p.tp.....nnnnnp.p.pt....pn
+bash
+>xfE$s!4+s&` e*
+=...tttn..t....
+bash
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=...ttt.ppt.pt.p........ttp..
+bash
+>E7!beBlO=_Cl'`B0as']E` 
+=..t.....t...sssssssp...
+bash
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=........p..t.ssssssss...pt...p..
+bash
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=t.tp........t.....ntp.t..t.........p....pn.
+bash
+>_aL9bd+;l.é6s|d'5-T+}dC
+=.......t.....t..n...p..
+bash
+>X0
+=..
+bash
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.......p....tt....np.........ccccccccccccccccccccccccccc
+bash
+>漢@\	';|@@eOa#x"
+=.....tt.....ccc
+bash
+> L"/! ]1b5/'\%8T
+=....t.p.........
+bash
+>*d^d\	/f% yE-'5XOzcd\T/
+=.......................
+bash
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=t..t...t.........p......p...p..
+bash
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=n..sssssssssssssssssssss.....t.
+bash
+>a,2c{*(:xz_;'
+=.p..p.p....t.
+bash
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p.......pnp.p..........t....p..t........
+bash
+>\ ;9s|xE[O@4CSx!s
+=..t..t..p......t.
+bash
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p....p.............tt....pp..t....t........
+bash
+>;e(4cel		|_xefxS8~S
+=t.p......t.........
+json
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=........p..............................n..........................
+json
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p..................................np.n.............
+json
+><!doctype html><div class="a">&amp; text</div>
+=..........................sss.................
+json
+>--- a/file.ts
+=.............
+json
+>+++ b/file.ts
+=.............
+json
+>@@ -1,2 +1,3 @@ fn
+=...nnpn..npn......
+json
+>+added
+=......
+json
+>-removed
+=........
+json
+>diff --git a/x b/x
+=..................
+json
+>## Heading
+=..........
+json
+>  - item
+=........
+json
+>  12. item
+=..nn......
+json
+>> quote
+=.......
+json
+>***
+=...
+json
+>[table.sub]
+=p.........p
+json
+>key = "value" # c
+=......sssssss....
+json
+>#include <stdio.h>
+=..................
+json
+>  # define X 1
+=.............n
+json
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=..........p...........sssss............ssssp.......p
+json
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p...p..p................................n.......
+json
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=ptttp.pnp.nnnp.nnnnp.kkkkp.kkkkpp.tttp.ssssssp
+json
+>key: value # yaml
+=...p.............
+json
+>...
+=...
+json
+>---
+=...
+json
+>
+=
+json
+> 
+=.
+json
+>		
+=..
+json
+>é漢字😀 'unterminated
+=..................
+json
+>"unterminated string
+=....................
+json
+>/* open comment
+=...............
+json
+>`template ${x}`
+=...........p.p.
+json
+>x = 'y' # 1 <a>
+=..........n....
+json
+>SELECT def fn func let int // -- /* ; {}
+=......................................pp
+json
+>--- +a -b @@ ## > [t] key: v
+=..................p.p....p..
+json
+>#include x
+=..........
+json
+>"k": true
+=tttp.kkkk
+json
+>SeLeCt 1
+=.......n
+json
+>a.b?.c ?? d >>>= 2 => {...x}
+=.................n....p....p
+json
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=.........................p....................p.........p.p
+json
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=.....p.............p......n....................p..p......p..p........p.p
+json
+>date = 1979-05-27T07:32:00Z
+=.......nnnnnnn......pnnp...
+json
+>a = +1_000.5e3
+=...........nnn
+json
+>import { expect, test } from "bun:test";
+=.......p.......p......p......ssssssssss.
+json
+>  };
+=..p.
+json
+>  return {
+=.........p
+json
+> * usage with the time to each reset; a short word replaces the bars when the
+=.............................................................................
+json
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=......................................................................................
+json
+>  // With a single account the answer only explains; don't flash a loading card first.
+=......................................................................................
+json
+>  formatIntegrationDeliveryStatus,
+=.................................p
+json
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.....p.ssssssssp......p.ssssssssp......p.sssssssss.pp
+json
+>      sourceId: "group:ops",
+=..............p.sssssssssssp
+json
+>function stateWithDisabledTools() {
+=..................................p
+json
+>/** Blank column separating wrapped history from the task-panel border. */
+=..........................................................................
+json
+>  const goal = state.goal;
+=..........................
+json
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=......................................................................................
+json
+>
+=
+json
+>  }
+=..p
+json
+>
+=
+json
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=.........p........p.............p..........p.nnp..........p.ssp.....p.ss.p.
+json
+> */
+=...
+json
+>/** Check if a character is whitespace (space, newline, tab). */
+=.............................................p........p.........
+json
+> *
+=..
+json
+>  return pieces.map(piece => piece.type === "shell"
+=............................................sssssss
+json
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....................................sssssssssssss............pp......p.pssssp.sssssssssp.pp..
+json
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p......p.p..............................p.pp
+json
+>}
+=p
+json
+>    if (ch === "\\" && i + 1 < line.length) {
+=...............ssss........n................p
+json
+>    if (frame.kind === "'") {
+=.......................sss..p
+json
+>      .toEqual([
+=...............p
+json
+> *
+=..
+json
+>    }
+=....p
+json
+>      ? ";"
+=........sss
+json
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=............................ppnnn.p....p.ss..
+json
+>  test("includes tool name and error status in content identity", () => {
+=.......sssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.......p
+json
+>    for (let cols = 12; cols <= 90; cols++) {
+=....................nn..........nn..........p
+json
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=n.....p...n......pp......ppnn..........
+json
+>[(0E{>z'y<7>l678 9blE+ass8
+=p...p.....n...............
+json
+>%BE{#>b.XO+so
+=...p.........
+json
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=......nn.......ssss..p....np...........p.........p.......
+json
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=...............p..............p..pn......
+json
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=n..................nnn.npp.np..............
+json
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=....n.....p........p...p...p..............................n
+json
+>'_~9d漢$
+=.......
+json
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=...p..............p................n...........
+json
+>,x/
+=p..
+json
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=.......pnp..............p..p..............................
+json
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.n............p.p................p....................n
+json
+>9d6!B|+>,^1|y
+=........p.n..
+json
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=..................................p
+json
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p......pn........p.......
+json
+>%y+$E"8]
+=......np
+json
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p...p..p........n..................
+json
+>
+=
+json
+>o漢;(C+bB漢\,a	S+@]-
+=..........p.....p.
+json
+>s\*>&d3>	/69];&eEé*bo
+=..........nnp........
+json
+>=::l@|ea
+=.pp.....
+json
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p..p.....nnnnn..p.p.....pn
+json
+>xfE$s!4+s&` e*
+=......n.......
+json
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=.....np.p..p..p..........p..
+json
+>E7!beBlO=_Cl'`B0as']E` 
+=...................p...
+json
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=....p...p.......................
+json
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=...p..............n.p.........p....p....pn.
+json
+>_aL9bd+;l.é6s|d'5-T+}dC
+=................n...p..
+json
+>X0
+=..
+json
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.p................np........p...................p.p..pnn
+json
+>漢@\	';|@@eOa#x"
+=...............
+json
+> L"/! ]1b5/'\%8T
+=......p.........
+json
+>*d^d\	/f% yE-'5XOzcd\T/
+=.......................
+json
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=..........p............pp...p..
+json
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=n......p...ssssss..............
+json
+>a,2c{*(:xz_;'
+=.p..p..p.....
+json
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p........np.p...............p...........
+json
+>\ ;9s|xE[O@4CSx!s
+=........p........
+json
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p....p...................pp...p.p..........
+json
+>;e(4cel		|_xefxS8~S
+=...................
+yaml
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=........p..............................n...p....cccccccccccccccccc
+yaml
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p..................................np.n..pp.........
+yaml
+><!doctype html><div class="a">&amp; text</div>
+=.tttttttt.....p...........ssspffff...........p
+yaml
+>--- a/file.ts
+=ppp..........
+yaml
+>+++ b/file.ts
+=.............
+yaml
+>@@ -1,2 +1,3 @@ fn
+=...pnpn..npn......
+yaml
+>+added
+=......
+yaml
+>-removed
+=p.......
+yaml
+>diff --git a/x b/x
+=.....pp...........
+yaml
+>## Heading
+=cccccccccc
+yaml
+>  - item
+=..p.....
+yaml
+>  12. item
+=..nn......
+yaml
+>> quote
+=p......
+yaml
+>***
+=...
+yaml
+>[table.sub]
+=p.........p
+yaml
+>key = "value" # c
+=......sssssss.ccc
+yaml
+>#include <stdio.h>
+=cccccccccccccccccc
+yaml
+>  # define X 1
+=..cccccccccccc
+yaml
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=..........p..........ccccccccccccccccccccccccccccccc
+yaml
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p...pp.p.........p......p..ssss.........n.cccccc
+yaml
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psssp.pnp.nnnp.pnnnp.kkkkp.kkkkpp.sssp.ssssssp
+yaml
+>key: value # yaml
+=tttp.......cccccc
+yaml
+>...
+=ttt
+yaml
+>---
+=ttt
+yaml
+>
+=
+yaml
+> 
+=.
+yaml
+>		
+=..
+yaml
+>é漢字😀 'unterminated
+=..................
+yaml
+>"unterminated string
+=....................
+yaml
+>/* open comment
+=...............
+yaml
+>`template ${x}`
+=...........p.p.
+yaml
+>x = 'y' # 1 <a>
+=....sss.ccccccc
+yaml
+>SELECT def fn func let int // -- /* ; {}
+=..............................pp......pp
+yaml
+>--- +a -b @@ ## > [t] key: v
+=ppp....p.....ccccccccccccccc
+yaml
+>#include x
+=cccccccccc
+yaml
+>"k": true
+=sssp.kkkk
+yaml
+>SeLeCt 1
+=.......n
+yaml
+>a.b?.c ?? d >>>= 2 => {...x}
+=............ppp..n..p.p....p
+yaml
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=.....sssssssss.p.........p......fffff..pp.....p.........p.p
+yaml
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=tttttp.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+yaml
+>date = 1979-05-27T07:32:00Z
+=.......nnnnpnnp.....pnnp...
+yaml
+>a = +1_000.5e3
+=...........nnn
+yaml
+>import { expect, test } from "bun:test";
+=.......p.......p......p......ssssssssss.
+yaml
+>  };
+=..p.
+yaml
+>  return {
+=.........p
+yaml
+> * usage with the time to each reset; a short word replaces the bars when the
+=.............................................................................
+yaml
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=......................................................................................
+yaml
+>  // With a single account the answer only explains; don't flash a loading card first.
+=......................................................................................
+yaml
+>  formatIntegrationDeliveryStatus,
+=.................................p
+yaml
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.....p.ssssssssp......p.ssssssssp......p.sssssssss.pp
+yaml
+>      sourceId: "group:ops",
+=ttttttttttttttp.sssssssssssp
+yaml
+>function stateWithDisabledTools() {
+=..................................p
+yaml
+>/** Blank column separating wrapped history from the task-panel border. */
+=.........................................................p................
+yaml
+>  const goal = state.goal;
+=..........................
+yaml
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=......................................................................................
+yaml
+>
+=
+yaml
+>  }
+=..p
+yaml
+>
+=
+yaml
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=.........p........p.............p..........p.pnp..........p.ssp.....p.ss.p.
+yaml
+> */
+=...
+yaml
+>/** Check if a character is whitespace (space, newline, tab). */
+=.............................................p........p.........
+yaml
+> *
+=..
+yaml
+>  return pieces.map(piece => piece.type === "shell"
+=...........................p................sssssss
+yaml
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....................................sssssssssssss............pp......p.pssssp.sssssssssp.pp..
+yaml
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p......p.p............p...........sssss.p.pp
+yaml
+>}
+=p
+yaml
+>    if (ch === "\\" && i + 1 < line.length) {
+=...............ssss........n................p
+yaml
+>    if (frame.kind === "'") {
+=.......................sss..p
+yaml
+>      .toEqual([
+=...............p
+yaml
+> *
+=..
+yaml
+>    }
+=....p
+yaml
+>      ? ";"
+=........sss
+yaml
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=............................ppnpn.pff..p.ss..
+yaml
+>  test("includes tool name and error status in content identity", () => {
+=.......sssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.....p.p
+yaml
+>    for (let cols = 12; cols <= 90; cols++) {
+=....................nn..........nn..........p
+yaml
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=n.....pp.pn......pp..ffffppnn..........
+yaml
+>[(0E{>z'y<7>l678 9blE+ass8
+=p...pp....np..............
+yaml
+>%BE{#>b.XO+so
+=...pccccccccc
+yaml
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=...cccccccccccccccccccccccccccccccccccccccccccccccccccccc
+yaml
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......p.......p..ccccccccccccccccccccccc
+yaml
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=n...ff..........p..nnn.nppccccccccccccccccc
+yaml
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=....n.....pp.p.....p...p...p..p...........................n
+yaml
+>'_~9d漢$
+=.......
+yaml
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=...p........ptttttttttttttttttttttttttttttttttt
+yaml
+>,x/
+=p..
+yaml
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=....fffpnpp.............p..p.p.......p....................
+yaml
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.n....p...p...p.p................p....ttttttttttttttt.n
+yaml
+>9d6!B|+>,^1|y
+=...tttttttttt
+yaml
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=........psssssssssssssssssssssssssp
+yaml
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p......pn........p.......
+yaml
+>%y+$E"8]
+=......np
+yaml
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p...pp.p........np..........ttttttt
+yaml
+>
+=
+yaml
+>o漢;(C+bB漢\,a	S+@]-
+=..........p.....pp
+yaml
+>s\*>&d3>	/69];&eEé*bo
+=...pfffp..nnp.fff.fff
+yaml
+>=::l@|ea
+=.pp..p..
+yaml
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p..p.....nnnnn..p.pp....pn
+yaml
+>xfE$s!4+s&` e*
+=.....tttttt...
+yaml
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=...ttttttttttttttttttttttttt
+yaml
+>E7!beBlO=_Cl'`B0as']E` 
+=..tttttttttttttttttttt.
+yaml
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=ttttp...p....ssssssss....ffff...
+yaml
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=.ppp........fffff.npp....ffff.p....p....pn.
+yaml
+>_aL9bd+;l.é6s|d'5-T+}dC
+=.............p..np..p..
+yaml
+>X0
+=..
+yaml
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.p......p.p.p.....np........pccccccccccccccccccccccccccc
+yaml
+>漢@\	';|@@eOa#x"
+=......p.....ccc
+yaml
+> L"/! ]1b5/'\%8T
+=......p.........
+yaml
+>*d^d\	/f% yE-'5XOzcd\T/
+=ff..........p..........
+yaml
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=......p...pff..........pp...p..
+yaml
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=np.sssssssssssssssssssss.......
+yaml
+>a,2c{*(:xz_;'
+=.p..p..p.....
+yaml
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p........np.p..........ff...p...........
+yaml
+>\ ;9s|xE[O@4CSx!s
+=.....p..p......tt
+yaml
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p....p.....p.............pp...p.p..........
+yaml
+>;e(4cel		|_xefxS8~S
+=.........p.........
+html
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=..........................................................ssssssss
+html
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...............................................................
+html
+><!doctype html><div class="a">&amp; text</div>
+=kkkkkkkkkkkkkkkkkkk.tttttpsssknnnnn.....kkkkkk
+html
+>--- a/file.ts
+=.............
+html
+>+++ b/file.ts
+=.............
+html
+>@@ -1,2 +1,3 @@ fn
+=..................
+html
+>+added
+=......
+html
+>-removed
+=........
+html
+>diff --git a/x b/x
+=..................
+html
+>## Heading
+=..........
+html
+>  - item
+=........
+html
+>  12. item
+=..........
+html
+>> quote
+=k......
+html
+>***
+=...
+html
+>[table.sub]
+=...........
+html
+>key = "value" # c
+=....p.sssssss....
+html
+>#include <stdio.h>
+=.........kkkkkk..k
+html
+>  # define X 1
+=..............
+html
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=..................p...sssss............ssss..sss....
+html
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss.............................ssss.................
+html
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=.sss..............................sss..ssssss.
+html
+>key: value # yaml
+=.................
+html
+>...
+=...
+html
+>---
+=...
+html
+>
+=
+html
+> 
+=.
+html
+>		
+=..
+html
+>é漢字😀 'unterminated
+=..................
+html
+>"unterminated string
+=....................
+html
+>/* open comment
+=...............
+html
+>`template ${x}`
+=...............
+html
+>x = 'y' # 1 <a>
+=..p.sss.....kkk
+html
+>SELECT def fn func let int // -- /* ; {}
+=........................................
+html
+>--- +a -b @@ ## > [t] key: v
+=................k...........
+html
+>#include x
+=..........
+html
+>"k": true
+=sss......
+html
+>SeLeCt 1
+=........
+html
+>a.b?.c ?? d >>>= 2 => {...x}
+=............kkkp...pk.......
+html
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=.....sssssssss.k........................k..................
+html
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=........................................................................
+html
+>date = 1979-05-27T07:32:00Z
+=.....p.....................
+html
+>a = +1_000.5e3
+=..p...........
+html
+>import { expect, test } from "bun:test";
+=.............................ssssssssss.
+html
+>  };
+=....
+html
+>  return {
+=..........
+html
+> * usage with the time to each reset; a short word replaces the bars when the
+=.............................................................................
+html
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=......................................................................................
+html
+>  // With a single account the answer only explains; don't flash a loading card first.
+=......................................................................................
+html
+>  formatIntegrationDeliveryStatus,
+=..................................
+html
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=............ssssssss.........ssssssss.........sssssssss...
+html
+>      sourceId: "group:ops",
+=................sssssssssss.
+html
+>function stateWithDisabledTools() {
+=...................................
+html
+>/** Blank column separating wrapped history from the task-panel border. */
+=..........................................................................
+html
+>  const goal = state.goal;
+=.............p............
+html
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=......................................................................................
+html
+>
+=
+html
+>  }
+=...
+html
+>
+=
+html
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=............................................................ss........ss...
+html
+> */
+=...
+html
+>/** Check if a character is whitespace (space, newline, tab). */
+=................................................................
+html
+> *
+=..
+html
+>  return pieces.map(piece => piece.type === "shell"
+=..........................pk............ppp.sssssss
+html
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....................................sssssssssssss.......................ssss..sssssssss......
+html
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=........................................sssss.....
+html
+>}
+=.
+html
+>    if (ch === "\\" && i + 1 < line.length) {
+=...........ppp.ssss..........................
+html
+>    if (frame.kind === "'") {
+=...................ppp.sss...
+html
+>      .toEqual([
+=................
+html
+> *
+=..
+html
+>    }
+=.....
+html
+>      ? ";"
+=........sss
+html
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=.........................................ss..
+html
+>  test("includes tool name and error status in content identity", () => {
+=.......sssssssssssssssssssssssssssssssssssssssssssssssssssssssss.....pk..
+html
+>    for (let cols = 12; cols <= 90; cols++) {
+=..................p...........p..............
+html
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=...pp..k...............................
+html
+>[(0E{>z'y<7>l678 9blE+ass8
+=.....k.....k..............
+html
+>%BE{#>b.XO+so
+=.....k.......
+html
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=.........kk....sssskk.............k...........p...p..tp..
+html
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......k.................kk..............
+html
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=.......p........k..........................
+html
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=..............................k............................
+html
+>'_~9d漢$
+=.......
+html
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=.......p.kkkk..........................ttp.....
+html
+>,x/
+=...
+html
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=.............................kp...........................
+html
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.......................................................
+html
+>9d6!B|+>,^1|y
+=.......k.....
+html
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=.........sssssssssssssssssssssssss.
+html
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=.........................
+html
+>%y+$E"8]
+=........
+html
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=..................k.............p...
+html
+>
+=
+html
+>o漢;(C+bB漢\,a	S+@]-
+=..................
+html
+>s\*>&d3>	/69];&eEé*bo
+=...k...k.............
+html
+>=::l@|ea
+=p.......
+html
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=..................................
+html
+>xfE$s!4+s&` e*
+=..............
+html
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=............p...............
+html
+>E7!beBlO=_Cl'`B0as']E` 
+=...tttttp...sssssss....
+html
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=.........ttp.ssssssss...........
+html
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=p....................tp....................
+html
+>_aL9bd+;l.é6s|d'5-T+}dC
+=.......................
+html
+>X0
+=..
+html
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.............kk.........................................
+html
+>漢@\	';|@@eOa#x"
+=...............
+html
+> L"/! ]1b5/'\%8T
+=................
+html
+>*d^d\	/f% yE-'5XOzcd\T/
+=.......................
+html
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=p....ttp.......................
+html
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=...sssssssssssssssssssss.......
+html
+>a,2c{*(:xz_;'
+=.............
+html
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=.................................p........
+html
+>\ ;9s|xE[O@4CSx!s
+=.................
+html
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=..................................p........
+html
+>;e(4cel		|_xefxS8~S
+=...................
+css
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=....fp.pp.............p.......p......p.n..................ssssssss
+css
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p.fffffppp........................pnp.np............
+css
+><!doctype html><div class="a">&amp; text</div>
+=..............p..........psssp....p..........p
+css
+>--- a/file.ts
+=..........fff
+css
+>+++ b/file.ts
+=ppp.......fff
+css
+>@@ -1,2 +1,3 @@ fn
+=...nnpn.pnpn......
+css
+>+added
+=p.....
+css
+>-removed
+=........
+css
+>diff --git a/x b/x
+=..................
+css
+>## Heading
+=..........
+css
+>  - item
+=........
+css
+>  12. item
+=..nn......
+css
+>> quote
+=p......
+css
+>***
+=ppp
+css
+>[table.sub]
+=p.....ffffp
+css
+>key = "value" # c
+=....p.sssssss....
+css
+>#include <stdio.h>
+=ffffffff.......ffp
+css
+>  # define X 1
+=.............n
+css
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=...ffffpp.p.......p...sssss.p.........pssssp.ssspp.p
+css
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..ptttp..p..p....p...........ssss.........n.......
+css
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psssp.pnp.nnnp.....p.....p.....pp.sssp.ssssssp
+css
+>key: value # yaml
+=tttp.............
+css
+>...
+=...
+css
+>---
+=...
+css
+>
+=
+css
+> 
+=.
+css
+>		
+=..
+css
+>é漢字😀 'unterminated
+=..................
+css
+>"unterminated string
+=....................
+css
+>/* open comment
+=.p.............
+css
+>`template ${x}`
+=...........p.p.
+css
+>x = 'y' # 1 <a>
+=..p.sss...n...p
+css
+>SELECT def fn func let int // -- /* ; {}
+=..................................p.p.pp
+css
+>--- +a -b @@ ## > [t] key: v
+=....p...........p.p.p.tttp..
+css
+>#include x
+=ffffffff..
+css
+>"k": true
+=sssp.....
+css
+>SeLeCt 1
+=.......n
+css
+>a.b?.c ?? d >>>= 2 => {...x}
+=.ff.ff......pppp.n.pp.p..ffp
+css
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=.....sssssssss.p.........p....fp.....p..p.....p.........p.p
+css
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=tttttp.nnnnp.ttttttp.nnnn.nnnnnp.kkkkkk........p.tffffff.p.tp.fffp.p.p.p
+css
+>date = 1979-05-27T07:32:00Z
+=.....p.nnnnnnn......pnnp...
+css
+>a = +1_000.5e3
+=..p.p.........
+css
+>import { expect, test } from "bun:test";
+=.......p.......p......p......ssssssssssp
+css
+>  };
+=..pp
+css
+>  return {
+=.........p
+css
+> * usage with the time to each reset; a short word replaces the bars when the
+=.p..................................p........................................
+css
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+css
+>  // With a single account the answer only explains; don't flash a loading card first.
+=...................................................p..................................
+css
+>  formatIntegrationDeliveryStatus,
+=.................................p
+css
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.ttttp.ssssssssp.tttttp.ssssssssp.tttttp.sssssssss.pp
+css
+>      sourceId: "group:ops",
+=......ttttttttp.sssssssssssp
+css
+>function stateWithDisabledTools() {
+=.........ffffffffffffffffffffffpp.p
+css
+>/** Blank column separating wrapped history from the task-panel border. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+css
+>  const goal = state.goal;
+=.............p......fffffp
+css
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+css
+>
+=
+css
+>  }
+=..p
+css
+>
+=
+css
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=.........p.tttttttp......fffffffp.tttttttttp.nnp.tttttttttp.ssp.ttttp.ss.pp
+css
+> */
+=.p.
+css
+>/** Check if a character is whitespace (space, newline, tab). */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+css
+> *
+=.p
+css
+>  return pieces.map(piece => piece.type === "shell"
+=...............ffffp......pp......fffff.ppp.sssssss
+css
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....ffffffpfffffpffffffffffffffffffpssssssssssssspppffffffffppp.tttttp.pssssp.sssssssssp.pppp
+css
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p.tttttp.p.................p......sssss.p.pp
+css
+>}
+=p
+css
+>    if (ch === "\\" && i + 1 < line.length) {
+=.......p...ppp.ssss......p.n.......fffffffp.p
+css
+>    if (frame.kind === "'") {
+=.......p.....fffff.ppp.sssp.p
+css
+>      .toEqual([
+=......ffffffffpp
+css
+> *
+=.p
+css
+>    }
+=....p
+css
+>      ? ";"
+=........sss
+css
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=.............ffffffffp......ppnnnppp...p.sspp
+css
+>  test("includes tool name and error status in content identity", () => {
+=..ffffpsssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.pp.pp.p
+css
+>    for (let cols = 12; cols <= 90; cols++) {
+=........p.........p.nnp.......p.nnp.....ppp.p
+css
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=np.pp.ppp.n......pp......ppnnp.........
+css
+>[(0E{>z'y<7>l678 9blE+ass8
+=pp..pp....np.........p....
+css
+>%BE{#>b.XO+so
+=...p.p.fffp..
+css
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=..pffpnn.......ssss..p....np......pp...p......pttpp...p..
+css
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......pfp.....p........ppp...p..pn......
+css
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=np.....p..p.....p..nnn.npp.np..........p...
+css
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=kkppn...ffp.fffp...ptttp...pp.p.ppp..........p...kkp....p.n
+css
+>'_~9d漢$
+=..p....
+css
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=..pp...p....p.....p..........p..p..np.p..p.....
+css
+>,x/
+=p..
+css
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=.......pnp......p.......pttffpp.....p....p........p.......
+css
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.n............p.p.......ffp.fffp.p........p...p....p..n
+css
+>9d6!B|+>,^1|y
+=......ppp.n..
+css
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=......p..sssssssssssssssssssssssssp
+css
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p.kkkk.pn....ffffp....ppp
+css
+>%y+$E"8]
+=..p...np
+css
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p.ppp..p.p.....pnp.............pp..
+css
+>
+=
+css
+>o漢;(C+bB漢\,a	S+@]-
+=..pp.p....p...p.p.
+css
+>s\*>&d3>	/69];&eEé*bo
+=..pp...p..nnpp....p..
+css
+>=::l@|ea
+=pfff....
+css
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p..p.p.p.nnnnnp.p.p..p..pn
+css
+>xfE$s!4+s&` e*
+=......np.....p
+css
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=.....nppp..pp.p..........p..
+css
+>E7!beBlO=_Cl'`B0as']E` 
+=........p...sssssssp...
+css
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=ffffffffp..p.ssssssss...p....p..
+css
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=p..p..............n.p.p.......fffffp...ppn.
+css
+>_aL9bd+;l.é6s|d'5-T+}dC
+=......pp...nn...n..pp..
+css
+>X0
+=..
+css
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.p...p.p..........np....kk.pp............p......p.p..pnn
+css
+>漢@\	';|@@eOa#x"
+=.....p..kkkkff.
+css
+> L"/! ]1b5/'\%8T
+=......p.........
+css
+>*d^d\	/f% yE-'5XOzcd\T/
+=p......................
+css
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=p...p..p..pp.pfffp.....pp...pp.
+css
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=n..sssssssssssssssssssssp....p.
+css
+>a,2c{*(:xz_;'
+=.p..pppffffp.
+css
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p..p....pnp.p............p..p..p........
+css
+>\ ;9s|xE[O@4CSx!s
+=..pnn...p........
+css
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p....pffffff.............pp..pffp.p........
+css
+>;e(4cel		|_xefxS8~S
+=pfp..............p.
+sql
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=....fp.p...............................np.................ssssssss
+sql
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=kkkkkk.....p.kkkkkppp.kkkk.......kkkkk....kk.pnp.np.ccccccccccc
+sql
+><!doctype html><div class="a">&amp; text</div>
+=tt............tt.........tssst....p.ttttt....t
+sql
+>--- a/file.ts
+=ccccccccccccc
+sql
+>+++ b/file.ts
+=..........p..
+sql
+>@@ -1,2 +1,3 @@ fn
+=....npn..npn......
+sql
+>+added
+=......
+sql
+>-removed
+=........
+sql
+>diff --git a/x b/x
+=.....ccccccccccccc
+sql
+>## Heading
+=..........
+sql
+>  - item
+=........
+sql
+>  12. item
+=..nnp.....
+sql
+>> quote
+=t......
+sql
+>***
+=ppp
+sql
+>[table.sub]
+=pkkkkkp...p
+sql
+>key = "value" # c
+=kkk.t.sssssss....
+sql
+>#include <stdio.h>
+=.........t.....p.t
+sql
+>  # define X 1
+=.............n
+sql
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=...ffffpp.p.......t...sssss.p........tpssssp.ssspp.p
+sql
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p......p..pttttp...........ssss.tt......n.......
+sql
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psss..pnp.nnnp.....p.....p.kkkkpp.sss..ssssssp
+sql
+>key: value # yaml
+=kkk..............
+sql
+>...
+=ppp
+sql
+>---
+=ccc
+sql
+>
+=
+sql
+> 
+=.
+sql
+>		
+=..
+sql
+>é漢字😀 'unterminated
+=..................
+sql
+>"unterminated string
+=....................
+sql
+>/* open comment
+=.p.............
+sql
+>`template ${x}`
+=...........p.p.
+sql
+>x = 'y' # 1 <a>
+=..t.sss...n.t.t
+sql
+>SELECT def fn func let int // -- /* ; {}
+=kkkkkk.................ttt....cccccccccc
+sql
+>--- +a -b @@ ## > [t] key: v
+=cccccccccccccccccccccccccccc
+sql
+>#include x
+=..........
+sql
+>"k": true
+=sss......
+sql
+>SeLeCt 1
+=kkkkkk.n
+sql
+>a.b?.c ?? d >>>= 2 => {...x}
+=.p..p.......tttt.n.tt.pppp.p
+sql
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=....tsssssssss.t.........p....fp.....p..t.....p.........p.p
+sql
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=...........p..............np...p...............p.........p....fffp.p.p.p
+sql
+>date = 1979-05-27T07:32:00Z
+=tttt.t.nnnn.nn.......nn....
+sql
+>a = +1_000.5e3
+=..t.......p...
+sql
+>import { expect, test } from "bun:test";
+=.......p.......p......p.kkkk.ssssssssssp
+sql
+>  };
+=..pp
+sql
+>  return {
+=.........p
+sql
+> * usage with the time to each reset; a short word replaces the bars when the
+=.p.......kkkk.....tttt..............p................................kkkk....
+sql
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+sql
+>  // With a single account the answer only explains; don't flash a loading card first.
+=.....kkkk.............................kkkk.........p.................................p
+sql
+>  formatIntegrationDeliveryStatus,
+=.................................p
+sql
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.......ssssssssp........ssssssssp........sssssssss.pp
+sql
+>      sourceId: "group:ops",
+=................sssssssssssp
+sql
+>function stateWithDisabledTools() {
+=kkkkkkkk.ffffffffffffffffffffffpp.p
+sql
+>/** Blank column separating wrapped history from the task-panel border. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+sql
+>  const goal = state.goal;
+=.............t......p....p
+sql
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+sql
+>
+=
+sql
+>  }
+=..p
+sql
+>
+=
+sql
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=.........p...............p......p.............np............ssp.kkkk..ss.pp
+sql
+> */
+=.p.
+sql
+>/** Check if a character is whitespace (space, newline, tab). */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+sql
+> *
+=.p
+sql
+>  return pieces.map(piece => piece.type === "shell"
+=...............pfffp......tt......p.....ttt.sssssss
+sql
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....ffffffpfffffpffffffffffffffffffpsssssssssssssppppfffffffppp........pssssp.sssssssssp.pppp
+sql
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p........p.....kkkkkk......p....ttsssss.p.pp
+sql
+>}
+=p
+sql
+>    if (ch === "\\" && i + 1 < line.length) {
+=....kk.p...ttt.ssss.tt.....n.t.ttttp......p.p
+sql
+>    if (frame.kind === "'") {
+=....kk.p.....p.....ttt.sssp.p
+sql
+>      .toEqual([
+=......pfffffffpp
+sql
+> *
+=.p
+sql
+>    }
+=....p
+sql
+>      ? ";"
+=........sss
+sql
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=.........ttttpkkkkkkkp......ppn.nppp...p.sspp
+sql
+>  test("includes tool name and error status in content identity", () => {
+=..ffffpsssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.pp.tt.p
+sql
+>    for (let cols = 12; cols <= 90; cols++) {
+=....fff.p.........t.nnp......tt.nnp.......p.p
+sql
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=np.tt.ptp.n......pp.......pnnp.........
+sql
+>[(0E{>z'y<7>l678 9blE+ass8
+=pp..pt...tnt..............
+sql
+>%BE{#>b.XO+so
+=...p.t.p.....
+sql
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=..p..p.n.t.....sssst.p....np......tp...p.....tt...t...t..
+sql
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......tfp.....p.........tt...p..pn......
+sql
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=np....tt........t..nnn.npp.np..........p..t
+sql
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=...pn...p.....fp...p.......p.tt.pp...........p.....p....p.n
+sql
+>'_~9d漢$
+=.......
+sql
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=...p...t.t..tt....p.........tp.....n..p..t.....
+sql
+>,x/
+=p..
+sql
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=.......pnp..............p....tt....tp.............p.......
+sql
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.n...........pp.p.......ffp.fffpp.....t...p...p....p..n
+sql
+>9d6!B|+>,^1|y
+=...t...tp.n..
+sql
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=......p..sssssssssssssssssssssssssp
+sql
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p.......n....p...p....ppp
+sql
+>%y+$E"8]
+=......np
+sql
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p.p.p..p.......pnt..........t..tp.t
+sql
+>
+=
+sql
+>o漢;(C+bB漢\,a	S+@]-
+=..pp......p.....p.
+sql
+>s\*>&d3>	/69];&eEé*bo
+=..pt...t..nnpp....p..
+sql
+>=::l@|ea
+=ttt.....
+sql
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p.tp.p...nnnnnp.p.p.....pn
+sql
+>xfE$s!4+s&` e*
+=.....tn......p
+sql
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=...t.n.pp..pt.p..........p..
+sql
+>E7!beBlO=_Cl'`B0as']E` 
+=..t.....t...sssssssp...
+sql
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=p.......p..t.ssssssss...p....p..
+sql
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=t..p..............n.p.t............p...ppn.
+sql
+>_aL9bd+;l.é6s|d'5-T+}dC
+=.......p.p......n...p..
+sql
+>X0
+=..
+sql
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.......p.....t....np............................p.p..p.n
+sql
+>漢@\	';|@@eOa#x"
+=.....p.........
+sql
+> L"/! ]1b5/'\%8T
+=....t.p.........
+sql
+>*d^d\	/f% yE-'5XOzcd\T/
+=p......................
+sql
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=t......t...p..fffp....p.p...p..
+sql
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=n..sssssssssssssssssssss.....p.
+sql
+>a,2c{*(:xz_;'
+=.p..ppp....p.
+sql
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p.......pnp.p...............p..t........
+sql
+>\ ;9s|xE[O@4CSx!s
+=..p.....p......t.
+sql
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p....pp..................pp.pp....t........
+sql
+>;e(4cel		|_xefxS8~S
+=pfp................
+c
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=....fp.pp.kkkkkk.nnnn.t.nnnnn.t......t.np..t....p.........ssssssss
+c
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p.fffffptp.....................ff.pnp.np.tt.........
+c
+><!doctype html><div class="a">&amp; text</div>
+=tt............tt....kkkkktssstt...p.fffftt...t
+c
+>--- a/file.ts
+=ttt..t....p..
+c
+>+++ b/file.ts
+=ttt..t....p..
+c
+>@@ -1,2 +1,3 @@ fn
+=...tnpn.tnpn......
+c
+>+added
+=t.....
+c
+>-removed
+=t.......
+c
+>diff --git a/x b/x
+=.....tt.....t...t.
+c
+>## Heading
+=pp........
+c
+>  - item
+=..t.....
+c
+>  12. item
+=..nnp.....
+c
+>> quote
+=t......
+c
+>***
+=ttt
+c
+>[table.sub]
+=p.....p...p
+c
+>key = "value" # c
+=....t.sssssss.p..
+c
+>#include <stdio.h>
+=ffffffffffffffffff
+c
+>  # define X 1
+=ffffffffffffff
+c
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=...ffffpp.p.......t..pssssspp........tpssssp.ssspp.p
+c
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p...pt.p..p....p.t......t..ssss.tt......n.p.....
+c
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psssp.pnp.nnnp.tnnnp.kkkkp.....pp.sssp.ssssssp
+c
+>key: value # yaml
+=...p.......p.....
+c
+>...
+=ttt
+c
+>---
+=ttt
+c
+>
+=
+c
+> 
+=.
+c
+>		
+=..
+c
+>é漢字😀 'unterminated
+=..................
+c
+>"unterminated string
+=..............tttttt
+c
+>/* open comment
+=tt.............
+c
+>`template ${x}`
+=.kkkkkkkk..p.p.
+c
+>x = 'y' # 1 <a>
+=..t.sss.p.n.t.t
+c
+>SELECT def fn func let int // -- /* ; {}
+=.......................ttt.ccccccccccccc
+c
+>--- +a -b @@ ## > [t] key: v
+=ttt.t..t.....pp.t.p.p....p..
+c
+>#include x
+=ffffffffff
+c
+>"k": true
+=sssp.kkkk
+c
+>SeLeCt 1
+=.......n
+c
+>a.b?.c ?? d >>>= 2 => {...x}
+=.p.pp..pp...tttt.n.tt.pttt.p
+c
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=fffftsssssssss.t.kkk.....p....fpt....p.tt.....p.........p.p
+c
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=.....p.p...p.......p.t....np...p...............p..p......p..p.fffp.p.p.p
+c
+>date = 1979-05-27T07:32:00Z
+=.....t.nnnntnnt.....pnnp...
+c
+>a = +1_000.5e3
+=..t.t.....pnnn
+c
+>import { expect, test } from "bun:test";
+=.......p.......p......p......ssssssssssp
+c
+>  };
+=..pp
+c
+>  return {
+=..kkkkkk.p
+c
+> * usage with the time to each reset; a short word replaces the bars when the
+=.t..................................p...ttttt................................
+c
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+c
+>  // With a single account the answer only explains; don't flash a loading card first.
+=..cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+c
+>  formatIntegrationDeliveryStatus,
+=.................................p
+c
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.....p.ssssssssp......p.ssssssssp......p.sssssssss.pp
+c
+>      sourceId: "group:ops",
+=..............p.sssssssssssp
+c
+>function stateWithDisabledTools() {
+=.........ffffffffffffffffffffffpp.p
+c
+>/** Blank column separating wrapped history from the task-panel border. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+c
+>  const goal = state.goal;
+=..kkkkk......t......p....p
+c
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+c
+>
+=
+c
+>  }
+=..p
+c
+>
+=
+c
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=..kkkkkk.p........p......p......p..........p.tnp..........p.ssp.....p.ss.pp
+c
+> */
+=.tt
+c
+>/** Check if a character is whitespace (space, newline, tab). */
+=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+c
+> *
+=.t
+c
+>  return pieces.map(piece => piece.type === "shell"
+=..kkkkkk.......ptttp......tt......p.....ttt.sssssss
+c
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....ffffffpfffffpffffffffffffffffffpsssssssssssssppppfffffffppp......p.pssssp.sssssssssp.pppp
+c
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p......p.p............t....pfff.ttsssss.p.pp
+c
+>}
+=p
+c
+>    if (ch === "\\" && i + 1 < line.length) {
+=....kk.p...ttt.ssss.tt...t.n.t.....p......p.p
+c
+>    if (frame.kind === "'") {
+=....kk.p.....p.....ttt.sssp.p
+c
+>      .toEqual([
+=......pfffffffpp
+c
+> *
+=.t
+c
+>    }
+=....p
+c
+>      ? ";"
+=......p.sss
+c
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=..kkkkkk.....pfffffffpt.....ppntnppt.t.p.sspp
+c
+>  test("includes tool name and error status in content identity", () => {
+=..ffffpsssssssssssssssssssssssssssssssssssssssssssssssssssssssssp.pp.tt.p
+c
+>    for (let cols = 12; cols <= 90; cols++) {
+=....kkk.p.........t.nnp.ffff.tt.nnp.....ttp.p
+c
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=nt.tt.ptptn......pp..t...ppnnp.......t.
+c
+>[(0E{>z'y<7>l678 9blE+ass8
+=pp..pt..ftnt.........t....
+c
+>%BE{#>b.XO+so
+=t..ppt.p..t..
+c
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=..pp.ttntt.....sssst.p...tnp.t....tp...p....ttt.tpt...t..
+c
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.......tfp.....p..p.....ttt...p..pn......
+c
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=np..tftt..t.....tt.nnn.npppnp..........p..t
+c
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=..tpn..tp.pt.tfpt..p...p...pttt.ppt.........tp.....t..t.ttn
+c
+>'_~9d漢$
+=..t....
+c
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=..tp...tft..tt....p.....t...tp.tt..nt.p..t.....
+c
+>,x/
+=p.t
+c
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=....t..pnpt.....t.......p..p.tt....tpt...t........p...t...
+c
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.n....t...t..pptp......tffp.fffppp....t...p...p..t.p..n
+c
+>9d6!B|+>,^1|y
+=...t.tttptnt.
+c
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=......p.tsssssssssssssssssssssssssp
+c
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p......pn..t.p...p...tptp
+c
+>%y+$E"8]
+=t.t...np
+c
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p.ptpt.p.t.....pnt..t.......t..tp.t
+c
+>
+=
+c
+>o漢;(C+bB漢\,a	S+@]-
+=..pp.t....p...t.pt
+c
+>s\*>&d3>	/69];&eEé*bo
+=..ttt..t.tnnppt...t..
+c
+>=::l@|ea
+=ttt..t..
+c
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........pftp.t.t.nnnnnp.p.pt.t..pn
+c
+>xfE$s!4+s&` e*
+=.....tnt.t...t
+c
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=...t.npppt.pttp..........p..
+c
+>E7!beBlO=_Cl'`B0as']E` 
+=..t.....t...sssssssp...
+c
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=p...p...p..t.ssssssss...pt...p..
+c
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=tttp........t.....ntp.t..t....p....p...tpn.
+c
+>_aL9bd+;l.é6s|d'5-T+}dC
+=......tp.p...t..nt.tp..
+c
+>X0
+=..
+c
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=.p...t.pt.t.tt..t.np......ttpp.........t.t......p.p..ptn
+c
+>漢@\	';|@@eOa#x"
+=.....pt.....p..
+c
+> L"/! ]1b5/'\%8T
+=...tt.p...t..t..
+c
+>*d^d\	/f% yE-'5XOzcd\T/
+=t.t...t.t...t.........t
+c
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=tt.tt.tt..pt.tfffp....ppp...pt.
+c
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=nttssssssssssssssssssssst....p.
+c
+>a,2c{*(:xz_;'
+=.p..ptpp...p.
+c
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p.tt....pnp.p..........t.t..p..t......t.
+c
+>\ ;9s|xE[O@4CSx!s
+=..p..t..p......t.
+c
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p...tpp....t.............pp.ppp.ptt........
+c
+>;e(4cel		|_xefxS8~S
+=pfp......t.......t.
+toml
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=.................nnnn...nnnnn...nnnn...np.......cccccccccccccccccc
+toml
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...........p..................................np.n.............
+toml
+><!doctype html><div class="a">&amp; text</div>
+=.........................psss.................
+toml
+>--- a/file.ts
+=..........p..
+toml
+>+++ b/file.ts
+=..........p..
+toml
+>@@ -1,2 +1,3 @@ fn
+=...nnpn.nnpn......
+toml
+>+added
+=......
+toml
+>-removed
+=........
+toml
+>diff --git a/x b/x
+=..................
+toml
+>## Heading
+=cccccccccc
+toml
+>  - item
+=........
+toml
+>  12. item
+=..nnp.....
+toml
+>> quote
+=.......
+toml
+>***
+=...
+toml
+>[table.sub]
+=kkkkkkkkkkk
+toml
+>key = "value" # c
+=ttt.p.sssssss.ccc
+toml
+>#include <stdio.h>
+=cccccccccccccccccc
+toml
+>  # define X 1
+=..cccccccccccc
+toml
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=..........p.......p..ccccccccccccccccccccccccccccccc
+toml
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=.....sssssss..p......p...................ssss.........n.cccccc
+toml
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=psss..pnp.nnnp.nnnnp.kkkkp.....pp.sss..ssssssp
+toml
+>key: value # yaml
+=...........cccccc
+toml
+>...
+=ppp
+toml
+>---
+=...
+toml
+>
+=
+toml
+> 
+=.
+toml
+>		
+=..
+toml
+>é漢字😀 'unterminated
+=..................
+toml
+>"unterminated string
+=....................
+toml
+>/* open comment
+=...............
+toml
+>`template ${x}`
+=...........p.p.
+toml
+>x = 'y' # 1 <a>
+=t.p.sss.ccccccc
+toml
+>SELECT def fn func let int // -- /* ; {}
+=......................................pp
+toml
+>--- +a -b @@ ## > [t] key: v
+=.............ccccccccccccccc
+toml
+>#include x
+=cccccccccc
+toml
+>"k": true
+=sss..kkkk
+toml
+>SeLeCt 1
+=.......n
+toml
+>a.b?.c ?? d >>>= 2 => {...x}
+=.p..p..........p.n.p..pppp.p
+toml
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=.....sssssssss...........p....................p.........p.p
+toml
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=.......ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+toml
+>date = 1979-05-27T07:32:00Z
+=tttt.p.nnnnnnnnnnnnnnnnnnnn
+toml
+>a = +1_000.5e3
+=t.p.nnnnnnnnnn
+toml
+>import { expect, test } from "bun:test";
+=.......p.......p......p......ssssssssss.
+toml
+>  };
+=..p.
+toml
+>  return {
+=.........p
+toml
+> * usage with the time to each reset; a short word replaces the bars when the
+=.............................................................................
+toml
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=..................................................................................p...
+toml
+>  // With a single account the answer only explains; don't flash a loading card first.
+=.....................................................................................p
+toml
+>  formatIntegrationDeliveryStatus,
+=.................................p
+toml
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=....p.......ssssssssp........ssssssssp........sssssssss.pp
+toml
+>      sourceId: "group:ops",
+=................sssssssssssp
+toml
+>function stateWithDisabledTools() {
+=..................................p
+toml
+>/** Blank column separating wrapped history from the task-panel border. */
+=......................................................................p...
+toml
+>  const goal = state.goal;
+=.............p......p.....
+toml
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=..................................................................................p...
+toml
+>
+=
+toml
+>  }
+=..p
+toml
+>
+=
+toml
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=.........p...............p......p............nnp............ssp.......ss.p.
+toml
+> */
+=...
+toml
+>/** Check if a character is whitespace (space, newline, tab). */
+=.............................................p........p.....p...
+toml
+> *
+=..
+toml
+>  return pieces.map(piece => piece.type === "shell"
+=...............p..........p.......p.....ppp.sssssss
+toml
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=....................................sssssssssssss...p........pp........pssssp.sssssssssp.pp..
+toml
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=......p........p........................sssss.p.pp
+toml
+>}
+=p
+toml
+>    if (ch === "\\" && i + 1 < line.length) {
+=...........ppp.ssss........n.......p........p
+toml
+>    if (frame.kind === "'") {
+=.............p.....ppp.sss..p
+toml
+>      .toEqual([
+=......p........p
+toml
+> *
+=..
+toml
+>    }
+=....p
+toml
+>      ? ";"
+=........sss
+toml
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=.............p..............ppnnn.p....p.ss..
+toml
+>  test("includes tool name and error status in content identity", () => {
+=.......sssssssssssssssssssssssssssssssssssssssssssssssssssssssssp....p..p
+toml
+>    for (let cols = 12; cols <= 90; cols++) {
+=..................p.nn........p.nn..........p
+toml
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=n..pp.p...n......pp.......pnn..........
+toml
+>[(0E{>z'y<7>l678 9blE+ass8
+=p...p.....n...............
+toml
+>%BE{#>b.XO+so
+=...pccccccccc
+toml
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=...cccccccccccccccccccccccccccccccccccccccccccccccccccccc
+toml
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=...............p..ccccccccccccccccccccccc
+toml
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=n......p...........nnn.nppccccccccccccccccc
+toml
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=....n...p..........p.......p..............................n
+toml
+>'_~9d漢$
+=.......
+toml
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=...p...p..........p................n.....p.....
+toml
+>,x/
+=p..
+toml
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=.......pnp..............p.....p...........................
+toml
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.n...........pp.p...............p.....................n
+toml
+>9d6!B|+>,^1|y
+=........p.n..
+toml
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=.........sssssssssssssssssssssssssp
+toml
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=p.......n....p...p.......
+toml
+>%y+$E"8]
+=......np
+toml
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=.p...p..p........n..............p...
+toml
+>
+=
+toml
+>o漢;(C+bB漢\,a	S+@]-
+=..........p.....p.
+toml
+>s\*>&d3>	/69];&eEé*bo
+=..........nnp........
+toml
+>=::l@|ea
+=p.......
+toml
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=........p..p.....nnnnn..p.p.....pn
+toml
+>xfE$s!4+s&` e*
+=......n.......
+toml
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=.....n..p..pp.p..........p..
+toml
+>E7!beBlO=_Cl'`B0as']E` 
+=........p...sssssssp...
+toml
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=p.......p..p.ssssssss...........
+toml
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=p..p..............n.p.p............p....pn.
+toml
+>_aL9bd+;l.é6s|d'5-T+}dC
+=.........p......n...p..
+toml
+>X0
+=..
+toml
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=..................np.........ccccccccccccccccccccccccccc
+toml
+>漢@\	';|@@eOa#x"
+=............ccc
+toml
+> L"/! ]1b5/'\%8T
+=......p.........
+toml
+>*d^d\	/f% yE-'5XOzcd\T/
+=.......................
+toml
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=p......p..............p.p...p..
+toml
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=n..sssssssssssssssssssss.......
+toml
+>a,2c{*(:xz_;'
+=.p..p........
+toml
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..p........np.p...............p..p........
+toml
+>\ ;9s|xE[O@4CSx!s
+=........p........
+toml
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=p....pp..................pp.p.....p........
+toml
+>;e(4cel		|_xefxS8~S
+=...................
+diff
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=..................................................................
+diff
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...............................................................
+diff
+><!doctype html><div class="a">&amp; text</div>
+=..............................................
+diff
+>--- a/file.ts
+=kkkkkkkkkkkkk
+diff
+>+++ b/file.ts
+=kkkkkkkkkkkkk
+diff
+>@@ -1,2 +1,3 @@ fn
+=tttttttttttttttttt
+diff
+>+added
+=ssssss
+diff
+>-removed
+=nnnnnnnn
+diff
+>diff --git a/x b/x
+=kkkkkkkkkkkkkkkkkk
+diff
+>## Heading
+=..........
+diff
+>  - item
+=........
+diff
+>  12. item
+=..........
+diff
+>> quote
+=.......
+diff
+>***
+=...
+diff
+>[table.sub]
+=...........
+diff
+>key = "value" # c
+=.................
+diff
+>#include <stdio.h>
+=..................
+diff
+>  # define X 1
+=..............
+diff
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=....................................................
+diff
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=..............................................................
+diff
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=..............................................
+diff
+>key: value # yaml
+=.................
+diff
+>...
+=...
+diff
+>---
+=nnn
+diff
+>
+=
+diff
+> 
+=.
+diff
+>		
+=..
+diff
+>é漢字😀 'unterminated
+=..................
+diff
+>"unterminated string
+=....................
+diff
+>/* open comment
+=...............
+diff
+>`template ${x}`
+=...............
+diff
+>x = 'y' # 1 <a>
+=...............
+diff
+>SELECT def fn func let int // -- /* ; {}
+=........................................
+diff
+>--- +a -b @@ ## > [t] key: v
+=kkkkkkkkkkkkkkkkkkkkkkkkkkkk
+diff
+>#include x
+=..........
+diff
+>"k": true
+=.........
+diff
+>SeLeCt 1
+=........
+diff
+>a.b?.c ?? d >>>= 2 => {...x}
+=............................
+diff
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=...........................................................
+diff
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=........................................................................
+diff
+>date = 1979-05-27T07:32:00Z
+=...........................
+diff
+>a = +1_000.5e3
+=..............
+diff
+>import { expect, test } from "bun:test";
+=........................................
+diff
+>  };
+=....
+diff
+>  return {
+=..........
+diff
+> * usage with the time to each reset; a short word replaces the bars when the
+=.............................................................................
+diff
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=......................................................................................
+diff
+>  // With a single account the answer only explains; don't flash a loading card first.
+=......................................................................................
+diff
+>  formatIntegrationDeliveryStatus,
+=..................................
+diff
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=..........................................................
+diff
+>      sourceId: "group:ops",
+=............................
+diff
+>function stateWithDisabledTools() {
+=...................................
+diff
+>/** Blank column separating wrapped history from the task-panel border. */
+=..........................................................................
+diff
+>  const goal = state.goal;
+=..........................
+diff
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=......................................................................................
+diff
+>
+=
+diff
+>  }
+=...
+diff
+>
+=
+diff
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=...........................................................................
+diff
+> */
+=...
+diff
+>/** Check if a character is whitespace (space, newline, tab). */
+=................................................................
+diff
+> *
+=..
+diff
+>  return pieces.map(piece => piece.type === "shell"
+=...................................................
+diff
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=.............................................................................................
+diff
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=..................................................
+diff
+>}
+=.
+diff
+>    if (ch === "\\" && i + 1 < line.length) {
+=.............................................
+diff
+>    if (frame.kind === "'") {
+=.............................
+diff
+>      .toEqual([
+=................
+diff
+> *
+=..
+diff
+>    }
+=.....
+diff
+>      ? ";"
+=...........
+diff
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=.............................................
+diff
+>  test("includes tool name and error status in content identity", () => {
+=.........................................................................
+diff
+>    for (let cols = 12; cols <= 90; cols++) {
+=.............................................
+diff
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=.......................................
+diff
+>[(0E{>z'y<7>l678 9blE+ass8
+=..........................
+diff
+>%BE{#>b.XO+so
+=.............
+diff
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=.........................................................
+diff
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.........................................
+diff
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=...........................................
+diff
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=...........................................................
+diff
+>'_~9d漢$
+=.......
+diff
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=...............................................
+diff
+>,x/
+=...
+diff
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=..........................................................
+diff
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.......................................................
+diff
+>9d6!B|+>,^1|y
+=.............
+diff
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=...................................
+diff
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=.........................
+diff
+>%y+$E"8]
+=........
+diff
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=....................................
+diff
+>
+=
+diff
+>o漢;(C+bB漢\,a	S+@]-
+=..................
+diff
+>s\*>&d3>	/69];&eEé*bo
+=.....................
+diff
+>=::l@|ea
+=........
+diff
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=..................................
+diff
+>xfE$s!4+s&` e*
+=..............
+diff
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=............................
+diff
+>E7!beBlO=_Cl'`B0as']E` 
+=.......................
+diff
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=................................
+diff
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=...........................................
+diff
+>_aL9bd+;l.é6s|d'5-T+}dC
+=.......................
+diff
+>X0
+=..
+diff
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=........................................................
+diff
+>漢@\	';|@@eOa#x"
+=...............
+diff
+> L"/! ]1b5/'\%8T
+=................
+diff
+>*d^d\	/f% yE-'5XOzcd\T/
+=.......................
+diff
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=...............................
+diff
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=...............................
+diff
+>a,2c{*(:xz_;'
+=.............
+diff
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..........................................
+diff
+>\ ;9s|xE[O@4CSx!s
+=.................
+diff
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=...........................................
+diff
+>;e(4cel		|_xefxS8~S
+=...................
+md
+>def f(x): return 0x1F + 0b101 + 0o17 + 1.5e-3j  # comment 'quoted'
+=..................................................................
+md
+>SELECT name, COUNT(*) FROM users WHERE id IN (1, 2) -- trailing
+=...............................................................
+md
+><!doctype html><div class="a">&amp; text</div>
+=..............................................
+md
+>--- a/file.ts
+=.............
+md
+>+++ b/file.ts
+=.............
+md
+>@@ -1,2 +1,3 @@ fn
+=..................
+md
+>+added
+=......
+md
+>-removed
+=........
+md
+>diff --git a/x b/x
+=..................
+md
+>## Heading
+=kkkkkkkkkk
+md
+>  - item
+=tttt....
+md
+>  12. item
+=tttttt....
+md
+>> quote
+=c......
+md
+>***
+=ttt
+md
+>[table.sub]
+=...........
+md
+>key = "value" # c
+=.................
+md
+>#include <stdio.h>
+=..................
+md
+>  # define X 1
+=..............
+md
+>fn main() { let s = r#"raw"#; println!("{}", 'c'); }
+=....................................................
+md
+>echo "$HOME" ${VAR:-x} $(date) | grep -E '^a' && exit 1 # done
+=..............................................................
+md
+>{"a": [1, 2.5, -3e4, true, null], "b": "s\"q"}
+=..............................................
+md
+>key: value # yaml
+=.................
+md
+>...
+=...
+md
+>---
+=ttt
+md
+>
+=
+md
+> 
+=.
+md
+>		
+=..
+md
+>é漢字😀 'unterminated
+=..................
+md
+>"unterminated string
+=....................
+md
+>/* open comment
+=...............
+md
+>`template ${x}`
+=sssssssssssssss
+md
+>x = 'y' # 1 <a>
+=...............
+md
+>SELECT def fn func let int // -- /* ; {}
+=........................................
+md
+>--- +a -b @@ ## > [t] key: v
+=............................
+md
+>#include x
+=..........
+md
+>"k": true
+=.........
+md
+>SeLeCt 1
+=........
+md
+>a.b?.c ?? d >>>= 2 => {...x}
+=............................
+md
+>impl<'a> Foo<'a> for Bar { fn f(&self) -> u32 { 0x1Fu32 } }
+=...........................................................
+md
+>color: #fff; margin: -2px 1.5em; @media screen { a:hover { x: url(a) } }
+=........................................................................
+md
+>date = 1979-05-27T07:32:00Z
+=...........................
+md
+>a = +1_000.5e3
+=..............
+md
+>import { expect, test } from "bun:test";
+=........................................
+md
+>  };
+=....
+md
+>  return {
+=..........
+md
+> * usage with the time to each reset; a short word replaces the bars when the
+=ttt..........................................................................
+md
+>/** An `accounts` request that opens the screen once its answer says it is enabled. */
+=..ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt.
+md
+>  // With a single account the answer only explains; don't flash a loading card first.
+=......................................................................................
+md
+>  formatIntegrationDeliveryStatus,
+=..................................
+md
+>    { name: "chrono", label: "Chrono", color: "#11ccaa" },
+=..........................................................
+md
+>      sourceId: "group:ops",
+=............................
+md
+>function stateWithDisabledTools() {
+=...................................
+md
+>/** Blank column separating wrapped history from the task-panel border. */
+=..ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt.
+md
+>  const goal = state.goal;
+=..........................
+md
+>/** Durable external notification subscriptions targeting the focused conversation. */
+=..ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt.
+md
+>
+=
+md
+>  }
+=...
+md
+>
+=
+md
+>  return { lineEnd: input.length, restStart: -1, activeSgr: "", join: "" };
+=...........................................................................
+md
+> */
+=...
+md
+>/** Check if a character is whitespace (space, newline, tab). */
+=..ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt.
+md
+> *
+=..
+md
+>  return pieces.map(piece => piece.type === "shell"
+=...................................................
+md
+>    expect(shape(splitHeredocPieces("ls\necho hi"))).toEqual([{ shell: ["ls", "echo hi"] }]);
+=.............................................................................................
+md
+>      { shell: [`git commit -m "$(cat <<'EOF'`] },
+=................ssssssssssssssssssssssssssssss....
+md
+>}
+=.
+md
+>    if (ch === "\\" && i + 1 < line.length) {
+=.............................................
+md
+>    if (frame.kind === "'") {
+=.............................
+md
+>      .toEqual([
+=................
+md
+> *
+=..
+md
+>    }
+=.....
+md
+>      ? ";"
+=...........
+md
+>  return text.replace(/\x1b\[[0-9;]*m/g, "");
+=.............................................
+md
+>  test("includes tool name and error status in content identity", () => {
+=.........................................................................
+md
+>    for (let cols = 12; cols <= 90; cols++) {
+=.............................................
+md
+>0*漢==C]>(|2$T'fd@[{zb&4s4:[89(CE15O\b^f
+=.......................................
+md
+>[(0E{>z'y<7>l678 9blE+ass8
+=..........................
+md
+>%BE{#>b.XO+so
+=.............
+md
+>de;#b*-7%<s$漢oT"=}"<x,xcX%0}f%89a1>($漢'}0alE-<=o-:=S"e=x1
+=.........................................................
+md
+>45c2S_\>e($1BBE]3a#6ySSS~>>3eb,0y]4éfc'él
+=.........................................
+md
+>0(se&e<=aE~cSob4>/"399'0,,#7]ad77 éc85C;s	!
+=...........................................
+md
+>@b+;0@`/.x:|b-s(&	e]dSf:$a1}~<>d)(~fLxc3Boe1/;Tdl@o*"z%x*/1
+=...................................................tttttt..
+md
+>'_~9d漢$
+=.......
+md
+>fT+,7b\=B<EO>!sldE{o1ayé%'é$!)é-+E$4+o;bc=SL漢7x
+=...............................................
+md
+>,x/
+=...
+md
+>@@5e&eb{8}-lLx'"+xslxCzs{yB:e>=8bEd<(-eBf~ba0699fd;xe %Tef
+=..........................................................
+md
+>@3\sx4-oXb-Ec.[^[4BE_1b%B7(\B69(.:\\S`!sbE)afE)Ea^s;e	5
+=.......................................................
+md
+>9d6!B|+>,^1|y
+=.............
+md
+>lxc	O$(X|'d La56z5b"@Ea)b`b42fE1é']
+=...................................
+md
+>[f@xx0$:0`T/o.b10{fC"%)*)
+=.........................
+md
+>%y+$E"8]
+=........
+md
+>e}s;+{|b]漢~sELT3;3>fs/`8x8al !2z=(o!
+=....................................
+md
+>
+=
+md
+>o漢;(C+bB漢\,a	S+@]-
+=..................
+md
+>s\*>&d3>	/69];&eEé*bo
+=..ttttttttttttttttt..
+md
+>=::l@|ea
+=........
+md
+>`9xex4dE,e<{z* ~@13649)z,f]|_~E\]5
+=..................................
+md
+>xfE$s!4+s&` e*
+=..............
+md
+>fc\!$8:)[&E]=^]aaBod_fz$a{ze
+=............................
+md
+>E7!beBlO=_Cl'`B0as']E` 
+=.............sssssssss.
+md
+>.yec:fse[a1=e'@C<;zb'b'O)&Ed3)C"
+=................................
+md
+>=-|]ecESbybd&aaex"9|{o=cf&Csz$:afbs]Bd9*{7	
+=...........................................
+md
+>_aL9bd+;l.é6s|d'5-T+}dC
+=.......................
+md
+>X0
+=..
+md
+>$:1TL~	)-f-X|<b`%'9,ssEc@S^+:#7bzCCzE82^s+`CfaOf[f{bd]-8
+=...............ssssssssssssssssssssssssssss.............
+md
+>漢@\	';|@@eOa#x"
+=...............
+md
+> L"/! ]1b5/'\%8T
+=................
+md
+>*d^d\	/f% yE-'5XOzcd\T/
+=.......................
+md
+>=/B&+e-=x8:*x+ed5(bc`a.:{oc1{+E
+=...............................
+md
+>7-^'.bf,3d "d5@."1e(#@x'~lsz4;O
+=...............................
+md
+>a,2c{*(:xz_;'
+=.............
+md
+>8C}X/+czxc)6}c,x7aex5fE'\&s+x_}s@=fBffe4/ 
+=..........................................
+md
+>\ ;9s|xE[O@4CSx!s
+=.................
+md
+>[d`b%}.x7dx-\"50B7	$7xCxE},f.;:s:%=1ys\fxEE
+=...........................................
+md
+>;e(4cel		|_xefxS8~S
+=...................

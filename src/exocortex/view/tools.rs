@@ -196,11 +196,13 @@ fn call_lines(
     let mut spans = vec![Span {
         text: label.to_owned(),
         style: Style::Bold,
+        link: None,
     }];
     if !shown.is_empty() {
         spans.push(Span {
             text: format!(" {shown}"),
             style: Style::Plain,
+            link: None,
         });
     }
     let mut lines = wrap(&spans, width, size);
@@ -448,6 +450,7 @@ fn body(
                 &[Span {
                     text: shown.to_owned(),
                     style: Style::Plain,
+                    link: None,
                 }],
                 width,
                 ty.px(),
@@ -497,6 +500,7 @@ fn body(
                         format!("{message} Tap to retry.")
                     },
                     style: Style::Plain,
+                    link: None,
                 }],
                 width,
                 ty.px(),

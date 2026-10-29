@@ -6,14 +6,18 @@
 //! Everything here bakes the current theme's colours and sizes into its
 //! ops: the view caches pieces by `theme::generation()`.
 
+use std::rc::Rc;
+
 use crate::gfx::{RectF, Rgb};
 use crate::text::{self, Weight};
 
-use super::super::markdown::{self, MdBlock, Span, Style};
+use super::super::markdown::{self, LinkKind, MdBlock, Span, Style, link_kind};
+use super::super::math;
 use super::super::model::rich::Rich;
+use super::super::model::{Action, UiAct, rich};
 use super::super::theme::{
     self, HAIRLINE, LIST_INDENT, MARKDOWN_GAP, MARKER_GAP, QUOTE_BAR, QUOTE_INDENT, T_BODY, T_H1,
-    T_H2, T_H3, T_H4, T_INLINE_CODE,
+    T_H2, T_H3, T_H4, T_INLINE_CODE, T_SMALL, TARGET,
 };
 use super::code;
 use super::ops::{self, Laid, Op};
@@ -35,6 +39,8 @@ pub struct Run {
     pub w: f32,
     pub text: String,
     pub style: Style,
+    /// A link's target (`Style::Link`).
+    pub link: Option<Rc<str>>,
 }
 
 /// A span style's face, size and colour at body size `size`.
@@ -50,7 +56,7 @@ pub fn font(style: Style, size: f32) -> (Weight, f32, Rgb) {
             p.secondary_accent,
         ),
         Style::Link => (Weight::Mono, size, p.link),
-        Style::Strike => (Weight::Mono, size, p.text),
+        Style::Strike | Style::Math => (Weight::Mono, size, p.text),
     }
 }
 
@@ -76,9 +82,13 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
         lines.push(std::mem::take(line));
         *x = 0.0;
     };
-    let append = |line: &mut Vec<Run>, x: &mut f32, piece: &str, w: f32, style: Style| {
+    let append = |line: &mut Vec<Run>, x: &mut f32, piece: &str, w: f32, span: &Span| {
         match line.last_mut() {
-            Some(last) if last.style == style && (last.x + last.w - *x).abs() < 0.01 => {
+            Some(last)
+                if last.style == span.style
+                    && last.link == span.link
+                    && (last.x + last.w - *x).abs() < 0.01 =>
+            {
                 last.text.push_str(piece);
                 last.w += w;
             }
@@ -86,7 +96,8 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                 x: *x,
                 w,
                 text: piece.to_owned(),
-                style,
+                style: span.style,
+                link: span.link.clone(),
             }),
         }
         *x += w;
@@ -96,7 +107,15 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
     let mut after_space = true;
     for span in spans {
         let (weight, fsize, _) = font(span.style, size);
-        for (index, part) in span.text.split('\n').enumerate() {
+        // Inline math is drawn as its Unicode rendering.
+        let rendered;
+        let text = if span.style == Style::Math {
+            rendered = inline_math(&span.text);
+            &rendered[..]
+        } else {
+            span.text.as_str()
+        };
+        for (index, part) in text.split('\n').enumerate() {
             if index > 0 {
                 finish(&mut lines, &mut line, &mut x);
                 after_space = true;
@@ -105,7 +124,7 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                 let w = text::measure(piece, weight, fsize);
                 if piece.starts_with(' ') || piece.starts_with('\t') {
                     if x > 0.0 && x + w <= width {
-                        append(&mut line, &mut x, piece, w, span.style);
+                        append(&mut line, &mut x, piece, w, span);
                     }
                     after_space = true;
                     continue;
@@ -114,14 +133,14 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                 after_space = false;
                 if glued && x + w > width && w <= GLUE_OVERHANG {
                     // Short punctuation stays with what it follows.
-                    append(&mut line, &mut x, piece, w, span.style);
+                    append(&mut line, &mut x, piece, w, span);
                     continue;
                 }
                 if x > 0.0 && x + w > width {
                     finish(&mut lines, &mut line, &mut x);
                 }
                 if w <= width {
-                    append(&mut line, &mut x, piece, w, span.style);
+                    append(&mut line, &mut x, piece, w, span);
                     continue;
                 }
                 // Longer than a line: as many characters as fit, repeatedly.
@@ -130,7 +149,7 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                 for character in piece.chars() {
                     let cw = text::measure(character.encode_utf8(&mut [0; 4]), weight, fsize);
                     if x + chunk_w + cw > width && (x > 0.0 || !chunk.is_empty()) {
-                        append(&mut line, &mut x, &chunk, chunk_w, span.style);
+                        append(&mut line, &mut x, &chunk, chunk_w, span);
                         finish(&mut lines, &mut line, &mut x);
                         chunk.clear();
                         chunk_w = 0.0;
@@ -138,7 +157,7 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
                     chunk.push(character);
                     chunk_w += cw;
                 }
-                append(&mut line, &mut x, &chunk, chunk_w, span.style);
+                append(&mut line, &mut x, &chunk, chunk_w, span);
             }
         }
     }
@@ -146,6 +165,32 @@ pub fn wrap(spans: &[Span], width: f32, size: f32) -> Vec<Vec<Run>> {
         finish(&mut lines, &mut line, &mut x);
     }
     lines
+}
+
+/// Inline math as one line, no-break spaces where TeX would not break
+/// it (the TUI's prose rendering), remembered: a streamed paragraph is laid
+/// out again on every chunk.
+fn inline_math(tex: &str) -> Rc<str> {
+    thread_local! {
+        static RENDERED: std::cell::RefCell<std::collections::HashMap<String, Rc<str>>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    RENDERED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(text) = cache.get(tex) {
+            return text.clone();
+        }
+        if cache.len() > 2000 {
+            cache.clear();
+        }
+        let options = math::Options {
+            nbsp: true,
+            ..math::Options::default()
+        };
+        let text: Rc<str> = Rc::from(math::inline_with(tex, options));
+        cache.insert(tex.to_owned(), text.clone());
+        text
+    })
 }
 
 /// Splits a line into words and runs of spaces.
@@ -184,9 +229,49 @@ pub(crate) fn push_lines(
     color: Option<Rgb>,
     alpha: f32,
 ) -> f32 {
+    lines_into(ops, None, lines, x, top, size, line_h, color, alpha)
+}
+
+/// `push_lines`, its links tappable: a hit per link run (C1's blocks).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_lines_linked(
+    laid: &mut Laid,
+    lines: &[Vec<Run>],
+    x: f32,
+    top: f32,
+    size: f32,
+    line_h: f32,
+    color: Option<Rgb>,
+) -> f32 {
+    lines_into(
+        &mut laid.ops,
+        Some(&mut laid.hits),
+        lines,
+        x,
+        top,
+        size,
+        line_h,
+        color,
+        1.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lines_into(
+    ops: &mut Vec<Op>,
+    mut hits: Option<&mut Vec<(RectF, Action)>>,
+    lines: &[Vec<Run>],
+    x: f32,
+    top: f32,
+    size: f32,
+    line_h: f32,
+    color: Option<Rgb>,
+    alpha: f32,
+) -> f32 {
     let c = theme::c();
     for (index, line) in lines.iter().enumerate() {
-        let base = top + index as f32 * line_h + (line_h + size * 0.74) / 2.0;
+        let line_top = top + index as f32 * line_h;
+        let base = line_top + (line_h + size * 0.74) / 2.0;
         for run in line {
             let (weight, fsize, default) = font(run.style, size);
             if run.style == Style::Code {
@@ -230,11 +315,36 @@ pub(crate) fn push_lines(
                     color,
                     alpha,
                 }),
-                // Links underlined 4 px under the baseline.
-                Style::Link => ops.push(ops::rect(
-                    RectF::new(x + run.x, (base + 4.0).round(), run.w, HAIRLINE),
-                    c.link_underline,
-                )),
+                Style::Link => {
+                    // Underlined 4 px under the baseline; dashed for a file.
+                    let file = run
+                        .link
+                        .as_deref()
+                        .is_some_and(|link| matches!(link_kind(link), Some(LinkKind::File(_))));
+                    let y = (base + 4.0).round();
+                    if file {
+                        let mut dx = 0.0;
+                        while dx < run.w {
+                            let w = 8.0_f32.min(run.w - dx);
+                            ops.push(ops::rect(
+                                RectF::new((x + run.x + dx).round(), y, w, HAIRLINE),
+                                c.link_underline,
+                            ));
+                            dx += 14.0;
+                        }
+                    } else {
+                        ops.push(ops::rect(
+                            RectF::new(x + run.x, y, run.w, HAIRLINE),
+                            c.link_underline,
+                        ));
+                    }
+                    if let (Some(hits), Some(link)) = (hits.as_deref_mut(), &run.link) {
+                        hits.push((
+                            RectF::new(x + run.x - 6.0, line_top, run.w + 12.0, line_h),
+                            Action::Rich(rich::Act::OpenLink(link.to_string())),
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -243,10 +353,7 @@ pub(crate) fn push_lines(
 }
 
 pub(crate) fn plain(text: &str) -> Vec<Span> {
-    vec![Span {
-        text: text.to_owned(),
-        style: Style::Plain,
-    }]
+    vec![Span::new(text, Style::Plain)]
 }
 
 /// How a piece of markdown is set: the transcript's body for now (C1 adds
@@ -277,7 +384,7 @@ pub fn lay_with(
     let MdStyle::Body = style;
     let mut laid = Laid::default();
     let mut y = top;
-    let blocks = markdown::parse(source);
+    let blocks = markdown::parse_capped(source);
     for (index, block) in blocks.iter().enumerate() {
         if index > 0 {
             y += md_gap(&blocks[index - 1], block);
@@ -341,7 +448,7 @@ fn block_into(
     match block {
         MdBlock::Paragraph(spans) => {
             let lines = wrap(spans, width, BODY);
-            y += push_lines(&mut laid.ops, &lines, x, y, BODY, BODY_LINE, None, 1.0);
+            y += push_lines_linked(laid, &lines, x, y, BODY, BODY_LINE, None);
         }
         MdBlock::Heading(level, spans) => {
             let (ty, color) = match level {
@@ -353,25 +460,16 @@ fn block_into(
             let spans: Vec<Span> = spans
                 .iter()
                 .map(|span| Span {
-                    text: span.text.clone(),
                     style: if span.style == Style::Plain {
                         Style::Bold
                     } else {
                         span.style
                     },
+                    ..span.clone()
                 })
                 .collect();
             let lines = wrap(&spans, width, ty.px());
-            y += push_lines(
-                &mut laid.ops,
-                &lines,
-                x,
-                y,
-                ty.px(),
-                ty.line(),
-                Some(color),
-                1.0,
-            );
+            y += push_lines_linked(laid, &lines, x, y, ty.px(), ty.line(), Some(color));
         }
         MdBlock::Item(depth, marker, spans) => {
             // Markers 34 px in, 30 more per level; the text after them
@@ -392,28 +490,26 @@ fn block_into(
                 p.accent,
             ));
             let lines = wrap(spans, (width - indent - marker_w).max(BODY * 4.0), BODY);
-            y += push_lines(
-                &mut laid.ops,
+            y += push_lines_linked(
+                laid,
                 &lines,
                 x + indent + marker_w,
                 y,
                 BODY,
                 BODY_LINE,
                 None,
-                1.0,
             );
         }
         MdBlock::Quote(spans) => {
             let lines = wrap(spans, width - QUOTE_INDENT, BODY);
-            let h = push_lines(
-                &mut laid.ops,
+            let h = push_lines_linked(
+                laid,
                 &lines,
                 x + QUOTE_INDENT,
                 y,
                 BODY,
                 BODY_LINE,
                 Some(c.text_quote),
-                1.0,
             );
             laid.ops
                 .push(ops::rect(RectF::new(x, y, QUOTE_BAR, h), c.quote_bar));
@@ -426,6 +522,44 @@ fn block_into(
         MdBlock::Table(grid) => {
             y = table::lay(laid, grid, x, width, y);
         }
+        MdBlock::Math(tex) => {
+            y = lay_display_math(laid, tex, x, width, y);
+        }
+        // Over the caps (PAR-134): the start, and the whole in the reader.
+        MdBlock::Long { preview, full } => {
+            let lines = wrap(&plain(&format!("{preview}…")), width, BODY);
+            y += push_lines(&mut laid.ops, &lines, x, y, BODY, BODY_LINE, None, 1.0);
+            let label = format!(
+                "Read full paragraph ({} characters)",
+                group_digits(full.chars().count())
+            );
+            y = more_button(
+                laid,
+                &label,
+                Action::Ui(UiAct::Read {
+                    title: "Paragraph".into(),
+                    text: full.to_string(),
+                }),
+                x,
+                y + MARKDOWN_GAP,
+            );
+        }
+        MdBlock::More { total, full } => {
+            let label = format!(
+                "{}-piece preview · Open all {total} pieces",
+                markdown::MAX_PIECES
+            );
+            y = more_button(
+                laid,
+                &label,
+                Action::Ui(UiAct::Read {
+                    title: "Response".into(),
+                    text: full.to_string(),
+                }),
+                x,
+                y,
+            );
+        }
         MdBlock::Rule => {
             laid.ops.push(ops::rect(
                 RectF::new(x, y + 12.0, width, HAIRLINE),
@@ -435,4 +569,155 @@ fn block_into(
         }
     }
     y
+}
+
+/// Display math (§3.6.7): its rows in a monospaced grid (as the TUI lays
+/// them out), centred, scrolled sideways when wider than the transcript;
+/// "Copy LaTeX" under it. Returns the bottom.
+fn lay_display_math(laid: &mut Laid, tex: &str, x: f32, width: f32, top: f32) -> f32 {
+    let p = theme::p();
+    let size = BODY;
+    let line_h = (size * 1.2).round();
+    let cell = text::measure("M", Weight::Mono, size).max(1.0);
+    let columns = (width / cell).floor().max(8.0) as usize;
+    let rows = math::display(tex, columns);
+    let cols = rows
+        .iter()
+        .map(|row| math::cells(row).iter().map(|(_, w)| w).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let grid_w = cols as f32 * cell;
+    let left = if grid_w <= width {
+        x + ((width - grid_w) / 2.0).round()
+    } else {
+        x
+    };
+    let mut row_ops = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let baseline = top + index as f32 * line_h + (line_h + size * 0.74) / 2.0;
+        grid_text(&mut row_ops, row, left, baseline, size, cell, p.text);
+    }
+    let h = rows.len().max(1) as f32 * line_h;
+    if grid_w > width {
+        let key = super::super::images::hash_of(("math", tex));
+        laid.ops.push(Op::Clip {
+            rect: RectF::new(x, top - 8.0, width, h + 16.0),
+            xscroll: Some(key),
+            yscroll: None,
+            ops: row_ops,
+        });
+        laid.xmax.push((key, (grid_w - width).ceil()));
+    } else {
+        laid.ops.extend(row_ops);
+    }
+    // "Copy LaTeX", a target under it.
+    let ty = T_SMALL;
+    let y = top + h + 4.0;
+    let label = "Copy LaTeX";
+    let label_w = text::measure(label, ty.weight, ty.px());
+    laid.ops.push(ops::text(
+        x + 6.0,
+        y + (TARGET + ty.px() * 0.74) / 2.0,
+        label,
+        ty.weight,
+        ty.px(),
+        p.muted,
+    ));
+    laid.hits.push((
+        RectF::new(x, y, (label_w + 12.0).max(TARGET), TARGET),
+        Action::Ui(UiAct::Copy(tex.to_owned())),
+    ));
+    y + TARGET
+}
+
+/// A "Read full …" / "Open all …" button (§3.6.7): 122 high, a 2 px
+/// border in `secondary_accent` at 40 %, its label in `T_SMALL`. Returns
+/// its bottom.
+fn more_button(laid: &mut Laid, label: &str, action: Action, x: f32, top: f32) -> f32 {
+    let p = theme::p();
+    let ty = T_SMALL;
+    let w = (text::measure(label, ty.weight, ty.px()) + 56.0).max(TARGET);
+    let rect = RectF::new(x, top, w, TARGET);
+    laid.ops.push(Op::Border {
+        rect,
+        width: HAIRLINE,
+        color: theme::mix(p.secondary_accent, 40, p.app_background),
+    });
+    laid.ops.push(ops::text(
+        x + 28.0,
+        top + (TARGET + ty.px() * 0.74) / 2.0,
+        label,
+        ty.weight,
+        ty.px(),
+        p.secondary_accent,
+    ));
+    laid.hits.push((rect, action));
+    top + TARGET
+}
+
+/// 12345 as "12,345".
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (index, c) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A row of a monospaced grid (`math::cells`): runs of ASCII as text,
+/// every other cluster centred in its own cells (fallback glyphs are not a
+/// cell wide; wide ones take two).
+fn grid_text(
+    ops: &mut Vec<Op>,
+    row: &str,
+    left: f32,
+    baseline: f32,
+    size: f32,
+    cell: f32,
+    color: Rgb,
+) {
+    let mut run = String::new();
+    let mut run_start = 0;
+    let flush = |ops: &mut Vec<Op>, run: &mut String, start: usize| {
+        if !run.trim().is_empty() {
+            ops.push(ops::text(
+                left + start as f32 * cell,
+                baseline,
+                std::mem::take(run),
+                Weight::Mono,
+                size,
+                color,
+            ));
+        }
+        run.clear();
+    };
+    let mut column = 0;
+    for (glyph, columns) in math::cells(row) {
+        if glyph.len() == 1 && glyph.is_ascii() {
+            if run.is_empty() {
+                run_start = column;
+            }
+            run.push_str(&glyph);
+        } else {
+            flush(ops, &mut run, run_start);
+            if !glyph.trim().is_empty() {
+                let w = text::measure(&glyph, Weight::Mono, size);
+                let span = columns.max(1) as f32 * cell;
+                ops.push(ops::text(
+                    (left + column as f32 * cell + (span - w) / 2.0).round(),
+                    baseline,
+                    glyph,
+                    Weight::Mono,
+                    size,
+                    color,
+                ));
+            }
+        }
+        column += columns;
+    }
+    flush(ops, &mut run, run_start);
 }

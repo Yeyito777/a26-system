@@ -8,6 +8,8 @@
 //! A newline inside a paragraph is a line break, as chat apps show replies.
 #![allow(dead_code)]
 
+use std::rc::Rc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Style {
     Plain,
@@ -17,12 +19,117 @@ pub enum Style {
     Link,
     /// `~~struck through~~`.
     Strike,
+    /// Inline TeX (`$…$`, `\(…\)`, `$$…$$` within a line): the span's text
+    /// is its source, drawn as Unicode (`math.rs`).
+    Math,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Span {
     pub text: String,
     pub style: Style,
+    /// A link's target as written (`Style::Link` only): a web address or a
+    /// local file (`link_kind`).
+    pub link: Option<Rc<str>>,
+}
+
+impl Span {
+    pub fn new(text: impl Into<String>, style: Style) -> Self {
+        Self {
+            text: text.into(),
+            style,
+            link: None,
+        }
+    }
+}
+
+/// What a link points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkKind {
+    /// Opened in the Browser (http, https; `www.` made https).
+    Web(String),
+    /// A mail address or telephone number (`mailto:`, `tel:`): copied.
+    Other(String),
+    /// A path on the daemon's host (relative, `/abs`, `~/`, `file://`).
+    File(String),
+}
+
+/// What a link target is (render.ts `safeHref` / `localFileTarget`); None:
+/// not a link at all (its text shows plain).
+pub fn link_kind(target: &str) -> Option<LinkKind> {
+    let target = target.trim();
+    let lower = target.to_ascii_lowercase();
+    if lower.starts_with("http:") || lower.starts_with("https:") {
+        return Some(LinkKind::Web(target.to_owned()));
+    }
+    if lower.starts_with("www.") {
+        return Some(LinkKind::Web(format!("https://{target}")));
+    }
+    if lower.starts_with("mailto:") || lower.starts_with("tel:") || lower.starts_with("exocortex:")
+    {
+        return Some(LinkKind::Other(target.to_owned()));
+    }
+    local_file(target).map(LinkKind::File)
+}
+
+/// A local file link's path (shared/src/file-links.ts): relative, `/abs`,
+/// `~/…` or `file://` (localhost) paths; no other schemes, network paths,
+/// queries or fragments.
+fn local_file(target: &str) -> Option<String> {
+    let control = |s: &str| s.chars().any(char::is_control);
+    if target.is_empty() || control(target) || target.starts_with('#') || target.starts_with("//") {
+        return None;
+    }
+    let has_scheme = |s: &str| {
+        let scheme: String = s.chars().take_while(|c| *c != ':').collect();
+        s.len() > scheme.len()
+            && scheme
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    };
+    let path = if target.to_ascii_lowercase().starts_with("file:") {
+        let rest = &target[5..];
+        let rest = rest.strip_prefix("//").map_or(Some(rest), |after| {
+            // file://host/path: only localhost (or no host).
+            let host_end = after.find('/').unwrap_or(after.len());
+            let host = &after[..host_end];
+            (host.is_empty() || host.eq_ignore_ascii_case("localhost")).then(|| &after[host_end..])
+        })?;
+        if rest.contains('?') || rest.contains('#') {
+            return None;
+        }
+        percent_decode(rest)?
+    } else {
+        if has_scheme(target) {
+            return None;
+        }
+        percent_decode(target)?
+    };
+    if path.trim().is_empty() || control(&path) || path.starts_with("//") || has_scheme(&path) {
+        return None;
+    }
+    Some(path)
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// A table column's alignment (from its delimiter row).
@@ -122,7 +229,70 @@ pub enum MdBlock {
         lines: Vec<String>,
     },
     Table(Table),
+    /// Display math (`$$…$$`, `\[…\]` starting a block): its TeX.
+    Math(String),
     Rule,
+    /// A block over `PIECE_MAX_CHARS` characters (code aside): the start of
+    /// its text, and all of it (`parse_capped`).
+    Long {
+        preview: String,
+        full: Rc<str>,
+    },
+    /// Blocks past `MAX_PIECES` are left out; the whole text (`parse_capped`).
+    More {
+        total: usize,
+        full: Rc<str>,
+    },
+}
+
+/// A reply shows at most this many blocks… (the iPhone's caps, PAR-134)
+pub const MAX_PIECES: usize = 128;
+/// …a block over this many characters shows…
+pub const PIECE_MAX_CHARS: usize = 24_000;
+/// …this many of them.
+pub const PIECE_PREVIEW_CHARS: usize = 8_000;
+
+/// `parse`, with the iPhone's caps: at most `MAX_PIECES` blocks, then a
+/// `More` with the whole text; a block over `PIECE_MAX_CHARS` characters
+/// (code aside, which has its own preview) as a `Long` preview.
+pub fn parse_capped(text: &str) -> Vec<MdBlock> {
+    let mut blocks = parse(text);
+    for block in &mut blocks {
+        let plain = match block {
+            MdBlock::Paragraph(spans) | MdBlock::Heading(_, spans) | MdBlock::Quote(spans) => {
+                spans_text(spans)
+            }
+            MdBlock::Item(_, marker, spans) => format!("{marker} {}", spans_text(spans)),
+            MdBlock::Table(table) => {
+                if table.rows.len() < 100 {
+                    continue;
+                }
+                table.text()
+            }
+            MdBlock::Math(tex) => tex.clone(),
+            _ => continue,
+        };
+        let count = plain.chars().count();
+        if count > PIECE_MAX_CHARS {
+            *block = MdBlock::Long {
+                preview: plain.chars().take(PIECE_PREVIEW_CHARS).collect(),
+                full: Rc::from(plain),
+            };
+        }
+    }
+    if blocks.len() > MAX_PIECES {
+        let total = blocks.len();
+        blocks.truncate(MAX_PIECES);
+        blocks.push(MdBlock::More {
+            total,
+            full: Rc::from(text),
+        });
+    }
+    blocks
+}
+
+fn spans_text(spans: &[Span]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
 }
 
 /// Lists nest at most this deep.
@@ -204,6 +374,15 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
             });
             continue;
         }
+        if let Some((tex, taken)) = display_math(trimmed, &mut lines.clone()) {
+            flush(&mut blocks, &mut paragraph, &mut quote);
+            list.clear();
+            for _ in 0..taken {
+                lines.next();
+            }
+            blocks.push(MdBlock::Math(tex));
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix('>') {
             if !paragraph.is_empty() {
                 flush(&mut blocks, &mut paragraph, &mut quote);
@@ -274,10 +453,7 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
             && paragraph.is_empty()
             && let Some(MdBlock::Item(_, _, spans)) = blocks.last_mut()
         {
-            spans.push(Span {
-                text: "\n".into(),
-                style: Style::Plain,
-            });
+            spans.push(Span::new("\n", Style::Plain));
             spans.extend(inline(trimmed));
             continue;
         }
@@ -288,6 +464,121 @@ pub fn parse(text: &str) -> Vec<MdBlock> {
     }
     flush(&mut blocks, &mut paragraph, &mut quote);
     blocks
+}
+
+/// Display math starting `line`: `$$…$$` or `\[…\]`, closed at the end of
+/// this line or a following one (no blank line between), its closer
+/// followed by nothing but spaces. Its TeX and how many more lines it took.
+fn display_math<'a>(
+    line: &str,
+    rest: &mut impl Iterator<Item = &'a str>,
+) -> Option<(String, usize)> {
+    let (open, close) = if line.starts_with("$$") && !line.starts_with("$$$") {
+        ("$$", "$$")
+    } else if line.starts_with("\\[") {
+        ("\\[", "\\]")
+    } else {
+        return None;
+    };
+    let mut tex = String::new();
+    let mut current = &line[open.len()..];
+    let mut taken = 0;
+    loop {
+        if let Some(at) = current.find(close) {
+            if !current[at + close.len()..].trim().is_empty() {
+                return None;
+            }
+            tex.push_str(&current[..at]);
+            let tex = tex.trim().to_owned();
+            return (!tex.is_empty()).then_some((tex, taken));
+        }
+        tex.push_str(current);
+        tex.push('\n');
+        current = rest.next()?;
+        if current.trim().is_empty() {
+            return None;
+        }
+        taken += 1;
+    }
+}
+
+/// Whether `$content$` reads as math, not prose (the TUI's
+/// `likelyDollarMath`): "$5 and $10" and "$HOME and $PATH" stay text.
+fn likely_math(content: &str) -> bool {
+    if content.is_empty()
+        || content.starts_with(char::is_whitespace)
+        || content.ends_with(char::is_whitespace)
+        || content.contains('\n')
+    {
+        return false;
+    }
+    let first_digit = content.starts_with(|c: char| c.is_ascii_digit());
+    if first_digit
+        && (content
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ',' || c == '.')
+            || content.contains(','))
+    {
+        return false;
+    }
+    let words: Vec<&str> = content.split_whitespace().collect();
+    let plain_words = words.len() > 1
+        && words[0].chars().all(|c| c.is_ascii_alphabetic())
+        && words[1..]
+            .iter()
+            .all(|w| w.chars().all(|c| c.is_ascii_alphanumeric()))
+        && content.split(char::is_whitespace).all(|w| !w.is_empty());
+    if plain_words || content.contains(['"', '`']) {
+        return false;
+    }
+    content.chars().any(|c| {
+        c.is_ascii_alphanumeric()
+            || ('α'..='ω').contains(&c)
+            || ('Α'..='Ω').contains(&c)
+            || "\\_^=+*/<>()[]{}|−∞∑∫".contains(c)
+    })
+}
+
+/// Where inline math starting at `at` (`$`, `$$`, `\(`) ends: its TeX and
+/// the offset after its closer.
+fn inline_math(text: &str, at: usize) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    let line_end = text[at..].find('\n').map_or(text.len(), |end| at + end);
+    if text[at..].starts_with("\\(") {
+        let close = text[at + 2..line_end].find("\\)")? + at + 2;
+        let tex = &text[at + 2..close];
+        return (!tex.trim().is_empty()).then_some((tex, close + 2));
+    }
+    if text[at..].starts_with("$$") {
+        if text[at..].starts_with("$$$") {
+            return None;
+        }
+        let close = text[at + 2..line_end].find("$$")? + at + 2;
+        let tex = &text[at + 2..close];
+        return (!tex.trim().is_empty()).then_some((tex, close + 2));
+    }
+    // `$…$`: not right after a word, quote or `=` (shell, US$5), the closer
+    // on the same line, not followed by `$`, a digit or `_`.
+    if at > 0
+        && matches!(bytes[at - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'"' | b'\'' | b'=' | b'/')
+    {
+        return None;
+    }
+    let mut j = at + 1;
+    let close = loop {
+        if j >= line_end {
+            return None;
+        }
+        if bytes[j] == b'$' && bytes[j - 1] != b'\\' {
+            break j;
+        }
+        j += 1;
+    };
+    if matches!(bytes.get(close + 1), Some(b'$' | b'0'..=b'9' | b'_')) {
+        return None;
+    }
+    let tex = &text[at + 1..close];
+    likely_math(tex).then_some((tex, close + 1))
 }
 
 /// Leading whitespace in columns (a tab is four).
@@ -443,10 +734,7 @@ fn table_cells(line: &str) -> Vec<Vec<Span>> {
             let cell = cell.trim();
             if cell.chars().count() > CELL_MAX_CHARS {
                 let cut: String = cell.chars().take(CELL_MAX_CHARS).collect();
-                vec![Span {
-                    text: format!("{cut}…"),
-                    style: Style::Plain,
-                }]
+                vec![Span::new(format!("{cut}…"), Style::Plain)]
             } else {
                 inline(cell)
             }
@@ -460,19 +748,17 @@ pub fn strip_inline(text: &str) -> String {
 }
 
 /// Inline markup: `**bold**`, `__bold__`, `*italic*`, `_italic_`,
-/// `` `code` ``, `[link](url)`, `~~strike~~`, `\` escapes.
+/// `` `code` ``, `[link](url)`, `![alt](src)` (a link), `<https://…>`,
+/// bare `https://…` and `www.…` addresses, `~~strike~~`, `\` escapes.
 pub fn inline(text: &str) -> Vec<Span> {
     let mut out = Vec::new();
     parse_inline(text, Style::Plain, &mut out);
-    merge(out)
+    merge(bare_links(out))
 }
 
 fn push(out: &mut Vec<Span>, text: &str, style: Style) {
     if !text.is_empty() {
-        out.push(Span {
-            text: text.to_owned(),
-            style,
-        });
+        out.push(Span::new(text, style));
     }
 }
 
@@ -480,11 +766,132 @@ fn merge(spans: Vec<Span>) -> Vec<Span> {
     let mut merged: Vec<Span> = Vec::with_capacity(spans.len());
     for span in spans {
         match merged.last_mut() {
-            Some(last) if last.style == span.style => last.text.push_str(&span.text),
+            Some(last) if last.style == span.style && last.link == span.link => {
+                last.text.push_str(&span.text)
+            }
             _ => merged.push(span),
         }
     }
     merged
+}
+
+/// Bare web addresses in plain text become links (GFM's autolink
+/// literals): `http://`, `https://` or `www.` after a space or the start,
+/// up to a space, without trailing punctuation or an unbalanced `)`.
+fn bare_links(spans: Vec<Span>) -> Vec<Span> {
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.style != Style::Plain || !(span.text.contains("://") || span.text.contains("www."))
+        {
+            out.push(span);
+            continue;
+        }
+        let text = span.text.as_str();
+        let mut plain_start = 0;
+        let mut i = 0;
+        while i < text.len() {
+            let rest = &text[i..];
+            let starts = ["https://", "http://", "www."]
+                .iter()
+                .any(|p| rest.len() > p.len() && rest[..p.len()].eq_ignore_ascii_case(p));
+            let at_word = text[..i].chars().next_back().is_none_or(|c| {
+                c.is_whitespace() || matches!(c, '(' | '*' | '_' | '~' | '"' | '\'')
+            });
+            if starts && at_word {
+                let mut end = rest
+                    .find(|c: char| c.is_whitespace() || c == '<')
+                    .unwrap_or(rest.len());
+                // Trailing punctuation is not part of it; nor is a `)` it
+                // does not open.
+                loop {
+                    let url = &rest[..end];
+                    let Some(last) = url.chars().next_back() else {
+                        break;
+                    };
+                    let unbalanced =
+                        last == ')' && url.matches('(').count() < url.matches(')').count();
+                    if matches!(
+                        last,
+                        '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~' | '\'' | '"' | ';'
+                    ) || unbalanced
+                    {
+                        end -= last.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let url = &rest[..end];
+                let domain = url.split("://").last().unwrap_or(url);
+                if domain.len() > 4 && domain.contains('.') {
+                    if i > plain_start {
+                        out.push(Span::new(&text[plain_start..i], Style::Plain));
+                    }
+                    out.push(Span {
+                        text: url.to_owned(),
+                        style: Style::Link,
+                        link: Some(Rc::from(url)),
+                    });
+                    i += end;
+                    plain_start = i;
+                    continue;
+                }
+            }
+            i += rest.chars().next().map_or(1, char::len_utf8);
+        }
+        if plain_start < text.len() {
+            out.push(Span::new(&text[plain_start..], Style::Plain));
+        }
+    }
+    out
+}
+
+/// The label and target of a link starting at `[` (`at`): `[label](dest)`
+/// with balanced brackets and parentheses, the destination's title left
+/// out; and where it ends.
+fn link_at(text: &str, at: usize) -> Option<(&str, &str, usize)> {
+    let bytes = text.as_bytes();
+    let mut depth = 0;
+    let mut i = at;
+    let label_end = loop {
+        match bytes.get(i)? {
+            b'\\' => i += 1,
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    };
+    if bytes.get(label_end + 1) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0;
+    let mut j = label_end + 1;
+    let dest_end = loop {
+        match bytes.get(j)? {
+            b'\\' => j += 1,
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break j;
+                }
+            }
+            b'\n' => return None,
+            _ => {}
+        }
+        j += 1;
+    };
+    let dest = text[label_end + 2..dest_end].trim();
+    let dest = match dest.strip_prefix('<') {
+        Some(rest) => rest.split('>').next().unwrap_or(""),
+        None => dest.split_whitespace().next().unwrap_or(""),
+    };
+    Some((&text[at + 1..label_end], dest, dest_end + 1))
 }
 
 fn parse_inline(text: &str, style: Style, out: &mut Vec<Span>) {
@@ -493,6 +900,17 @@ fn parse_inline(text: &str, style: Style, out: &mut Vec<Span>) {
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
+        // Inline math (not inside code or a link's label).
+        if (c == b'$' || (c == b'\\' && bytes.get(i + 1) == Some(&b'(')))
+            && style != Style::Code
+            && let Some((tex, end)) = inline_math(text, i)
+        {
+            push(out, &text[plain_start..i], style);
+            out.push(Span::new(tex.trim(), Style::Math));
+            i = end;
+            plain_start = i;
+            continue;
+        }
         match c {
             b'\\' if i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() => {
                 push(out, &text[plain_start..i], style);
@@ -555,23 +973,53 @@ fn parse_inline(text: &str, style: Style, out: &mut Vec<Span>) {
                 }
             }
             b'[' => {
-                if let Some(close) = text[i + 1..].find("](")
-                    && let Some(end) = text[i + 1 + close + 2..].find(')')
-                {
-                    push(out, &text[plain_start..i], style);
-                    let label = &text[i + 1..i + 1 + close];
+                if let Some((label, dest, end)) = link_at(text, i) {
+                    // `![alt](src)`: an image, shown as a link to it.
+                    let image = i > plain_start && bytes[i - 1] == b'!';
+                    let start = if image { i - 1 } else { i };
+                    push(out, &text[plain_start..start], style);
+                    let label = if image && label.trim().is_empty() {
+                        "image"
+                    } else {
+                        label
+                    };
+                    let target = link_kind(dest).map(|_| Rc::<str>::from(dest));
                     let mut inner = Vec::new();
-                    parse_inline(label, Style::Link, &mut inner);
+                    parse_inline(label, style, &mut inner);
                     out.extend(inner.into_iter().map(|mut span| {
-                        if span.style != Style::Code {
+                        // A target that is no link leaves its text plain.
+                        if target.is_some() && span.style != Style::Code {
                             span.style = Style::Link;
+                            span.link.clone_from(&target);
                         }
                         span
                     }));
-                    i = i + 1 + close + 2 + end + 1;
+                    i = end;
                     plain_start = i;
                 } else {
                     i += 1;
+                }
+            }
+            // `<https://…>`, `<mailto:…>`: an address as written.
+            b'<' => {
+                let close = text[i + 1..].find('>').map(|at| i + 1 + at);
+                let dest = close.map(|end| &text[i + 1..end]);
+                match dest.filter(|d| {
+                    !d.contains(char::is_whitespace)
+                        && matches!(link_kind(d), Some(LinkKind::Web(_) | LinkKind::Other(_)))
+                        && d.contains(':')
+                }) {
+                    Some(dest) => {
+                        push(out, &text[plain_start..i], style);
+                        out.push(Span {
+                            text: dest.to_owned(),
+                            style: Style::Link,
+                            link: Some(Rc::from(dest)),
+                        });
+                        i = close.unwrap_or(i) + 1;
+                        plain_start = i;
+                    }
+                    None => i += 1,
                 }
             }
             _ => i += 1,
@@ -716,7 +1164,7 @@ mod tests {
 
     #[test]
     fn the_iphones_rich_transcript() {
-        let text = "## Summary\n\nThe report says revenue **grew 12%** and costs *fell*; see [the dashboard](https://example.com/q3) and [notes](./docs/q3-notes.md).\n\n- [x] Tests pass (104)\n- [ ] Gmail needs re-auth\n  - nested detail\n\n> Costs are seasonal.\n\nInline math $E = mc^2$ and money: $5 and $10.\n\n```ts\nexport function grow(rate: number): number {\n  // compound\n}\n```\n\n| Metric | Q2 | Q3 |\n|:--|--:|--:|\n| Revenue | 100 | 112 |\n| Costs | 80 | 76 |\n\n---\n\nDone.";
+        let text = "## Summary\n\nThe report says revenue **grew 12%** and costs *fell*; see [the dashboard](https://example.com/q3) and [notes](./docs/q3-notes.md).\n\n- [x] Tests pass (104)\n- [ ] Gmail needs re-auth\n  - nested detail\n\n> Costs are seasonal.\n\nInline math $E = mc^2$ and money: $5 and $10.\n\n$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\n```ts\nexport function grow(rate: number): number {\n  // compound\n}\n```\n\n| Metric | Q2 | Q3 |\n|:--|--:|--:|\n| Revenue | 100 | 112 |\n| Costs | 80 | 76 |\n\n---\n\nDone.";
         let kinds: Vec<&str> = parse(text)
             .iter()
             .map(|b| match b {
@@ -726,13 +1174,15 @@ mod tests {
                 MdBlock::Quote(_) => "quote",
                 MdBlock::Code { .. } => "code",
                 MdBlock::Table(_) => "table",
+                MdBlock::Math(_) => "math",
+                MdBlock::Long { .. } | MdBlock::More { .. } => "more",
                 MdBlock::Rule => "hr",
             })
             .collect();
         assert_eq!(
             kinds,
             [
-                "h", "p", "li", "li", "li", "quote", "p", "code", "table", "hr", "p"
+                "h", "p", "li", "li", "li", "quote", "p", "math", "code", "table", "hr", "p"
             ]
         );
     }
@@ -741,7 +1191,7 @@ mod tests {
     /// block but the one still growing is already what it will be.
     #[test]
     fn a_streaming_prefix_only_changes_its_last_block() {
-        let full = "## Summary\n\nRevenue **grew 12%**; see [it](https://x.y).\n\n- [x] Tests pass\n- [ ] Gmail\n  - nested\n\n> Costs are seasonal.\n\n```ts\nexport function grow() {\n  return 1;\n}\n```\n\n| Metric | Q2 |\n|:--|--:|\n| Revenue | 100 |\n\n~~~\nt\n~~~\n\n    indented\n\n---\n\nDone.";
+        let full = "## Summary\n\nRevenue **grew 12%**; see [it](https://x.y).\n\n- [x] Tests pass\n- [ ] Gmail\n  - nested\n\n> Costs are seasonal.\n\nMath $x^2$ here.\n\n$$\\frac{a}{b}$$\n\n```ts\nexport function grow() {\n  return 1;\n}\n```\n\n| Metric | Q2 |\n|:--|--:|\n| Revenue | 100 |\n\n~~~\nt\n~~~\n\n    indented\n\n---\n\nDone.";
         let done = parse(full);
         let cuts: Vec<usize> = full
             .char_indices()
@@ -761,10 +1211,158 @@ mod tests {
     }
 
     fn span(text: &str, style: Style) -> Span {
+        Span::new(text, style)
+    }
+
+    #[test]
+    fn caps_long_blocks_and_many_blocks() {
+        let long = "word ".repeat(6000);
+        let blocks = parse_capped(&format!("Short.\n\n{long}\n\n```\n{long}\n```"));
+        assert_eq!(
+            blocks[0],
+            MdBlock::Paragraph(vec![span("Short.", Style::Plain)])
+        );
+        match &blocks[1] {
+            MdBlock::Long { preview, full } => {
+                assert_eq!(preview.chars().count(), PIECE_PREVIEW_CHARS);
+                assert_eq!(full.len(), long.trim_end().len());
+            }
+            other => panic!("{other:?}"),
+        }
+        // Code has its own preview.
+        assert!(matches!(&blocks[2], MdBlock::Code { .. }));
+        let many: String = (0..200).map(|i| format!("p{i}\n\n")).collect();
+        let blocks = parse_capped(&many);
+        assert_eq!(blocks.len(), MAX_PIECES + 1);
+        assert!(
+            matches!(&blocks[MAX_PIECES], MdBlock::More { total: 200, full } if full.len() == many.len())
+        );
+    }
+
+    #[test]
+    fn math_inline_and_display_with_the_currency_guard() {
+        assert_eq!(
+            inline("Inline math $E = mc^2$ and money: $5 and $10."),
+            vec![
+                span("Inline math ", Style::Plain),
+                span("E = mc^2", Style::Math),
+                span(" and money: $5 and $10.", Style::Plain),
+            ]
+        );
+        assert_eq!(
+            inline("$HOME and $PATH"),
+            vec![span("$HOME and $PATH", Style::Plain)]
+        );
+        assert_eq!(
+            inline("US$5 or $33,055"),
+            vec![span("US$5 or $33,055", Style::Plain)]
+        );
+        assert_eq!(
+            inline("by \\(x_1\\) and $$y^2$$ here"),
+            vec![
+                span("by ", Style::Plain),
+                span("x_1", Style::Math),
+                span(" and ", Style::Plain),
+                span("y^2", Style::Math),
+                span(" here", Style::Plain),
+            ]
+        );
+        assert_eq!(
+            inline("`$x$` \\$5"),
+            vec![span("$x$", Style::Code), span(" $5", Style::Plain)]
+        );
+        assert_eq!(
+            parse("Before\n\n$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\nAfter"),
+            vec![
+                MdBlock::Paragraph(vec![span("Before", Style::Plain)]),
+                MdBlock::Math("\\int_0^1 x^2\\,dx = \\frac{1}{3}".into()),
+                MdBlock::Paragraph(vec![span("After", Style::Plain)]),
+            ]
+        );
+        assert_eq!(
+            parse("\\[\na + b\n\\]"),
+            vec![MdBlock::Math("a + b".into())]
+        );
+        // Unclosed (streaming): text until it closes.
+        assert!(matches!(&parse("$$\\int")[0], MdBlock::Paragraph(_)));
+    }
+
+    fn link(text: &str, target: &str) -> Span {
         Span {
             text: text.into(),
-            style,
+            style: Style::Link,
+            link: Some(Rc::from(target)),
         }
+    }
+
+    #[test]
+    fn links_bare_addresses_and_file_paths() {
+        assert_eq!(
+            inline("see [the dashboard](https://example.com/q3) and [notes](./docs/q3-notes.md)."),
+            vec![
+                span("see ", Style::Plain),
+                link("the dashboard", "https://example.com/q3"),
+                span(" and ", Style::Plain),
+                link("notes", "./docs/q3-notes.md"),
+                span(".", Style::Plain),
+            ]
+        );
+        // Balanced parentheses in the address; a title is left out.
+        assert_eq!(
+            inline("[w](https://en.wikipedia.org/wiki/A_(b) \"T\")"),
+            vec![link("w", "https://en.wikipedia.org/wiki/A_(b)")]
+        );
+        // Bare addresses, without trailing punctuation.
+        assert_eq!(
+            inline("Go to https://x.org/a, or www.rust-lang.org."),
+            vec![
+                span("Go to ", Style::Plain),
+                link("https://x.org/a", "https://x.org/a"),
+                span(", or ", Style::Plain),
+                link("www.rust-lang.org", "www.rust-lang.org"),
+                span(".", Style::Plain),
+            ]
+        );
+        assert_eq!(
+            inline("<https://a.b/c> (see https://a.b/d)"),
+            vec![
+                link("https://a.b/c", "https://a.b/c"),
+                span(" (see ", Style::Plain),
+                link("https://a.b/d", "https://a.b/d"),
+                span(")", Style::Plain),
+            ]
+        );
+        // An image is a link to it; a bad scheme is no link.
+        assert_eq!(
+            inline("![](https://a.b/i.png)"),
+            vec![link("image", "https://a.b/i.png")]
+        );
+        assert_eq!(
+            inline("[x](javascript:alert(1))"),
+            vec![span("x", Style::Plain)]
+        );
+        assert_eq!(inline("`[a](b)`"), vec![span("[a](b)", Style::Code)]);
+        // What each target is.
+        assert_eq!(
+            link_kind("www.a.org"),
+            Some(LinkKind::Web("https://www.a.org".into()))
+        );
+        assert_eq!(
+            link_kind("mailto:a@b.c"),
+            Some(LinkKind::Other("mailto:a@b.c".into()))
+        );
+        assert_eq!(
+            link_kind("~/x y.md"),
+            Some(LinkKind::File("~/x y.md".into()))
+        );
+        assert_eq!(link_kind("/a/b%20c"), Some(LinkKind::File("/a/b c".into())));
+        assert_eq!(
+            link_kind("file:///etc/hosts"),
+            Some(LinkKind::File("/etc/hosts".into()))
+        );
+        assert_eq!(link_kind("file://server/x"), None);
+        assert_eq!(link_kind("ftp://x"), None);
+        assert_eq!(link_kind("#anchor"), None);
     }
 
     #[test]
@@ -779,7 +1377,7 @@ mod tests {
                 span(" ", Style::Plain),
                 span("d", Style::Code),
                 span(" ", Style::Plain),
-                span("e", Style::Link),
+                link("e", "http://x"),
                 span(" f", Style::Plain),
             ]
         );

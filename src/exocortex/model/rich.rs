@@ -16,6 +16,8 @@ use super::Model;
 #[derive(Default)]
 pub struct Rich {
     pub images: ImageStore,
+    /// Local links resolved on the daemon's host (`links.rs`).
+    pub links: super::super::links::FileLinks,
     /// Code blocks drawn wrapped (by their key) instead of scrolling
     /// sideways.
     pub wrapped: HashSet<u64>,
@@ -45,6 +47,8 @@ pub enum Act {
     /// The reply holding the table `key` (`view::table::key`), in the
     /// reader ("Open full response").
     OpenResponse(u64),
+    /// A link in a reply, as written (`links.rs`).
+    OpenLink(String),
 }
 
 impl Model {
@@ -62,6 +66,7 @@ impl Model {
                 self.rich.wraps += 1;
             }
             Act::RetryImage(want) => self.rich.images.retry(&want),
+            Act::OpenLink(target) => return self.open_link(&target),
             Act::OpenResponse(key) => match self.response_with_table(key) {
                 Some(text) => {
                     super::super::reader::open(&mut self.ui, "Response", text);
@@ -115,6 +120,10 @@ impl Model {
                 self.rich.images.arrived(data);
                 Ok(Vec::new())
             }
+            Event::FileLinkResolved(link) => {
+                self.rich.links.resolved(link);
+                Ok(Vec::new())
+            }
             other => Err(other),
         }
     }
@@ -122,12 +131,18 @@ impl Model {
     /// An error answering one of this area's requests (a preview not
     /// found: asked again a little later).
     pub(super) fn rich_error(&mut self, id: &str, message: &str) -> bool {
-        self.rich.images.failed(id, message, Instant::now());
+        if !self.rich.images.failed(id, message, Instant::now()) {
+            self.rich.links.failed(id, message);
+        }
         true
     }
 
     /// One of this area's requests was not answered in time.
     pub(super) fn rich_timeout(&mut self, id: &str, _pending: &Pending) -> bool {
         self.rich.images.failed(id, "timed out", Instant::now())
+            || self
+                .rich
+                .links
+                .failed(id, "Exocortex did not answer. Try again.")
     }
 }
