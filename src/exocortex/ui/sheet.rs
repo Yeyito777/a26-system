@@ -150,20 +150,28 @@ impl<C: SheetContent> Sheet<C> {
 
     /// The panel's height at rest.
     fn panel_h(&self, cx: &Cx) -> f32 {
-        let bottom_pad = cx.height - cx.bottom() + S2;
-        (header() + self.content_h + bottom_pad)
+        (header() + self.content_h + self.bottom_pad(cx))
             .min((cx.height * SHEET_MAX).round())
             .round()
     }
 
-    /// Where the content scrolls: below the header, above the gesture
-    /// reserve (or the keyboard); it moves with the panel.
+    /// Under the content: the iPhone's bottom inset (8 pt with the keyboard
+    /// up) when it all fits, its last items taking taps on Moon's home
+    /// gesture's area; content that scrolls stays above that area (a drag
+    /// there is Moon's).
+    fn bottom_pad(&self, cx: &Cx) -> f32 {
+        let inset = (cx.height - cx.safe_bottom()).max(S2);
+        if header() + self.content_h + inset <= (cx.height * SHEET_MAX).round() {
+            inset
+        } else {
+            cx.height - cx.bottom() + S2
+        }
+    }
+
+    /// Where the content scrolls: below the header, above the bottom pad;
+    /// it moves with the panel.
     fn viewport(&self, cx: &Cx, top: f32) -> (f32, f32) {
-        let panel_h = self.panel_h(cx);
-        (
-            top + header(),
-            top + panel_h - (cx.height - cx.bottom()) - S2,
-        )
+        (top + header(), top + self.panel_h(cx) - self.bottom_pad(cx))
     }
 
     fn max_scroll(&self, cx: &Cx) -> f32 {
@@ -898,5 +906,55 @@ impl SheetContent for Prompt {
 
     fn keyboard(&self) -> Option<KeyboardPurpose> {
         Some(KeyboardPurpose::Text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exocortex::model::{Model, UiAct};
+
+    fn list(items: usize) -> Sheet<ActionList> {
+        let items = (0..items)
+            .map(|i| ActionItem::new(format!("Item {i}"), Action::Ui(UiAct::Dismiss)))
+            .collect();
+        action_sheet(ActionList::new("Items", items))
+    }
+
+    #[test]
+    fn a_sheet_that_fits_sits_on_the_inset_and_one_that_scrolls_above_moons_area() {
+        let model = Model::new();
+        let cx = |height: f32, keyboard: bool| Cx {
+            model: &model,
+            width: W,
+            height,
+            keyboard,
+            now: Instant::now(),
+        };
+        let down = cx(2216.0, false);
+        // Four items and Cancel: they end 34 pt above the bottom, as on
+        // the iPhone.
+        let mut short = list(4);
+        short.layout(&down);
+        let top = down.height - short.panel_h(&down);
+        assert_eq!(
+            short.viewport(&down, top).1,
+            down.height - theme::SAFE_BOTTOM
+        );
+        assert_eq!(short.max_scroll(&down), 0.0);
+        // Thirty scroll: what scrolls stays above Moon's home gesture.
+        let mut tall = list(30);
+        tall.layout(&down);
+        let top = down.height - tall.panel_h(&down);
+        assert_eq!(
+            tall.viewport(&down, top).1,
+            down.height - theme::GESTURE_RESERVE - S2
+        );
+        assert!(tall.max_scroll(&down) > 0.0);
+        // Over the keyboard, 8 pt either way.
+        let up = cx(1316.0, true);
+        short.layout(&up);
+        let top = up.height - short.panel_h(&up);
+        assert_eq!(short.viewport(&up, top).1, up.height - S2);
     }
 }

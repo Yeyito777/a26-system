@@ -47,6 +47,16 @@ impl Cx<'_> {
             self.height - super::super::theme::GESTURE_RESERVE
         }
     }
+
+    /// Where what stays put may go down to: above the iPhone's bottom
+    /// inset, or the window's bottom with the keyboard up.
+    pub fn safe_bottom(&self) -> f32 {
+        if self.keyboard {
+            self.height
+        } else {
+            self.height - super::super::theme::SAFE_BOTTOM
+        }
+    }
 }
 
 /// An overlay's answer to a gesture.

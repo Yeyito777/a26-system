@@ -31,7 +31,8 @@ const DOUBLE_TAP: Duration = Duration::from_millis(300);
 const DOUBLE_TAP_SLOP: f32 = 80.0;
 /// A swipe down this far closes it.
 const DISMISS: f32 = 110.0;
-/// The bar under the image (name and size).
+/// The bar under the image (name and size), on the bottom inset as on the
+/// iPhone.
 const FOOTER: f32 = 140.0;
 /// The largest preview asked for (the daemon's limit).
 const MAX_PREVIEW: u32 = 4096;
@@ -88,7 +89,7 @@ impl Viewer {
 
     /// Where the image goes: under the top bar, over the footer.
     fn area(&self, cx: &Cx) -> RectF {
-        let bottom = cx.bottom() - FOOTER;
+        let bottom = cx.safe_bottom() - FOOTER;
         RectF::new(
             0.0,
             theme::top_bar(),
@@ -373,7 +374,7 @@ impl Overlay for Viewer {
             );
         }
         // The footer: name, size.
-        let footer = cx.bottom() - FOOTER;
+        let footer = cx.safe_bottom() - FOOTER;
         widgets::fill(
             canvas,
             RectF::new(0.0, footer, cx.width, cx.height - footer),

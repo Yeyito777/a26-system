@@ -25,8 +25,8 @@ use super::super::list::search::Search;
 use super::super::model::sidebar::{Act, Aggregates, Drag, DropTarget, Key, Layout};
 use super::super::model::{self, Action, Model, Page, Row};
 use super::super::theme::{
-    self, FOLDER_ICON, FOLDER_INDENT, GESTURE_RESERVE, LIST_PAD, S1, SPINNER, T_CAPTION, T_EYEBROW,
-    T_META, T_NOTE, T_ROW, TARGET, W,
+    self, FOLDER_ICON, FOLDER_INDENT, GESTURE_RESERVE, LIST_PAD, S1, SAFE_BOTTOM, SPINNER,
+    T_CAPTION, T_EYEBROW, T_META, T_NOTE, T_ROW, TARGET, W,
 };
 use super::super::ui::icons::{self, Icon};
 use super::super::ui::widgets::{self, Button, ButtonKind, RAIL_LIST};
@@ -73,24 +73,35 @@ fn keyboard_up(height: f32) -> bool {
 }
 
 /// Where the list's rows are: under the bar, above Moon's home gesture (or
-/// its keyboard).
+/// its keyboard) or select mode's bar.
 pub fn bounds(model: &Model, height: f32) -> (f32, f32) {
-    let bar = if model.sidebar.selection.is_some() {
-        SELECT_BAR
+    let bottom = if model.sidebar.selection.is_some() {
+        bar_top(height)
     } else {
-        0.0
+        bottom(height)
     };
-    (theme::below_bar(), bottom(height) - bar)
+    (theme::below_bar(), bottom)
 }
 
 /// The page's bottom: Moon's home gesture (or its keyboard) below it.
 fn bottom(height: f32) -> f32 {
-    let reserve = if keyboard_up(height) {
-        0.0
+    above(height, GESTURE_RESERVE)
+}
+
+/// Select mode's bar's top: its buttons end on the bottom inset, as on the
+/// iPhone (or on Moon's keyboard).
+fn bar_top(height: f32) -> f32 {
+    above(height, SAFE_BOTTOM) - SELECT_BAR
+}
+
+/// `reserve` above the window's bottom, or the bottom with Moon's keyboard
+/// up (it ends the window).
+fn above(height: f32, reserve: f32) -> f32 {
+    if keyboard_up(height) {
+        height
     } else {
-        GESTURE_RESERVE
-    };
-    height - reserve
+        height - reserve
+    }
 }
 
 use super::super::model::sidebar::SELECT_BAR;
@@ -124,13 +135,14 @@ fn select_bar_key(model: &Model, pressed: Option<&Action>) -> Option<u64> {
 }
 
 fn draw_select_bar(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>, height: f32) {
-    let y = bottom(height) - SELECT_BAR;
-    if !widgets::shows(canvas, y, y + SELECT_BAR) {
+    let y = bar_top(height);
+    if !widgets::shows(canvas, y, height) {
         return;
     }
     let p = theme::p();
     let c = theme::c();
-    widgets::fill(canvas, RectF::new(0.0, y, W, SELECT_BAR), p.app_background);
+    // Down to the window's bottom, under the inset too.
+    widgets::fill(canvas, RectF::new(0.0, y, W, height - y), p.app_background);
     widgets::hairline(canvas, 0.0, W, y, c.rule_topbar);
     let keys = model.sidebar.selected_keys();
     let n = keys.len();
@@ -183,8 +195,8 @@ fn draw_select_bar(canvas: &mut Canvas, model: &Model, pressed: Option<&Action>,
 /// The select bar's button at (`x`, `y`).
 fn select_bar_hit(model: &Model, height: f32, x: f32, y: f32) -> Option<Action> {
     model.sidebar.selection.as_ref()?;
-    let top = bottom(height) - SELECT_BAR;
-    if y < top + 50.0 || y >= bottom(height) || model.sidebar.selected_keys().is_empty() {
+    let top = bar_top(height);
+    if y < top + 50.0 || y >= top + SELECT_BAR || model.sidebar.selected_keys().is_empty() {
         return None;
     }
     let index = ((x / (W / 4.0)).floor() as usize).min(3);
@@ -1339,9 +1351,10 @@ fn draw_no_results(canvas: &mut Canvas, area: RectF) {
     );
 }
 
-/// The connection pill's top (bottom centre, above the home gesture).
+/// The connection pill's top (bottom centre, 16 pt above the bottom inset,
+/// as on the iPhone).
 fn pill_top(height: f32) -> f32 {
-    height - GESTURE_RESERVE - 44.0 - 88.0
+    height - SAFE_BOTTOM - 44.0 - 88.0
 }
 
 /// The pill shows over a list that has rows, while not connected.
@@ -1674,7 +1687,7 @@ pub fn draw_list_update(
     }
     // Select mode's bar.
     if old.bar != new.bar {
-        redraw.push((bottom, bottom + SELECT_BAR as i32));
+        redraw.push((bottom, canvas.height));
     }
     if new.pill.is_some() && (old.pill != new.pill || shift != 0)
         || old.pill.is_some() != new.pill.is_some()
@@ -2692,11 +2705,11 @@ mod tests {
         );
         // The row, and the bar's count.
         assert!(
-            drawn(&damage) <= row_h() as i32 + SELECT_BAR as i32 + 2 * 2 * DOT_HALF,
+            drawn(&damage) <= row_h() as i32 + (SELECT_BAR + SAFE_BOTTOM) as i32 + 2 * 2 * DOT_HALF,
             "{damage:?}"
         );
         // The bar's buttons, now that something is selected.
-        let bar = bottom(H) - SELECT_BAR + 100.0;
+        let bar = bar_top(H) + 100.0;
         assert_eq!(
             hit(&mut model, &mut view, H, 100.0, bar, now),
             Some(act(Act::SelectMove))

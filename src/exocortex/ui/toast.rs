@@ -14,7 +14,7 @@ use crate::gfx::{Canvas, RectF};
 use super::super::anim::{Animator, FRAME, Tween};
 use super::super::gesture::Gesture;
 use super::super::model::Action;
-use super::super::theme::{self, HAIRLINE, S2, T_CAPTION, T_NOTE, TARGET};
+use super::super::theme::{self, HAIRLINE, T_CAPTION, T_NOTE, TARGET};
 use super::overlay::{Body, Cx, Overlay, Response};
 use super::widgets;
 
@@ -23,6 +23,8 @@ const OUT_FOR: Duration = Duration::from_millis(200);
 const TOAST_FOR: Duration = Duration::from_millis(3500);
 const SNACKBAR_FOR: Duration = Duration::from_secs(6);
 const SHADOW: f32 = 61.0;
+/// The snackbar's gap above the bottom inset (14 pt).
+const SNACKBAR_GAP: f32 = 39.0;
 
 /// When a floating overlay shows, from the first frame it was in, and
 /// how far its fade is.
@@ -228,8 +230,8 @@ impl Overlay for Toast {
 }
 
 /// The undo snackbar: a line and a button ("Moved to trash · UNDO") at the
-/// bottom, its bottom edge `lift` px above the content's bottom (above the
-/// composer on the chat, at the list's bottom).
+/// bottom, 14 pt above the bottom inset as on the iPhone, and `lift` px more
+/// (over select mode's bar).
 pub struct Snackbar {
     text: String,
     button: String,
@@ -280,7 +282,7 @@ impl Overlay for Snackbar {
         let h = TARGET;
         self.rect = RectF::new(
             34.0,
-            (cx.bottom() - S2 - self.lift - h).round(),
+            (cx.safe_bottom() - SNACKBAR_GAP - self.lift - h).round(),
             cx.width - 68.0,
             h,
         );
@@ -412,8 +414,9 @@ mod tests {
     use crate::exocortex::model::{Model, Nav};
     use crate::exocortex::ui::overlay::OverlayStack;
 
-    /// A tap on the snackbar's button performs its action (and closes it);
-    /// elsewhere on it, nothing; off it, the page's.
+    /// A tap on the snackbar's button performs its action (and closes it),
+    /// on Moon's home gesture's area too (the bottom 180 px); elsewhere on
+    /// it, nothing; off it, the page's.
     #[test]
     fn the_snackbar_button_performs_its_action() {
         let model = Model::new();
@@ -434,7 +437,9 @@ mod tests {
             0.0,
         )));
         stack.layout(&cx);
-        let (x, y) = (958.0, 1962.0);
+        // 14 pt above the iPhone's 34 pt inset.
+        let (x, y) = (958.0, 2216.0 - 94.0 - 39.0 - 10.0);
+        assert!(y > 2216.0 - 180.0);
         assert_eq!(
             stack.gesture(&Gesture::Down { x, y }, &cx),
             Response::Handled
@@ -442,6 +447,10 @@ mod tests {
         assert_eq!(
             stack.gesture(&Gesture::Tap { x, y }, &cx),
             Response::Action(action)
+        );
+        assert_eq!(
+            stack.gesture(&Gesture::Down { x, y: y + 20.0 }, &cx),
+            Response::Pass
         );
         assert_eq!(
             stack.gesture(&Gesture::Down { x: 500.0, y: 600.0 }, &cx),
