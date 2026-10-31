@@ -139,6 +139,8 @@ struct State {
     shift: bool,
     /// A frame callback is outstanding, since then.
     frame_asked: Option<Instant>,
+    /// When the last frame callback came: the flip that showed a frame.
+    flipped: Option<Instant>,
     synced: bool,
     /// Flips that showed a frame (CLOCK_MONOTONIC ms), for profiling.
     presented: Vec<(f64, i32)>,
@@ -310,6 +312,15 @@ impl Wayland {
         self.state
             .frame_asked
             .is_none_or(|at| at.elapsed() >= FRAME_PATIENCE)
+    }
+
+    /// The panel's next refresh after `now`, on the beat of the last frame
+    /// callback (None before one has come).
+    pub fn next_flip(&self, now: Instant) -> Option<Instant> {
+        let flipped = self.state.flipped?;
+        let since = now.saturating_duration_since(flipped).as_secs_f64();
+        let refreshes = (since / super::anim::FRAME.as_secs_f64()).floor() + 1.0;
+        Some(flipped + super::anim::FRAME.mul_f64(refreshes))
     }
 
     /// When `ready` turns true without a callback.
@@ -806,7 +817,10 @@ impl Dispatch<wl_callback::WlCallback, Callback> for State {
     ) {
         if let wl_callback::Event::Done { .. } = event {
             match kind {
-                Callback::Frame => state.frame_asked = None,
+                Callback::Frame => {
+                    state.frame_asked = None;
+                    state.flipped = Some(Instant::now());
+                }
                 Callback::Sync => state.synced = true,
             }
         }

@@ -18,10 +18,15 @@
 //! reports around that moment, or a little past the newest one at the
 //! finger's recent speed. How few: as late as reports have lately reached
 //! the app (2 ms when they come promptly, up to 8 ms when the phone is busy),
-//! so a late one still falls between two frames' moments. A finger also twitches a pixel or two; following
-//! that exactly is accurate but looks rough, so the result is smoothed (a 1€
-//! filter: strong while the finger moves slowly, opening up as it speeds
-//! up, so a fast drag does not trail).
+//! so a late one still falls between two frames' moments. A finger also
+//! twitches a pixel or two; following that exactly is accurate but looks
+//! rough, so the result is smoothed: carried on at the finger's trend and
+//! pulled toward where it is by little while it moves slowly and steadily,
+//! by more as it speeds up or strays far from the trend. A steady movement
+//! is not delayed (the trend carries it: a plain low-pass, a 1€ filter,
+//! drew a slow drag 10 ms late), a twitch is spread over a few frames, and
+//! a lurch (the touchscreen holds a starting finger back, then catches up
+//! 30-40 px at once) is followed.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -29,7 +34,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 /// How the finger is followed. Measuring:
-/// `EXOCORTEX_APP_DRAG=lag=4,predict=8,min=5,beta=0.1,dcut=15` (any of
+/// `EXOCORTEX_APP_DRAG=lag=4,predict=8,min=5,beta=0.1,gamma=0.02` (any of
 /// them) in place of these.
 #[derive(Debug, Clone, Copy)]
 struct Tuning {
@@ -39,11 +44,12 @@ struct Tuning {
     /// Past the newest report, the finger is carried on at its speed this
     /// far at most (ms).
     predict: f64,
-    /// The 1€ filter: its cutoff at rest (Hz), how much it rises per px/s
-    /// of speed, and the cutoff of the speed estimate it is steered by.
+    /// How hard the drawn finger is pulled toward the finger, as a cutoff
+    /// (Hz): at rest, how much it rises per px/s of the trend, and per px/s
+    /// of how far the finger is from where the trend put it.
     min_cutoff: f32,
     beta: f32,
-    speed_cutoff: f32,
+    gamma: f32,
 }
 
 const TUNING: Tuning = Tuning {
@@ -51,7 +57,7 @@ const TUNING: Tuning = Tuning {
     predict: 8.0,
     min_cutoff: 5.0,
     beta: 0.1,
-    speed_cutoff: 15.0,
+    gamma: 0.02,
 };
 
 fn tuning() -> Tuning {
@@ -73,7 +79,7 @@ fn tuning() -> Tuning {
                 "predict" => tuning.predict = f64::from(value.max(0.0)),
                 "min" => tuning.min_cutoff = value,
                 "beta" => tuning.beta = value,
-                "dcut" => tuning.speed_cutoff = value,
+                "gamma" => tuning.gamma = value,
                 _ => {}
             }
         }
@@ -81,10 +87,12 @@ fn tuning() -> Tuning {
     })
 }
 
-/// No report this long (ms) after the last (or one and a half of the last
-/// gap between reports, and 4 ms, when longer: a slow finger reports
-/// seldom): the finger has stopped there.
+/// Not moved this long (ms) since it last did (or one and a half of the
+/// last gap between its moves, and 4 ms, when longer: a slow finger moves a
+/// pixel seldom; at most `STILL_MOST`): the finger has stopped there. (The
+/// touchscreen goes on reporting a resting finger every scan.)
 const STILL_AFTER: f64 = 20.0;
+const STILL_MOST: f64 = 50.0;
 /// Reports kept (ms): enough to span a frame's lag and a speed's estimate.
 const KEEP: f64 = 150.0;
 /// The finger's speed past the newest report is measured over this much of
@@ -92,6 +100,9 @@ const KEEP: f64 = 150.0;
 const SPEED_SPAN: f64 = 30.0;
 /// Closer than this to where the finger rests, the drag is drawn there.
 const SETTLE_PX: f32 = 0.25;
+/// Once it is still, how fast the drawn finger goes to where it rests (a
+/// cutoff, Hz).
+const SETTLE_CUTOFF: f32 = 30.0;
 
 /// The touchscreen's scan clock, as its reports' times show it.
 #[derive(Debug, Clone, Copy)]
@@ -148,7 +159,11 @@ pub struct Follow {
     /// When the newest report came (its own time, ms), and the gap before it.
     newest_at: f64,
     gap: f64,
-    /// The last result: when, where, and the filtered speed (px/s).
+    /// When the finger last moved (ms), and the gap before that move.
+    moved_at: f64,
+    move_gap: f64,
+    /// The last result: when, where, and the trend it is carried on at
+    /// (px/s).
     out: (f64, f32, f32),
 }
 
@@ -164,6 +179,8 @@ impl Follow {
             reports: VecDeque::from([(0.0, y)]),
             newest_at: 0.0,
             gap: 0.0,
+            moved_at: 0.0,
+            move_gap: 0.0,
             out: (0.0, y, 0.0),
         }
     }
@@ -188,6 +205,10 @@ impl Follow {
         LATE.with(|mark| mark.set(late.min(50.0).max(mark.get() * LATE_FADE)));
         self.gap = t - self.newest_at;
         self.newest_at = t;
+        if y != self.newest() {
+            self.move_gap = t - self.moved_at;
+            self.moved_at = t;
+        }
         let placed = self.clock.place(t);
         PERIOD.with(|period| period.set(self.clock.period));
         self.reports.push_back((placed, y));
@@ -205,21 +226,35 @@ impl Follow {
     pub fn at(&mut self, now: Instant) -> f32 {
         let tuning = tuning();
         let t = self.ms(now);
-        let (last, y, speed) = self.out;
+        let (last, y, trend) = self.out;
         let dt = ((t - last) / 1000.0) as f32;
         if dt <= 0.0 {
             return y;
+        }
+        // Still: no trend, and the drawn finger goes to where it rests.
+        if self.still(t) {
+            let rest = self.newest();
+            let mut next = y + alpha(SETTLE_CUTOFF, dt) * (rest - y);
+            if (next - rest).abs() < SETTLE_PX {
+                next = rest;
+            }
+            self.out = (t, next, 0.0);
+            return next;
         }
         let lag = LATE
             .with(Cell::get)
             .clamp(tuning.lag, tuning.lag.max(MAX_LAG));
         let target = self.resample(t, t - lag);
-        let speed = speed + alpha(tuning.speed_cutoff, dt) * ((target - y) / dt - speed);
-        let mut next = y + alpha(tuning.min_cutoff + tuning.beta * speed.abs(), dt) * (target - y);
-        if (next - target).abs() < SETTLE_PX && self.still(t) {
-            next = target;
-        }
-        self.out = (t, next, speed);
+        // Carried on at the trend, then pulled toward the finger, and the
+        // trend corrected by what it missed (an alpha-beta filter, its gains
+        // from one cutoff).
+        let carried = y + trend * dt;
+        let miss = target - carried;
+        let cutoff = tuning.min_cutoff + tuning.beta * trend.abs() + tuning.gamma * miss.abs() / dt;
+        let pull = alpha(cutoff, dt);
+        let next = carried + pull * miss;
+        let trend = trend + pull * pull / (2.0 - pull) * miss / dt;
+        self.out = (t, next, trend);
         next
     }
 
@@ -229,9 +264,9 @@ impl Follow {
         self.still(self.ms(now)) && (self.out.1 - self.newest()).abs() < SETTLE_PX
     }
 
-    /// No report for a while (`now` in ms).
+    /// Not moved for a while (`now` in ms).
     fn still(&self, now: f64) -> bool {
-        now - self.newest_at >= STILL_AFTER.max(1.5 * self.gap + 4.0)
+        now - self.moved_at >= (1.5 * self.move_gap + 4.0).clamp(STILL_AFTER, STILL_MOST)
     }
 
     /// The finger at clock time `t` (ms), `now` being the frame's: between
@@ -457,6 +492,75 @@ mod tests {
             }
             assert_eq!(drawn, y, "{name}");
         }
+    }
+
+    /// A slow steady drag (the gate's: 80 px/s, a report only when the row
+    /// changes, on time) is drawn no later than the frame's moment, and the
+    /// page, at whole pixels, moves on two refreshes of three: one still
+    /// at a time, never a 2 px jump.
+    #[test]
+    fn a_slow_steady_drag_is_drawn_on_time_and_even() {
+        let start = Instant::now();
+        let mut follow = Follow::new(start, 0.0);
+        let mut row = 0.0;
+        let mut scan = 1u32;
+        let (mut behind, mut frames) = (0.0, 0);
+        let (mut previous, mut was_still) = (None, false);
+        for frame in 1..300u32 {
+            let now = start + REFRESH * frame + Duration::from_micros(2900);
+            loop {
+                let at = start + REFRESH * scan;
+                if at > now {
+                    break;
+                }
+                let y = (80.0 * at.duration_since(start).as_secs_f32()).round();
+                if y != row {
+                    follow.report(at, y, at);
+                    row = y;
+                }
+                scan += 1;
+            }
+            let drawn = follow.at(now);
+            if frame < 60 {
+                continue;
+            }
+            let finger = 80.0 * now.duration_since(start).as_secs_f32();
+            behind += (finger - drawn) / 80.0 * 1000.0;
+            frames += 1;
+            let page = (0.3 - drawn).round();
+            if let Some(last) = previous {
+                let step = (page - last as f32).abs();
+                assert!(step < 2.0, "frame {frame}: a {step} px jump");
+                assert!(!(was_still && step == 0.0), "frame {frame}: still twice");
+                was_still = step == 0.0;
+            }
+            previous = Some(page as i32);
+        }
+        let behind = behind / frames as f32;
+        assert!(behind < 4.0, "drawn {behind} ms behind on average");
+    }
+
+    /// A finger that stops dead while the touchscreen goes on reporting it
+    /// every scan (it does, resting) is reached in a few frames.
+    #[test]
+    fn a_resting_finger_still_reported_is_reached_soon() {
+        let start = Instant::now();
+        let mut follow = Follow::new(start, 0.0);
+        let mut y = 0.0;
+        let mut drawn = 0.0;
+        for n in 1..60u32 {
+            if n <= 30 {
+                y += 4.0;
+            }
+            let at = start + SCAN * n;
+            follow.report(at, y, at);
+            drawn = follow.at(at + Duration::from_millis(3));
+            assert!(drawn < y + 4.0, "scan {n}: drawn at {drawn}, finger at {y}");
+            if n >= 30 + 7 {
+                assert_eq!(drawn, y, "scan {n}");
+            }
+        }
+        assert_eq!(drawn, y);
     }
 
     /// Reports that come twice (as Moon passes them on over X) are drawn

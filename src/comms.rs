@@ -224,7 +224,16 @@ impl Scroll {
     /// else its newest report): for measuring.
     pub fn drawn_finger(&self) -> Option<f32> {
         let (start, from) = self.drag?;
-        Some(start + from - self.offset)
+        // Pages draw at the offset rounded: a smoothed drag's frame shows
+        // the finger under the page as drawn (else, a drag that began at a
+        // fractional offset, after a fling, rounds the finger and the page
+        // at different places and the finger seems to stall and jump).
+        let offset = if self.finger.is_some() {
+            self.offset.round()
+        } else {
+            self.offset
+        };
+        Some(start + from - offset)
     }
 
     /// Moves the content under the finger or fling by `delta` (content was

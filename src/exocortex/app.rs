@@ -208,6 +208,16 @@ impl Renderer {
         matches!(self.output, Output::Wayland(_))
     }
 
+    /// The panel's next refresh after `now`, as far as the display says
+    /// (on Wayland, the beat of its frame callbacks), else a refresh on.
+    fn next_refresh(&self, now: Instant) -> Instant {
+        match &self.output {
+            Output::Wayland(wayland) => wayland.next_flip(now),
+            Output::X(_) => None,
+        }
+        .unwrap_or(now + anim::FRAME)
+    }
+
     /// Shows the window the first frame was drawn for: X maps it; Moon
     /// shows a Wayland toplevel once it has content, and says so.
     fn show(&mut self, events: &mut VecDeque<DisplayEvent>) -> Result<(), Box<dyn Error>> {
@@ -1495,11 +1505,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         // Paced by frame callbacks (Wayland), a frame that changed nothing
         // hands nothing over and brings no callback: while a fling or a
-        // drag still moves, the next frame is a refresh away regardless (a
-        // fling's first step, which has not moved yet, otherwise waited 30
-        // to 40 ms for something else to wake the loop).
+        // drag still moves, the next frame is at the next refresh regardless
+        // (a fling's first step, which has not moved yet, otherwise waited
+        // 30 to 40 ms for something else to wake the loop), on the
+        // callbacks' beat (a refresh after the pass slid later each time).
         if paced && flinging && mapped && !waiting {
-            soonest(Instant::now() + anim::FRAME);
+            soonest(renderer.next_refresh(Instant::now()));
         }
         if let Output::Wayland(wayland) = &renderer.output
             && let Some(at) = wayland.ready_at()

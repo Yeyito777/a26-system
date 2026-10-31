@@ -397,7 +397,10 @@ what changes is how a frame reaches the panel and how input arrives:
   frame callback came: Moon answers it at the flip that showed that frame.
   Input and changes in between are taken into the next frame, and a fling
   draws a frame at every callback (on X it kept its own 8.33 ms cadence).
-  A callback that never comes holds frames back for 100 ms at most.
+  A frame that changed nothing hands nothing over and brings no callback:
+  while a fling or a drag moves, the next is drawn at the next refresh on
+  the callbacks' beat. A callback that never comes holds frames back for
+  100 ms at most.
 - **Input.** Touches come from Moon as wl_touch (Moon forwards the touches
   that are the app's; its home gesture cancels them), keys as wl_keyboard
   keys of Moon's US map. The app asks for the keyboard, the status bar
@@ -420,13 +423,17 @@ used by `comms::Scroll` when its `smooth` is set). Each report keeps its own
 time (Moon's wl_touch time is when the X server read the touchscreen), is
 put on the touchscreen's steady scan clock, and a frame shows where the
 finger was a moment before it is drawn (as long as reports lately take to
-arrive, 2 to 8 ms), with a 1€ filter that smooths slow movement and lets
-fast movement through. On the phone, without it, 45 % of a slow drag's
-frames showed no movement and 12-16 % of a faster one's moved twice as far
-as the next. On X a drag draws each report as it comes, as before: the
-smoothed frames come on the app's own cadence, and in the X server they
-held up Moon's injected touches (the gate: the finger drawn about 30 ms
-behind instead of 11 to 19). `EXOCORTEX_APP_DRAG=lag=2,predict=8,min=5,beta=0.1,dcut=15`
+arrive, 2 to 8 ms). The result is carried on at the finger's trend and
+pulled toward the finger (an alpha-beta filter): a steady movement is not
+delayed, a twitch is spread over a few frames, a lurch is followed (a plain
+low-pass, the 1€ filter it replaced, drew the gate's 80 px/s drag 10 ms
+late). On the phone, without it, 45 % of a slow drag's frames showed no
+movement and 12-16 % of a faster one's moved twice as far as the next. On
+X a drag draws each report as it comes, as before: the smoothed frames come
+on the app's own cadence, and in the X server they held up Moon's injected
+touches (the gate: the finger drawn about 30 ms behind instead of 11 to
+19). The probe's finger is the one under the page as drawn (at the offset
+rounded). `EXOCORTEX_APP_DRAG=lag=2,predict=8,min=5,beta=0.1,gamma=0.02`
 overrides its tuning (measuring).
 
 ## The code: who owns what, and the interfaces between
