@@ -587,8 +587,14 @@ pub const T_ITALIC: Weight = MonoItalic;
 
 /// The window's width (Moon gives every app the whole screen's).
 pub const W: f32 = 1080.0;
-/// Moon owns the bottom of the window for its home gesture.
+/// Moon owns the bottom of the window for its home gesture: a drag that
+/// starts there is Moon's, so what scrolls (the list, sheets, the reader)
+/// stays above it. A tap there still reaches the app.
 pub const GESTURE_RESERVE: f32 = 170.0;
+/// The iPhone's bottom safe-area inset (34 pt): what stays put and takes
+/// taps (the composer, select mode's bar, the snackbar, sheets that fit)
+/// sits on it as on the iPhone, reaching into the gesture reserve.
+pub const SAFE_BOTTOM: f32 = 94.0;
 /// Spacing scale (4/8/12/16/20 pt).
 pub const S1: f32 = 11.0;
 pub const S2: f32 = 22.0;

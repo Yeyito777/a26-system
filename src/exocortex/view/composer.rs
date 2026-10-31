@@ -29,8 +29,8 @@ use super::super::model::composer::{Act, End, VoicePhase};
 use super::super::model::{Action, Model, Page};
 use super::super::theme::{
     self, COMPOSER_BUTTON, COMPOSER_FACE, COMPOSER_GAP, COMPOSER_MARGIN, EDITOR_INSET,
-    EDITOR_LINES, EDITOR_PAD_Y, GESTURE_RESERVE, HAIRLINE, ISLAND_MIN, ISLAND_PAD, ISLAND_RADIUS,
-    S1, S2, T_CAPTION, T_COMPOSER, T_MENU, T_META, T_NOTE, W,
+    EDITOR_LINES, EDITOR_PAD_Y, HAIRLINE, ISLAND_MIN, ISLAND_PAD, ISLAND_RADIUS, S1, S2,
+    SAFE_BOTTOM, T_CAPTION, T_COMPOSER, T_MENU, T_META, T_NOTE, W,
 };
 use super::super::ui::icons::{self, Icon, Style};
 use super::super::ui::overlay::{Body, Cx, Overlay, Response};
@@ -251,7 +251,7 @@ fn wrapped(text: &str, width: f32) -> Rc<Vec<Line>> {
 }
 
 pub fn geometry(model: &Model, height: f32, keyboard: bool) -> ComposerGeometry {
-    let bottom = height - COMPOSER_GAP - if keyboard { 0.0 } else { GESTURE_RESERVE };
+    let bottom = height - COMPOSER_GAP - if keyboard { 0.0 } else { SAFE_BOTTOM };
     let trailing = trailing(model);
     let x0 = COMPOSER_MARGIN;
     let x1 = W - COMPOSER_MARGIN;
@@ -493,8 +493,11 @@ pub fn hit(model: &Model, height: f32, keyboard: bool, x: f32, y: f32) -> Option
             focused: keyboard,
         })));
     }
-    // The band around it: the editor, its caret where it was.
-    (y >= geometry.band_top()).then_some(Hit::Composer)
+    // The band around it: the editor, its caret where it was. Under it is
+    // Moon's home gesture's area: a touch that missed a swipe home there
+    // opens nothing.
+    (y >= geometry.band_top() && y < geometry.island.y + geometry.island.h + 16.0)
+        .then_some(Hit::Composer)
 }
 
 /// A long press in the editor: its word selected.
@@ -1903,6 +1906,33 @@ mod tests {
         assert_eq!(trailing(&model).stop, Some(true));
         model.ready = false;
         assert_eq!(trailing(&model).primary, Primary::Queue { enabled: false });
+    }
+
+    #[test]
+    fn the_island_sits_on_the_bottom_inset_and_takes_taps_on_moons_area() {
+        let model = chat(false);
+        let height = SIZE.1 as f32;
+        // As on the iPhone: 8 pt above its 34 pt inset, or above the
+        // keyboard.
+        let g = geometry(&model, height, false);
+        assert_eq!(g.island.y + g.island.h, height - 116.0);
+        let up = geometry(&model, height - 900.0, true);
+        assert_eq!(up.island.y + up.island.h, height - 922.0);
+        // Its lower part is on Moon's home gesture's area (the bottom
+        // 180 px), which hands a tap over when the finger lifts.
+        let y = height - 150.0;
+        assert!(y > g.island.y && y < g.island.y + g.island.h);
+        assert!(matches!(
+            hit(&model, height, false, 540.0, y),
+            Some(Hit::Action(Action::Composer(Act::Place { .. })))
+        ));
+        assert_eq!(
+            hit(&model, height, false, g.plus.0, y),
+            Some(Hit::Action(Action::Composer(Act::Attach)))
+        );
+        // Under it, nothing: a touch that missed a swipe home opens no
+        // keyboard.
+        assert_eq!(hit(&model, height, false, 540.0, height - 40.0), None);
     }
 
     #[test]

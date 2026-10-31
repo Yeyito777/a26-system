@@ -565,6 +565,18 @@ additions are the only shared edits.
   weight, tracking, uppercase, scaled by the text size); spacing from the
   metrics (`S1`…`S5`, `TARGET`, `GESTURE_RESERVE`, …; `theme::top_bar()`
   rather than `TOP_BAR`, which is the default size's).
+- **The bottom.** Moon keeps a touch that starts on its home gesture's
+  area (the screen's bottom 180 px): a swipe there goes home, and a tap
+  reaches the app only when the finger lifts, as a press and a release
+  together; the app takes every press it gets. So what scrolls (the list,
+  sheets that scroll, the reader; the settings page's last row at its
+  end) stays above `GESTURE_RESERVE` (170), where a drag is the app's,
+  and what stays put and is tapped sits on `SAFE_BOTTOM` (94 px, the
+  iPhone's 34 pt inset) as on the iPhone: the composer 8 pt above it
+  (`COMPOSER_GAP`), select mode's bar, the snackbar, the connection pill,
+  the viewer's footer, sheets that fit, the anchored menu's clamp
+  (`Cx::safe_bottom()`). Under the island a tap opens nothing (a swipe
+  home that fell short).
 - **Gestures.** `gesture::Recognizer` turns pointer events into `Down`,
   `Lift` (150 ms held), `LongPress` (600 ms), `DragStart { axis, edge }`,
   `Drag`, `DragEnd { vx, vy }`, `Tap`, `Back` (a swipe from the left 60 px
