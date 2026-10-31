@@ -7,6 +7,7 @@ mod comms_ui;
 mod control;
 mod display_ui;
 mod exocortex;
+mod finger;
 mod general_ui;
 mod gfx;
 mod keys;

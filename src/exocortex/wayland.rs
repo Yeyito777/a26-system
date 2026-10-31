@@ -53,9 +53,11 @@ pub enum Event {
     /// In front (true), or in the background or under a screen turned off
     /// (xdg `suspended`).
     Shown(bool),
-    Press(f32, f32),
-    Motion(f32, f32),
-    Release(f32, f32),
+    /// A finger down, moved or lifted, with the time of the touchscreen's
+    /// report (CLOCK_MONOTONIC ms, from Moon).
+    Press(f32, f32, u32),
+    Motion(f32, f32, u32),
+    Release(f32, f32, u32),
     /// Moon took the touch over (its home gesture, the switcher).
     Cancel,
     Key(KeyInput),
@@ -137,6 +139,8 @@ struct State {
     shift: bool,
     /// A frame callback is outstanding, since then.
     frame_asked: Option<Instant>,
+    /// When the last frame callback came: the flip that showed a frame.
+    flipped: Option<Instant>,
     synced: bool,
     /// Flips that showed a frame (CLOCK_MONOTONIC ms), for profiling.
     presented: Vec<(f64, i32)>,
@@ -308,6 +312,15 @@ impl Wayland {
         self.state
             .frame_asked
             .is_none_or(|at| at.elapsed() >= FRAME_PATIENCE)
+    }
+
+    /// The panel's next refresh after `now`, on the beat of the last frame
+    /// callback (None before one has come).
+    pub fn next_flip(&self, now: Instant) -> Option<Instant> {
+        let flipped = self.state.flipped?;
+        let since = now.saturating_duration_since(flipped).as_secs_f64();
+        let refreshes = (since / super::anim::FRAME.as_secs_f64()).floor() + 1.0;
+        Some(flipped + super::anim::FRAME.mul_f64(refreshes))
     }
 
     /// When `ready` turns true without a callback.
@@ -804,7 +817,10 @@ impl Dispatch<wl_callback::WlCallback, Callback> for State {
     ) {
         if let wl_callback::Event::Done { .. } = event {
             match kind {
-                Callback::Frame => state.frame_asked = None,
+                Callback::Frame => {
+                    state.frame_asked = None;
+                    state.flipped = Some(Instant::now());
+                }
                 Callback::Sync => state.synced = true,
             }
         }
@@ -862,21 +878,26 @@ impl Dispatch<wl_touch::WlTouch, ()> for State {
     ) {
         let scale = state.scale();
         match event {
-            wl_touch::Event::Down { id, x, y, .. } if state.touch.is_none() => {
+            wl_touch::Event::Down { id, x, y, time, .. } if state.touch.is_none() => {
                 let (x, y) = (x as f32 * scale, y as f32 * scale);
                 state.touch = Some((id, x, y));
-                state.events.push(Event::Press(x, y));
+                state.events.push(Event::Press(x, y, time));
             }
-            wl_touch::Event::Motion { id, x, y, .. } => {
-                if let Some(touch) = state.touch.as_mut().filter(|touch| touch.0 == id) {
-                    touch.1 = x as f32 * scale;
-                    touch.2 = y as f32 * scale;
-                    state.events.push(Event::Motion(touch.1, touch.2));
+            wl_touch::Event::Motion { id, x, y, time } => {
+                let (x, y) = (x as f32 * scale, y as f32 * scale);
+                // (A motion to where the finger already is says nothing.)
+                if let Some(touch) = state
+                    .touch
+                    .as_mut()
+                    .filter(|touch| touch.0 == id && (touch.1, touch.2) != (x, y))
+                {
+                    (touch.1, touch.2) = (x, y);
+                    state.events.push(Event::Motion(x, y, time));
                 }
             }
-            wl_touch::Event::Up { id, .. } => {
+            wl_touch::Event::Up { id, time, .. } => {
                 if let Some((_, x, y)) = state.touch.take_if(|touch| touch.0 == id) {
-                    state.events.push(Event::Release(x, y));
+                    state.events.push(Event::Release(x, y, time));
                 }
             }
             wl_touch::Event::Cancel => {
