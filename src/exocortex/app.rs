@@ -1490,6 +1490,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         if let Some(due) = fling_due.filter(|_| !waiting) {
             soonest(due);
         }
+        // Paced by frame callbacks (Wayland), a frame that changed nothing
+        // hands nothing over and brings no callback: while a fling or a
+        // drag still moves, the next frame is a refresh away regardless (a
+        // fling's first step, which has not moved yet, otherwise waited 30
+        // to 40 ms for something else to wake the loop).
+        if paced && flinging && mapped && !waiting {
+            soonest(Instant::now() + anim::FRAME);
+        }
         if let Output::Wayland(wayland) = &renderer.output
             && let Some(at) = wayland.ready_at()
         {
