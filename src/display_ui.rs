@@ -12,6 +12,7 @@ use crate::ui::{
     grouped_card, large_title, section_header, separator,
 };
 use crate::wallpapers::{WALLPAPERS, render};
+use std::time::Instant;
 
 const RIGHT: f32 = MARGIN + CARD_WIDTH - 44.0;
 const BRIGHTNESS_Y: f32 = 340.0;
@@ -73,13 +74,56 @@ fn choice_row(index: usize) -> RectF {
     card(340.0 + ROW * index as f32, ROW)
 }
 
-/// Wallpaper thumbnails: three across, two down.
+/// Wallpaper thumbnails: three across, as many rows as it takes (the grid
+/// scrolls under the title), at the grid's unscrolled position.
 pub fn thumbnail(index: usize) -> RectF {
     let (w, h) = (300.0, 650.0);
     let gap = (CARD_WIDTH - 3.0 * w) / 2.0;
     let column = (index % 3) as f32;
     let row = (index / 3) as f32;
-    RectF::new(MARGIN + column * (w + gap), 320.0 + row * (h + 110.0), w, h)
+    RectF::new(
+        MARGIN + column * (w + gap),
+        GRID_TOP + row * (h + 110.0),
+        w,
+        h,
+    )
+}
+
+const GRID_TOP: f32 = 320.0;
+/// The grid shows between the title and the home indicator's strip.
+const GRID_CLIP: f32 = 290.0;
+const GESTURE_RESERVE: f32 = 170.0;
+const FOOTER_LINE: f32 = 50.0;
+
+/// The picker's items: Moon's wallpapers, the saved pictures, then the
+/// tile that pastes one.
+fn item_count(app: &AppModel) -> usize {
+    WALLPAPERS.len() + app.saved_wallpapers.len() + 1
+}
+
+/// The wallpaper at `index` in the picker (None: the paste tile).
+pub fn wallpaper_id(app: &AppModel, index: usize) -> Option<String> {
+    match WALLPAPERS.get(index) {
+        Some(spec) => Some(spec.id.to_owned()),
+        None => app.saved_wallpapers.get(index - WALLPAPERS.len()).cloned(),
+    }
+}
+
+/// Where the footer starts, unscrolled.
+fn footer_top(app: &AppModel) -> f32 {
+    let last = thumbnail(item_count(app) - 1);
+    // Under the last row's names.
+    last.y + last.h + 150.0
+}
+
+/// The picker's scroll range on a screen `height` tall.
+pub fn wallpaper_scroll_max(app: &AppModel, height: f32) -> f32 {
+    (footer_top(app) + FOOTER_LINE * 4.0 + 60.0 - (height - GESTURE_RESERVE)).max(0.0)
+}
+
+/// A touch at `y` on the picker may scroll it.
+pub fn wallpaper_scrolls(height: f32, y: f32) -> bool {
+    y >= GRID_CLIP && y < height - GESTURE_RESERVE
 }
 
 /// The brightness for a touch at `x` along the slider.
@@ -110,9 +154,22 @@ pub fn action_at(app: &AppModel, x: f32, y: f32) -> Option<Action> {
         View::AutoLock => (0..AUTO_LOCK.len())
             .find(|i| choice_row(*i).contains(x, y))
             .map(|i| Action::SetAutoLock(AUTO_LOCK[i].0)),
-        View::Wallpaper => (0..WALLPAPERS.len())
-            .find(|i| thumbnail(*i).inset(-10.0).contains(x, y))
-            .map(Action::SetWallpaper),
+        View::Wallpaper => {
+            if y < GRID_CLIP {
+                return None;
+            }
+            let y = y + app.wallpaper_scroll.value(Instant::now());
+            let paste = item_count(app) - 1;
+            (0..item_count(app))
+                .find(|i| thumbnail(*i).inset(-10.0).contains(x, y))
+                .map(|i| {
+                    if i == paste {
+                        Action::PasteWallpaper
+                    } else {
+                        Action::SetWallpaper(i)
+                    }
+                })
+        }
         _ => None,
     }
 }
@@ -298,31 +355,67 @@ fn draw_auto_lock(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) 
 fn draw_wallpaper(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) {
     back(canvas, "System", pressed == Some(Action::ShowSystem));
     large_title(canvas, "Wallpaper", 236.0);
+    let height = canvas.height as f32;
+    let offset = app.wallpaper_scroll.value(Instant::now());
+    canvas.set_clip(
+        0,
+        GRID_CLIP as i32,
+        canvas.width,
+        (height - GESTURE_RESERVE) as i32,
+    );
     let current = app.shell.wallpaper.as_deref().unwrap_or("moon");
-    for (index, spec) in WALLPAPERS.iter().enumerate() {
-        let rect = thumbnail(index);
-        let image = &thumbnails()[index];
-        // Rounded like the phone's screen corners.
-        let mask = RectF::new(rect.x, rect.y, rect.w, rect.h);
-        canvas.fill_rrect(mask, 34.0, 0x000000, 1.0);
-        blit_rounded(canvas, image, mask, 34.0);
-        if spec.id == "black" {
-            canvas.stroke_rrect(mask, 34.0, 2.0, 0x38383a, 1.0);
+    let paste = item_count(app) - 1;
+    for index in 0..item_count(app) {
+        let mut rect = thumbnail(index);
+        rect.y -= offset;
+        if rect.y + rect.h + 80.0 < GRID_CLIP || rect.y > height {
+            continue;
         }
-        if spec.id == current {
-            canvas.stroke_rrect(mask.inset(-10.0), 42.0, 6.0, BLUE, 1.0);
-        }
-        let alpha = if pressed == Some(Action::SetWallpaper(index)) {
+        let alpha = if pressed.is_some_and(|p| {
+            p == Action::SetWallpaper(index) || (index == paste && p == Action::PasteWallpaper)
+        }) {
             0.5
         } else {
             1.0
         };
+        let label_y = rect.y + rect.h + 62.0;
+        if index == paste {
+            draw_paste_tile(canvas, rect, app.wallpaper_adding, alpha);
+            continue;
+        }
+        let Some(id) = wallpaper_id(app, index) else {
+            continue;
+        };
+        // Rounded like the phone's screen corners.
+        canvas.fill_rrect(rect, 34.0, 0x000000, 1.0);
+        let image = match WALLPAPERS.get(index) {
+            Some(_) => Some(&thumbnails()[index]),
+            None => saved_thumbnail(&id),
+        };
+        if let Some(image) = image {
+            blit_rounded(canvas, image, rect, 34.0);
+        }
+        if id == "black" || image.is_none() {
+            canvas.stroke_rrect(rect, 34.0, 2.0, 0x38383a, 1.0);
+        }
+        if crate::wallpapers::is_dynamic(&id) {
+            draw_tilt_badge(canvas, rect.x + rect.w - 40.0, rect.y + 40.0);
+        }
+        if id == current {
+            canvas.stroke_rrect(rect.inset(-10.0), 42.0, 6.0, BLUE, 1.0);
+        }
+        let name = text::fit(
+            &crate::wallpapers::name(&id),
+            Weight::Regular,
+            40.0,
+            rect.w + 40.0,
+        );
         text::draw_centered(
             canvas,
-            spec.name,
+            &name,
             rect.x + rect.w / 2.0,
-            rect.y + rect.h + 62.0,
-            if spec.id == current {
+            label_y,
+            if id == current {
                 Weight::SemiBold
             } else {
                 Weight::Regular
@@ -332,13 +425,112 @@ fn draw_wallpaper(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) 
             alpha,
         );
     }
-    footer(
+    let top = footer_top(app) - offset;
+    let mut lines: Vec<(&str, u32)> = vec![
+        ("Wallpapers marked with layers move as you tilt.", SECONDARY),
+        ("Paste adds the picture you copied last.", SECONDARY),
+        (
+            "Black lights no pixels: it saves the most battery.",
+            SECONDARY,
+        ),
+    ];
+    if let Some(status) = &app.wallpaper_status {
+        lines.insert(0, (status.as_str(), WHITE));
+    }
+    for (row, (line, color)) in lines.into_iter().enumerate() {
+        footer(
+            canvas,
+            line,
+            top + row as f32 * FOOTER_LINE - 60.0,
+            color,
+            SECONDARY_ALPHA,
+        );
+    }
+    canvas.reset_clip();
+}
+
+/// The tile that adds the clipboard's picture: a plus, or a pulse of
+/// dots while it is added.
+fn draw_paste_tile(canvas: &mut Canvas, rect: RectF, adding: bool, alpha: f32) {
+    canvas.fill_rrect(rect, 34.0, 0x1c1c1e, alpha);
+    canvas.stroke_rrect(rect, 34.0, 2.0, 0x38383a, alpha);
+    let (cx, cy) = rect.center();
+    if adding {
+        let phase = (crate::clock::unix_now() % 3) as usize;
+        for dot in 0..3 {
+            let lit = if dot == phase { 1.0 } else { 0.35 };
+            canvas.fill_circle(cx - 36.0 + dot as f32 * 36.0, cy, 9.0, WHITE, lit * alpha);
+        }
+    } else {
+        canvas.fill_rrect(
+            RectF::new(cx - 34.0, cy - 4.0, 68.0, 8.0),
+            4.0,
+            WHITE,
+            alpha,
+        );
+        canvas.fill_rrect(
+            RectF::new(cx - 4.0, cy - 34.0, 8.0, 68.0),
+            4.0,
+            WHITE,
+            alpha,
+        );
+    }
+    text::draw_centered(
         canvas,
-        "Black lights no pixels: it saves the most battery.",
-        thumbnail(3).y + thumbnail(3).h + 70.0,
-        SECONDARY,
-        SECONDARY_ALPHA,
+        if adding { "Adding…" } else { "Paste" },
+        cx,
+        rect.y + rect.h + 62.0,
+        Weight::Regular,
+        40.0,
+        WHITE,
+        alpha,
     );
+}
+
+/// Marks a wallpaper that moves with the tilt: two offset frames, a
+/// picture and its parallax.
+fn draw_tilt_badge(canvas: &mut Canvas, cx: f32, cy: f32) {
+    canvas.fill_circle(cx, cy, 24.0, 0x000000, 0.45);
+    canvas.stroke_rrect(
+        RectF::new(cx - 13.0, cy - 7.0, 18.0, 18.0),
+        4.0,
+        2.5,
+        WHITE,
+        0.55,
+    );
+    canvas.stroke_rrect(
+        RectF::new(cx - 5.0, cy - 13.0, 18.0, 18.0),
+        4.0,
+        2.5,
+        WHITE,
+        0.95,
+    );
+}
+
+/// A saved picture's thumbnail, decoded once per file version.
+fn saved_thumbnail(id: &str) -> Option<&'static Canvas> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    type Cache = HashMap<String, (Option<std::time::SystemTime>, &'static Canvas)>;
+    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+    let file = id.strip_prefix(crate::wallpapers::SAVED_PREFIX)?;
+    let modified = std::fs::metadata(std::path::Path::new(crate::wallpapers::SAVED_DIR).join(file))
+        .and_then(|m| m.modified())
+        .ok();
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = cache.get_or_insert_with(HashMap::new);
+    if let Some((at, image)) = cache.get(id)
+        && *at == modified
+    {
+        return Some(image);
+    }
+    let rect = thumbnail(0);
+    let image = crate::wallpapers::saved_thumbnail(id, rect.w as i32, rect.h as i32)?;
+    // Kept for the app's life, like the built-in thumbnails (a new version
+    // of a file leaks its old one: rare, and 780 KB).
+    let image: &'static Canvas = Box::leak(Box::new(image));
+    cache.insert(id.to_owned(), (modified, image));
+    Some(image)
 }
 
 /// The thumbnails, drawn once (each is a few hundred thousand pixels of
@@ -357,9 +549,11 @@ fn thumbnails() -> &'static [Canvas] {
     })
 }
 
-/// Copies `image` into `rect` with rounded corners.
+/// Copies `image` into `rect` with rounded corners, within the canvas's
+/// clip.
 fn blit_rounded(canvas: &mut Canvas, image: &Canvas, rect: RectF, radius: f32) {
     let (x0, y0) = (rect.x as i32, rect.y as i32);
+    let (clip_x0, clip_y0, clip_x1, clip_y1) = canvas.clip();
     for y in 0..image.height {
         let py = y as f32 + 0.5;
         let dy = if py < radius {
@@ -371,12 +565,12 @@ fn blit_rounded(canvas: &mut Canvas, image: &Canvas, rect: RectF, radius: f32) {
         };
         let inset = (radius - (radius * radius - dy * dy).max(0.0).sqrt()).ceil() as i32;
         let ty = y0 + y;
-        if ty < 0 || ty >= canvas.height {
+        if ty < clip_y0 || ty >= clip_y1 {
             continue;
         }
         for x in inset..(image.width - inset) {
             let tx = x0 + x;
-            if tx >= 0 && tx < canvas.width {
+            if tx >= clip_x0 && tx < clip_x1 {
                 canvas.pixels[(ty * canvas.width + tx) as usize] =
                     image.pixels[(y * image.width + x) as usize];
             }
@@ -471,7 +665,15 @@ mod tests {
         let picker = app(View::Wallpaper, "ok");
         let (x, y) = thumbnail(4).center();
         assert_eq!(action_at(&picker, x, y), Some(Action::SetWallpaper(4)));
-        assert!(thumbnail(5).y + thumbnail(5).h + 120.0 < 2216.0 - 170.0);
+        // After Moon's wallpapers (and no saved ones), the paste tile.
+        let (x, y) = thumbnail(WALLPAPERS.len()).center();
+        assert_eq!(action_at(&picker, x, y), Some(Action::PasteWallpaper));
+        assert_eq!(wallpaper_id(&picker, 6).as_deref(), Some("orbit"));
+        assert_eq!(wallpaper_id(&picker, WALLPAPERS.len()), None);
+        // Three rows do not fit: the grid scrolls, and a tap lands where
+        // the scrolled grid shows.
+        assert!(wallpaper_scroll_max(&picker, 2216.0) > 0.0);
+        assert_eq!(action_at(&picker, x, 200.0), None);
         assert_eq!(auto_lock_label(120), "2 Minutes");
     }
 }

@@ -566,7 +566,7 @@ fn draw_system(
         0x32ade6,
         crate::display_ui::draw_wallpaper_glyph,
         "Wallpaper",
-        crate::wallpapers::name(app.shell.wallpaper.as_deref().unwrap_or("moon")),
+        &crate::wallpapers::name(app.shell.wallpaper.as_deref().unwrap_or("moon")),
         true,
     );
     let volume_text = volume.map_or_else(|| "--".into(), |value| format!("{value}%"));
