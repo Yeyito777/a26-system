@@ -122,6 +122,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut volume = app.shell.volume;
     // Counts storage while the Storage page is open.
     let mut storage_worker: Option<storage::StorageWorker> = None;
+    let mut paste_worker: Option<wallpapers::PasteWorker> = None;
     let wifi_worker = WifiWorker::spawn();
     let clock_worker = clock::NotifyWorker::spawn();
     // The System page summarizes the current network, so ask once up front.
@@ -177,6 +178,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                             app.tz_scroll
                                 .begin(f32::from(event.event_y), Instant::now());
                         }
+                        if app.view == app::View::Wallpaper
+                            && display_ui::wallpaper_scrolls(height, f32::from(event.event_y))
+                        {
+                            app.wallpaper_scroll
+                                .begin(f32::from(event.event_y), Instant::now());
+                        }
                         pressed = renderer.action_at(&app, event.event_x, event.event_y);
                         redraw |= pressed.is_some();
                     }
@@ -193,6 +200,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .moved(f32::from(event.event_y), max, Instant::now());
                             redraw = true;
                         }
+                        if tap.moved && app.wallpaper_scroll.dragging() {
+                            let max = display_ui::wallpaper_scroll_max(
+                                &app,
+                                f32::from(renderer.height()),
+                            );
+                            app.wallpaper_scroll.moved(
+                                f32::from(event.event_y),
+                                max,
+                                Instant::now(),
+                            );
+                            redraw = true;
+                        }
                     }
                 }
                 Event::ButtonRelease(event) if event.event == window && event.detail == 1 => {
@@ -201,6 +220,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     let max = general_ui::zone_scroll_max(f32::from(renderer.height()));
                     app.tz_scroll.end(max, Instant::now());
+                    let max = display_ui::wallpaper_scroll_max(&app, f32::from(renderer.height()));
+                    app.wallpaper_scroll.end(max, Instant::now());
                     if let Some(position) = tap
                         .take()
                         .and_then(|tap| tap.finish(event.event_x, event.event_y, renderer.height()))
@@ -300,9 +321,34 @@ fn main() -> Result<(), Box<dyn Error>> {
             app.storage = None;
         }
         let max = general_ui::zone_scroll_max(f32::from(renderer.height()));
-        let flinging = app.view == app::View::TimeZone && app.tz_scroll.step(max, now);
+        let mut flinging = app.view == app::View::TimeZone && app.tz_scroll.step(max, now);
+        let max = display_ui::wallpaper_scroll_max(&app, f32::from(renderer.height()));
+        flinging |= app.view == app::View::Wallpaper && app.wallpaper_scroll.step(max, now);
         redraw |= flinging;
-        let busy = app.busy || app.scanning;
+        // A picture pasted as a wallpaper is converted in the background,
+        // then shown.
+        if app.wallpaper_adding && paste_worker.is_none() {
+            paste_worker = Some(wallpapers::PasteWorker::spawn());
+        }
+        if let Some(result) = paste_worker
+            .as_ref()
+            .and_then(wallpapers::PasteWorker::try_recv)
+        {
+            paste_worker = None;
+            app.wallpaper_adding = false;
+            app.saved_wallpapers = wallpapers::saved();
+            app.wallpaper_status = match result {
+                Ok(id) => {
+                    if control::send(&format!("settings set wallpaper {id}")) {
+                        app.shell.wallpaper = Some(id.clone());
+                    }
+                    Some(format!("Added {}.", wallpapers::name(&id)))
+                }
+                Err(error) => Some(error),
+            };
+            redraw = true;
+        }
+        let busy = app.busy || app.scanning || app.wallpaper_adding;
         if busy && now >= next_busy_frame {
             redraw = true;
             next_busy_frame = now + BUSY_POLL_INTERVAL;
@@ -435,10 +481,10 @@ fn shell_command(app: &mut AppModel, action: Action) {
             }
         }
         Action::SetWallpaper(index) => {
-            if let Some(spec) = wallpapers::WALLPAPERS.get(index)
-                && control::send(&format!("settings set wallpaper {}", spec.id))
+            if let Some(id) = display_ui::wallpaper_id(app, index)
+                && control::send(&format!("settings set wallpaper {id}"))
             {
-                app.shell.wallpaper = Some(spec.id.to_owned());
+                app.shell.wallpaper = Some(id);
             }
         }
         _ => {}

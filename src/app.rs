@@ -233,7 +233,10 @@ pub enum Action {
     PowerMenu(bool),
     /// Moon settings (sent over its control socket by the main loop).
     SetAutoLock(u32),
+    /// A wallpaper by its index in the picker (display_ui::wallpaper_id).
     SetWallpaper(usize),
+    /// Saves the clipboard's picture as a wallpaper and shows it.
+    PasteWallpaper,
     ToggleAutoBrightness,
     SetBrightness(u8),
     ToggleHaptics,
@@ -270,6 +273,13 @@ pub struct AppModel {
     pub storage: Option<crate::storage::Breakdown>,
     /// The time-zone picker's scroll.
     pub tz_scroll: crate::comms::Scroll,
+    /// The wallpaper picker: the saved pictures' ids (newest first), its
+    /// scroll, and a picture being added from the clipboard (the main loop
+    /// runs it) with what became of the last one.
+    pub saved_wallpapers: Vec<String>,
+    pub wallpaper_scroll: crate::comms::Scroll,
+    pub wallpaper_adding: bool,
+    pub wallpaper_status: Option<String>,
     wifi_initialized: bool,
     /// When the shown notice goes away (`None`: it stays).
     notice_until: Option<Instant>,
@@ -297,6 +307,10 @@ impl Default for AppModel {
             battery: crate::battery::BatteryInfo::default(),
             storage: None,
             tz_scroll: crate::comms::Scroll::default(),
+            saved_wallpapers: Vec::new(),
+            wallpaper_scroll: crate::comms::Scroll::default(),
+            wallpaper_adding: false,
+            wallpaper_status: None,
             wifi_initialized: false,
             notice_until: None,
             failure_acknowledged: false,
@@ -332,6 +346,18 @@ impl AppModel {
             }
             Action::ShowWallpaper => {
                 self.view = View::Wallpaper;
+                self.saved_wallpapers = crate::wallpapers::saved();
+                self.wallpaper_scroll.reset();
+                if !self.wallpaper_adding {
+                    self.wallpaper_status = None;
+                }
+                Vec::new()
+            }
+            Action::PasteWallpaper => {
+                if !self.wallpaper_adding {
+                    self.wallpaper_adding = true;
+                    self.wallpaper_status = Some("Adding the picture…".into());
+                }
                 Vec::new()
             }
             Action::ShowAbout => {

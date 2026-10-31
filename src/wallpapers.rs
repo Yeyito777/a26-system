@@ -1,6 +1,9 @@
 //! Moon's built-in wallpapers, for the picker's thumbnails: the same table
 //! and drawing as Moon's src/a26-shell/src/wallpaper.rs (OSS-Phone-V1
-//! docs/settings.md), so a thumbnail is exactly the wallpaper, smaller.
+//! docs/settings.md), so a thumbnail is exactly the wallpaper, smaller. The
+//! dynamic ones (their layers move with the phone's tilt in Moon) show
+//! their layers at rest. And the user's saved pictures: PNGs in
+//! `SAVED_DIR`, which Moon shows as `saved:NAME.png`.
 
 use crate::gfx::{self, Canvas};
 
@@ -23,7 +26,7 @@ pub struct Wallpaper {
     pub glows: &'static [Glow],
 }
 
-pub const WALLPAPERS: [Wallpaper; 6] = [
+pub const WALLPAPERS: [Wallpaper; 8] = [
     Wallpaper {
         id: "moon",
         name: "Moon",
@@ -169,6 +172,61 @@ pub const WALLPAPERS: [Wallpaper; 6] = [
             },
         ],
     },
+    // Dynamic: the moon and the stars float over it at their own depths and
+    // move as the phone tilts (`build`, tilt.rs).
+    Wallpaper {
+        id: "orbit",
+        name: "Orbit",
+        top: (6.0, 7.0, 22.0),
+        bottom: (1.0, 1.0, 6.0),
+        glows: &[
+            Glow {
+                x: 0.72,
+                y: 0.22,
+                radius: 0.55,
+                color: (70.0, 66.0, 190.0),
+                strength: 0.50,
+            },
+            Glow {
+                x: 0.04,
+                y: 0.70,
+                radius: 0.60,
+                color: (12.0, 70.0, 170.0),
+                strength: 0.30,
+            },
+            Glow {
+                x: 0.85,
+                y: 1.00,
+                radius: 0.50,
+                color: (120.0, 50.0, 170.0),
+                strength: 0.28,
+            },
+        ],
+    },
+    // Dynamic: a dusk sky over mountain ranges, nearer ones moving more
+    // (`ridge_layers`).
+    Wallpaper {
+        id: "ridge",
+        name: "Ridge",
+        top: (10.0, 8.0, 34.0),
+        bottom: (92.0, 40.0, 72.0),
+        glows: &[
+            Glow {
+                x: 0.64,
+                y: 0.60,
+                radius: 0.34,
+                color: (255.0, 150.0, 90.0),
+                strength: 0.80,
+            },
+            Glow {
+                x: 0.20,
+                y: 0.40,
+                radius: 0.60,
+                color: (96.0, 40.0, 150.0),
+                strength: 0.35,
+            },
+        ],
+    },
 ];
 
 pub fn find(id: &str) -> &'static Wallpaper {
@@ -178,12 +236,193 @@ pub fn find(id: &str) -> &'static Wallpaper {
         .unwrap_or(&WALLPAPERS[0])
 }
 
-pub fn name(id: &str) -> &'static str {
-    find(id).name
+/// What the picker and the Display page call a wallpaper: a saved
+/// picture by its file's name.
+pub fn name(id: &str) -> String {
+    match id.strip_prefix(SAVED_PREFIX) {
+        Some(file) => file.strip_suffix(".png").unwrap_or(file).to_owned(),
+        None => find(id).name.to_owned(),
+    }
 }
 
-/// Draws a wallpaper at `width` x `height`.
+/// Wallpapers whose layers move with the phone's tilt in Moon.
+pub fn is_dynamic(id: &str) -> bool {
+    matches!(id, "orbit" | "ridge") || id.starts_with(SAVED_PREFIX)
+}
+
+/// Draws a built-in wallpaper at `width` x `height`, any moving layers at
+/// rest (Moon's `wallpaper::build` and `flatten`).
 pub fn render(id: &str, width: i32, height: i32) -> Canvas {
+    let mut still = render_base(id, width, height);
+    let scale = width as f32 / 1080.0;
+    let layers = match id {
+        "orbit" => {
+            let margin = 40;
+            let mut stars = Canvas::new(width + 2 * margin, height + 2 * margin);
+            stars.pixels.fill(0);
+            draw_stars(&mut stars, 0.16, 1.0, scale);
+            let moon = width * 16 / 27;
+            vec![
+                Layer {
+                    canvas: stars,
+                    x: -margin as f32,
+                    y: -margin as f32,
+                },
+                Layer {
+                    canvas: sky_moon(moon),
+                    x: width as f32 * 0.713 - moon as f32 / 2.0,
+                    y: height as f32 * 0.504 - moon as f32 / 2.0,
+                },
+            ]
+        }
+        "ridge" => {
+            draw_stars(&mut still, 0.10, 0.42, scale);
+            ridge_layers(width, height)
+        }
+        _ => Vec::new(),
+    };
+    flatten(&mut still, &layers);
+    still
+}
+
+/// Saved wallpapers: PNGs Moon shows as `saved:NAME.png`
+/// (OSS-Phone-V1 scripts/a26-shell/wallpaper-add.sh makes them 1160x2420).
+pub const SAVED_DIR: &str = "/var/lib/a26-shell/wallpapers";
+pub const SAVED_PREFIX: &str = "saved:";
+/// The size a saved picture is made: the screen with 40 px to slide in on
+/// every side.
+pub const SAVED_SIZE: (u32, u32) = (1160, 2420);
+
+/// The saved wallpapers' ids, newest first.
+pub fn saved() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(SAVED_DIR) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let usable = !name.starts_with('.') && name.to_ascii_lowercase().ends_with(".png");
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            usable.then(|| (modified, format!("{SAVED_PREFIX}{name}")))
+        })
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    found.into_iter().map(|(_, id)| id).collect()
+}
+
+/// A saved picture as Moon shows it at rest (its middle, the margins
+/// cropped), area-averaged down to `width` x `height`; None if unreadable.
+pub fn saved_thumbnail(id: &str, width: i32, height: i32) -> Option<Canvas> {
+    let file = id.strip_prefix(SAVED_PREFIX)?;
+    let data = std::fs::read(std::path::Path::new(SAVED_DIR).join(file)).ok()?;
+    let (w, h, pixels) = crate::text::decode_png(&data)?;
+    let (w, h) = (w as f32, h as f32);
+    // Cover the margined size, then crop the margins: what is on screen.
+    let (full_w, full_h) = (SAVED_SIZE.0 as f32, SAVED_SIZE.1 as f32);
+    let cover = (full_w / w).max(full_h / h);
+    let (shown_w, shown_h) = (1080.0 / cover, 2340.0 / cover);
+    let (x0, y0) = ((w - shown_w) / 2.0, (h - shown_h) / 2.0);
+    let (sx, sy) = (shown_w / width as f32, shown_h / height as f32);
+    let mut canvas = Canvas::new(width, height);
+    for y in 0..height {
+        let (ya, yb) = (y0 + y as f32 * sy, y0 + (y + 1) as f32 * sy);
+        for x in 0..width {
+            let (xa, xb) = (x0 + x as f32 * sx, x0 + (x + 1) as f32 * sx);
+            let mut sum = [0.0_f32; 3];
+            let mut count = 0.0_f32;
+            let mut yy = ya.floor().max(0.0);
+            while yy < yb && yy < h {
+                let mut xx = xa.floor().max(0.0);
+                while xx < xb && xx < w {
+                    let p = pixels[(yy as u32 * w as u32 + xx as u32) as usize];
+                    sum[0] += ((p >> 16) & 0xff) as f32;
+                    sum[1] += ((p >> 8) & 0xff) as f32;
+                    sum[2] += (p & 0xff) as f32;
+                    count += 1.0;
+                    xx += 1.0;
+                }
+                yy += 1.0;
+            }
+            let c = |v: f32| (v / count.max(1.0) + 0.5) as u32;
+            canvas.pixels[(y * width + x) as usize] = c(sum[0]) << 16 | c(sum[1]) << 8 | c(sum[2]);
+        }
+    }
+    Some(canvas)
+}
+
+/// Saves the clipboard's picture as a wallpaper in the background: Moon's
+/// copy of it (`clipboard get image`: PNG, JPEG, GIF or WebP), converted by
+/// ImageMagick to a `SAVED_SIZE` PNG named "Picture N". Its result is the
+/// new wallpaper's id, or what to tell the user.
+pub struct PasteWorker {
+    result: std::sync::mpsc::Receiver<Result<String, String>>,
+}
+
+impl PasteWorker {
+    pub fn spawn() -> Self {
+        let (sender, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(paste());
+        });
+        Self { result }
+    }
+
+    pub fn try_recv(&self) -> Option<Result<String, String>> {
+        self.result.try_recv().ok()
+    }
+}
+
+fn paste() -> Result<String, String> {
+    let bytes = crate::exocortex::files::moon_image()
+        .unwrap_or_else(|| Err("Moon isn't answering.".into()))?;
+    let dir = std::path::Path::new(SAVED_DIR);
+    std::fs::create_dir_all(dir).map_err(|e| format!("Can't save pictures ({e})."))?;
+    let source = dir.join(".pasted");
+    std::fs::write(&source, &bytes).map_err(|e| format!("Can't save the picture ({e})."))?;
+    let name = (1..)
+        .map(|n| format!("Picture {n}.png"))
+        .find(|name| !dir.join(name).exists())
+        .unwrap_or_default();
+    let part = dir.join(format!(".{name}.new"));
+    let (w, h) = SAVED_SIZE;
+    // As scripts/a26-shell/wallpaper-add.sh: the first frame, upright, sRGB,
+    // covering the size, no alpha.
+    let converted = std::process::Command::new("magick")
+        .arg(format!("{}[0]", source.display()))
+        .args(["-auto-orient", "-colorspace", "sRGB", "-resize"])
+        .arg(format!("{w}x{h}^"))
+        .args(["-gravity", "center", "-extent"])
+        .arg(format!("{w}x{h}"))
+        .args([
+            "-background",
+            "black",
+            "-alpha",
+            "remove",
+            "-alpha",
+            "off",
+            "-strip",
+        ])
+        .arg(format!("PNG24:{}", part.display()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = std::fs::remove_file(&source);
+    match converted {
+        Ok(status) if status.success() => {}
+        _ => {
+            let _ = std::fs::remove_file(&part);
+            return Err("The picture could not be converted.".into());
+        }
+    }
+    std::fs::rename(&part, dir.join(&name))
+        .map_err(|e| format!("Can't save the picture ({e})."))?;
+    Ok(format!("{SAVED_PREFIX}{name}"))
+}
+
+/// Draws a wallpaper's base gradient and glows at `width` x `height`.
+fn render_base(id: &str, width: i32, height: i32) -> Canvas {
     let spec = find(id);
     let w = width as f32;
     let mut canvas = Canvas::new(width, height);
@@ -246,6 +485,297 @@ pub fn render(id: &str, width: i32, height: i32) -> Canvas {
     canvas
 }
 
+/// One moving layer of a dynamic wallpaper, where it rests: its top-left
+/// corner at (`x`, `y`) on screen (Moon also moves it with the tilt).
+/// Layers are listed back to front.
+pub struct Layer {
+    pub canvas: Canvas,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Draws `layers` at rest over `still`: the whole picture, for where
+/// nothing moves (the CPU compositor).
+pub fn flatten(still: &mut Canvas, layers: &[Layer]) {
+    for layer in layers {
+        let (x0, y0) = (layer.x.round() as i32, layer.y.round() as i32);
+        for y in y0.max(0)..(y0 + layer.canvas.height).min(still.height) {
+            for x in x0.max(0)..(x0 + layer.canvas.width).min(still.width) {
+                let src = layer.canvas.pixels[((y - y0) * layer.canvas.width + x - x0) as usize];
+                let under = 255 - (src >> 24);
+                let dst = &mut still.pixels[(y * still.width + x) as usize];
+                let channel = |shift: u32| {
+                    ((src >> shift) & 0xff) + (((*dst >> shift) & 0xff) * under + 127) / 255
+                };
+                *dst = 0xff00_0000
+                    | channel(16).min(255) << 16
+                    | channel(8).min(255) << 8
+                    | channel(0).min(255);
+            }
+        }
+    }
+}
+
+fn hash(x: u32, y: u32, seed: u32) -> u32 {
+    let mut h = x.wrapping_mul(0x9e37_79b1) ^ y.wrapping_mul(0x85eb_ca77) ^ seed;
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2c1b_3c6d);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x297a_2d39);
+    h ^ (h >> 15)
+}
+
+fn unit(h: u32) -> f32 {
+    (h & 0xff_ffff) as f32 / 16_777_216.0
+}
+
+/// Adds premultiplied light (0..255 per channel, `a` its coverage) to a
+/// premultiplied ARGB pixel.
+fn add_light(pixel: &mut u32, r: f32, g: f32, b: f32, a: f32) {
+    let channel =
+        |p: u32, shift: u32, v: f32| (((p >> shift) & 0xff) as f32 + v).clamp(0.0, 255.0) as u32;
+    let p = *pixel;
+    *pixel = channel(p, 24, a * 255.0) << 24
+        | channel(p, 16, r) << 16
+        | channel(p, 8, g) << 8
+        | channel(p, 0, b);
+}
+
+/// Adds stars to `canvas`: about `density` of 22 px cells hold one, and
+/// they fade out down to `depth` of its height. `scale`: the screen's width
+/// over 1080 (the System app's thumbnails draw them smaller).
+fn draw_stars(canvas: &mut Canvas, density: f32, depth: f32, scale: f32) {
+    let (width, height) = (canvas.width, canvas.height);
+    let cell = ((22.0 * scale).round() as i32).max(3);
+    for cy in 0..(height + cell - 1) / cell {
+        let fade = 1.0 - (cy * cell) as f32 / (height as f32 * depth);
+        if fade <= 0.0 {
+            break;
+        }
+        for cx in 0..(width + cell - 1) / cell {
+            let h = hash(cx as u32, cy as u32, 0x51a7);
+            if unit(h) > density {
+                continue;
+            }
+            let sx = (cx * cell) as f32 + unit(hash(cx as u32, cy as u32, 1)) * cell as f32;
+            let sy = (cy * cell) as f32 + unit(hash(cx as u32, cy as u32, 2)) * cell as f32;
+            let m = unit(hash(cx as u32, cy as u32, 3));
+            // Most stars faint, a few bright.
+            let bright = (0.18 + 0.82 * m * m * m) * fade.min(1.0);
+            let size = ((0.55 + 1.1 * bright) * scale).max(0.45);
+            let tint = unit(hash(cx as u32, cy as u32, 4));
+            let color = if tint < 0.2 {
+                (255.0, 214.0, 170.0)
+            } else if tint < 0.55 {
+                (180.0, 200.0, 255.0)
+            } else {
+                (235.0, 238.0, 255.0)
+            };
+            let glint = bright > 0.7;
+            let reach = (size * 3.0).ceil() as i32
+                + if glint {
+                    (9.0 * scale).ceil() as i32
+                } else {
+                    0
+                };
+            for y in (sy as i32 - reach).max(0)..(sy as i32 + reach + 1).min(height) {
+                for x in (sx as i32 - reach).max(0)..(sx as i32 + reach + 1).min(width) {
+                    let dx = x as f32 + 0.5 - sx;
+                    let dy = y as f32 + 0.5 - sy;
+                    let mut k = (-(dx * dx + dy * dy) / (2.0 * size * size)).exp();
+                    if glint {
+                        // A faint four-point glint on the brightest.
+                        let spike = |a: f32, b: f32| {
+                            (-(a * a) / (0.8 * scale * scale)).exp()
+                                * (-b.abs() / (3.5 * scale)).exp()
+                        };
+                        k += 0.35 * (spike(dx, dy) + spike(dy, dx));
+                    }
+                    let a = (k * bright).min(1.0);
+                    if a < 0.004 {
+                        continue;
+                    }
+                    let pixel = &mut canvas.pixels[(y * width + x) as usize];
+                    add_light(pixel, color.0 * a, color.1 * a, color.2 * a, a);
+                }
+            }
+        }
+    }
+}
+
+/// Smooth 1-D value noise in 0..1 at `x` (in lattice units).
+fn noise(x: f32, seed: u32) -> f32 {
+    let i = x.floor();
+    let f = x - i;
+    let f = f * f * (3.0 - 2.0 * f);
+    let a = unit(hash(i as i32 as u32, 0, seed));
+    let b = unit(hash((i as i32 + 1) as u32, 0, seed));
+    a + (b - a) * f
+}
+
+/// A mountain range: crest line and height (fractions of the height),
+/// colour, haze, and travel (a fraction of the height).
+type Range = (f32, f32, (f32, f32, f32), (f32, f32, f32), f32);
+
+/// "ridge"'s mountain ranges, far to near: each a silhouette whose valleys
+/// fill with haze, a rim of sunset light on its crest, and more travel the
+/// nearer it is.
+fn ridge_layers(width: i32, height: i32) -> Vec<Layer> {
+    let (w, h) = (width as f32, height as f32);
+    // (crest line, height, colour, haze, travel) per range.
+    #[rustfmt::skip]
+    let ranges: [Range; 4] = [
+        (0.590, 0.085, (128.0, 64.0, 100.0), (196.0, 110.0, 126.0), 0.010),
+        (0.650, 0.110, (82.0, 40.0, 84.0), (150.0, 78.0, 112.0), 0.022),
+        (0.730, 0.130, (44.0, 22.0, 58.0), (98.0, 50.0, 90.0), 0.040),
+        (0.835, 0.150, (14.0, 8.0, 24.0), (44.0, 22.0, 52.0), 0.065),
+    ];
+    let sun_x = 0.64 * w;
+    let mut layers = Vec::new();
+    for (index, (crest, rise, color, haze, travel)) in ranges.into_iter().enumerate() {
+        let seed = 0x7a3 + index as u32 * 31;
+        let margin = (travel * h).ceil() as i32 + 2;
+        let wavelength = w * (0.55 - 0.08 * index as f32);
+        let ridge = |x: f32| {
+            let mut v = 0.0;
+            let mut amplitude = 0.55;
+            let mut frequency = 1.0 / wavelength;
+            for octave in 0..6 {
+                v += amplitude * noise(x * frequency, seed + octave);
+                amplitude *= 0.5;
+                frequency *= 2.1;
+            }
+            // Sharper peaks than smooth noise gives.
+            let v = ((v - 0.22) / 0.62).clamp(0.0, 1.0);
+            crest * h - rise * h * v.powf(1.4)
+        };
+        let profile: Vec<f32> = (0..width + 2 * margin)
+            .map(|x| ridge((x - margin) as f32))
+            .collect();
+        let top = profile.iter().fold(f32::MAX, |a, &b| a.min(b)).floor() as i32 - 2;
+        let (lw, lh) = (width + 2 * margin, height + margin - top);
+        let mut canvas = Canvas::new(lw, lh);
+        let fog_depth = 0.16 * h;
+        for x in 0..lw {
+            let crest_y = profile[x as usize];
+            let sx = (x - margin) as f32;
+            // The crest catches the light nearest the sun.
+            let sunward =
+                (-((sx - sun_x) / (0.24 * w)).powi(2)).exp() * (1.0 - 0.22 * index as f32);
+            for y in 0..lh {
+                let sy = (y + top) as f32;
+                let coverage = (sy + 0.5 - crest_y).clamp(0.0, 1.0);
+                let pixel = &mut canvas.pixels[(y * lw + x) as usize];
+                if coverage <= 0.0 {
+                    *pixel = 0;
+                    continue;
+                }
+                let depth = sy - crest_y;
+                let fog = (depth / fog_depth).clamp(0.0, 1.0);
+                let fog = fog * fog * 0.55;
+                let rim = (-depth / (2.5 * w / 1080.0)).exp() * sunward * 0.45;
+                let mix = |c: f32, f: f32, sun: f32| c + (f - c) * fog + sun * rim;
+                let (r, g, b) = (
+                    mix(color.0, haze.0, 255.0),
+                    mix(color.1, haze.1, 170.0),
+                    mix(color.2, haze.2, 120.0),
+                );
+                let noise_px = (unit(hash(x as u32, y as u32, seed)) - 0.5) * coverage;
+                let channel = |v: f32| ((v * coverage + noise_px).clamp(0.0, 255.0)) as u32;
+                *pixel = ((coverage * 255.0) as u32) << 24
+                    | channel(r) << 16
+                    | channel(g) << 8
+                    | channel(b);
+            }
+        }
+        layers.push(Layer {
+            canvas,
+            x: -margin as f32,
+            y: top as f32,
+        });
+    }
+    layers
+}
+
+/// "orbit"'s moon: a lit crescent moon with its halo, on
+/// transparency, `size` x `size` (the moon's radius is a quarter of it).
+fn sky_moon(size: i32) -> Canvas {
+    let mut canvas = Canvas::new(size, size);
+    let c = size as f32 / 2.0;
+    let radius = size as f32 * 0.25;
+    // Sunlight from the upper right and a little behind: a fat crescent.
+    let light = {
+        let (x, y, z) = (0.82_f32, -0.42_f32, -0.12_f32);
+        let n = (x * x + y * y + z * z).sqrt();
+        (x / n, y / n, z / n)
+    };
+    // Maria: darker, soft patches on the face.
+    let maria: [(f32, f32, f32, f32); 6] = [
+        (-0.30, -0.25, 0.30, 0.30),
+        (0.15, -0.35, 0.22, 0.22),
+        (0.32, 0.05, 0.26, 0.26),
+        (-0.05, 0.30, 0.28, 0.20),
+        (0.45, 0.42, 0.16, 0.18),
+        (-0.48, 0.15, 0.18, 0.15),
+    ];
+    for y in 0..size {
+        for x in 0..size {
+            let dx = (x as f32 + 0.5 - c) / radius;
+            let dy = (y as f32 + 0.5 - c) / radius;
+            let r2 = dx * dx + dy * dy;
+            let r = r2.sqrt();
+            let pixel = &mut canvas.pixels[(y * size + x) as usize];
+            *pixel = 0;
+            // The halo, brighter on the lit side.
+            let lit_side = (0.55 + 0.45 * (dx * light.0 + dy * light.1) / r.max(1e-3)).max(0.0);
+            let out = (r - 1.0).max(0.0);
+            let halo = 0.30 * (-out * out / 0.18).exp() * lit_side + 0.10 * (-out / 0.9).exp();
+            // Gone before the layer's edge (the disc's radius is a quarter
+            // of the size, so the edge is 2 radii away at the closest).
+            let fade = ((1.95 - r) / 0.7).clamp(0.0, 1.0);
+            let halo = halo * fade * fade;
+            let coverage = ((1.0 - r) * radius + 0.5).clamp(0.0, 1.0);
+            if coverage < 1.0 {
+                let a = halo * (1.0 - coverage);
+                add_light(pixel, 150.0 * a, 150.0 * a, 255.0 * a, a);
+            }
+            if coverage <= 0.0 {
+                continue;
+            }
+            let nz = (1.0 - r2.min(1.0)).sqrt();
+            let lambert = dx * light.0 + dy * light.1 + nz * light.2;
+            // A soft terminator.
+            let day = ((lambert + 0.08) / 0.30).clamp(0.0, 1.0);
+            let day = day * day * (3.0 - 2.0 * day);
+            let mut albedo = 1.0;
+            for (mx, my, sx, sy) in maria {
+                let ex = (dx - mx) / sx;
+                let ey = (dy - my) / sy;
+                albedo -= 0.30 * (-(ex * ex + ey * ey)).exp();
+            }
+            let grain = unit(hash(x as u32, y as u32, 9)) - 0.5;
+            albedo += grain * 0.05;
+            // Limb darkening on the day side, earthshine on the night side.
+            let limb = 0.65 + 0.35 * nz;
+            let shade = day * limb * albedo;
+            let (r_, g_, b_) = (
+                (236.0 * shade + 30.0 * albedo).min(255.0),
+                (232.0 * shade + 32.0 * albedo).min(255.0),
+                (248.0 * shade + 72.0 * albedo).min(255.0),
+            );
+            let a = coverage;
+            // Opaque over the halo: the disc hides the stars behind it.
+            let under = 1.0 - a;
+            let p = *pixel;
+            let mix = |shift: u32, v: f32| {
+                (((p >> shift) & 0xff) as f32 * under + v * a).clamp(0.0, 255.0) as u32
+            };
+            *pixel = mix(24, 255.0) << 24 | mix(16, r_) << 16 | mix(8, g_) << 8 | mix(0, b_);
+        }
+    }
+    canvas
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +794,12 @@ mod tests {
         );
         assert_eq!(find("nope").id, "moon");
         assert_eq!(name("dusk"), "Dusk");
+        assert_eq!(name("saved:Beach day.png"), "Beach day");
+        assert!(is_dynamic("ridge") && is_dynamic("saved:x.png") && !is_dynamic("moon"));
+        // The dynamic ones show their layers: the moon's disc is lit.
+        let orbit = render("orbit", 300, 650);
+        let lit = orbit.pixels[(325 * 300 + 240) as usize];
+        assert!((lit >> 16 & 0xff) > 120, "{lit:06x}");
+        assert!(saved_thumbnail("saved:missing.png", 10, 10).is_none());
     }
 }
