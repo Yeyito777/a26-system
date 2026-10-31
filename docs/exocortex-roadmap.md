@@ -32,9 +32,12 @@ Sources, so nothing here needs re-deriving:
 2.77 px** (`src/ui.rs` uses the same). Every pt value from the iPhone CSS is
 converted with that factor and rounded; §3 gives the results, so engineers
 never convert themselves. Moon's status bar (124 px) sits above the app's
-window and its home gesture owns the bottom 170 px (`GESTURE_RESERVE`), so the
-iPhone's safe-area insets map to nothing at the top and to that reserve at
-the bottom.
+window and its home gesture owns the bottom 170 px (`GESTURE_RESERVE`) for
+drags; taps there still reach the app. So the iPhone's safe-area insets map
+to nothing at the top, and at the bottom to that reserve for what scrolls and
+to the iPhone's own 34 pt (94 px, `SAFE_BOTTOM`) for what stays put and is
+tapped (the composer, bars, the snackbar, the pill, sheets that fit;
+`docs/exocortex.md`, "The bottom").
 
 ## 1. Where the app is today
 
@@ -378,7 +381,7 @@ Spacing scale (4/8/12/16/20 pt): **S1 11, S2 22, S3 34, S4 44, S5 56.**
 | User bubble padding (y, x) / leading gap / rail | 25, 34 / 66 / 6 | 9, 12 / 24 / 2 pt |
 | Tool row padding (top, right, bottom, left) / rail | 34, 28, 34, 34 / 6 | 12, 10, 12, 12 pt |
 | Disclosure head min height / padding | 122 / 17 × 28 | 44 pt |
-| Composer side margin / gap above keyboard or gesture reserve | 34 / 22 | 12 / 8 pt |
+| Composer side margin / gap above keyboard or bottom inset (94) | 34 / 22 | 12 / 8 pt |
 | Island min height / radius / inner padding | 144 / 72 / 11 | 52 / 26 / 4 pt |
 | Composer button target / face | 122 / 94 (radius 47) | 44 / 34 pt |
 | Editor text inset left / vertical padding | 28 / 29 | 10 / 10.5 pt |
@@ -471,8 +474,8 @@ checked in select mode `row_checked`). Left x = 34 + 40·depth.
 - Empty: centred "No conversations" `T_ROW` SemiBold + New chat button.
   Loading: spinner + "Loading chats…" `T_NOTE` `muted`. Error: text +
   Retry. No search results: "No results" with a 111 px magnifier `muted`.
-- Connection pill when not ready (bottom centre, 44 above the gesture
-  reserve): `surface` 92 % fill, 2 px border60, spinner + "Connecting…"
+- Connection pill when not ready (bottom centre, 44 above the bottom
+  inset): `surface` 92 % fill, 2 px border60, spinner + "Connecting…"
   `T_CAPTION`.
 
 #### 3.6.5 Activity dot and badges
@@ -608,7 +611,7 @@ Tap: stop any fling, snap to the tail, follow on.
 
 - Wrap band: from the island top − 17 to the bottom, filled
   `app_background` (the iPhone's gradient becomes solid).
-- Island: x 34…1046, bottom = window height − 22 − (170 when the keyboard is
+- Island: x 34…1046, bottom = window height − 22 − (94 when the keyboard is
   down, 0 when up); height = max(144, lines·62 + 58 + 22); fill
   `surface_background`, 2 px `island_border` (`island_border_focused` while
   the keyboard is up for it), radius 72 (`fill_rrect` + `stroke_rrect`).
@@ -669,8 +672,8 @@ description `T_CAPTION` `text_dim`, warnings in `warning`.
   `search_background` / current hit outlined `accent`.
 - **Toast**: top centre at y 150, padding 22 × 39, fill `#090d35` 95 %,
   2 px border60, `T_CAPTION`; error variant `error` text + border; 3.5 s.
-- **Snackbar** (undo): above the composer or at the list bottom, full width
-  minus 68, fill `surface_background`, "Moved to trash" + "UNDO" `accent`
+- **Snackbar** (undo): 39 above the bottom inset (over select mode's bar),
+  full width minus 68, fill `surface_background`, "Moved to trash" + "UNDO" `accent`
   button; 6 s.
 
 #### 3.6.18 Inspector rows, segmented control, switch, buttons

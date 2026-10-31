@@ -645,7 +645,7 @@ mod tests {
             true,
         )));
         let (mut canvas, mut frame) = open(&mut model, &mut view, t0);
-        let menu = AnchoredMenu::place(anchor, 3, 1080.0, SIZE.1 as f32 - 170.0);
+        let menu = AnchoredMenu::place(anchor, 3, 1080.0, SIZE.1 as f32 - theme::SAFE_BOTTOM);
         for ms in (8..=200).step_by(8) {
             let now = t0 + Duration::from_millis(ms);
             let (next, damage) = step(&mut canvas, &mut model, &mut view, &frame, now);

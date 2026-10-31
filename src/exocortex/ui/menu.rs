@@ -245,7 +245,7 @@ impl Overlay for AnchoredMenu {
             self.opened = Some(cx.now);
         }
         let w = self.width(cx.width);
-        self.rect = Self::place_box(self.anchor, w, self.height(), cx.width, cx.bottom());
+        self.rect = Self::place_box(self.anchor, w, self.height(), cx.width, cx.safe_bottom());
     }
 
     fn draw_backdrop(&self, canvas: &mut Canvas, cx: &Cx) {

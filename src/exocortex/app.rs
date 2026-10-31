@@ -59,9 +59,6 @@ const HOLD_FOR_WINDOW: Duration = Duration::from_millis(110);
 const HOLD_FOR_BACKFILL: Duration = Duration::from_millis(60);
 /// At most this long is spent on queued X input before a frame is drawn.
 const INPUT_BUDGET: Duration = Duration::from_millis(6);
-/// Moon owns the bottom of the screen for its home gesture: touches there
-/// are its.
-const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
 
 struct Renderer {
     window: Window,
@@ -905,9 +902,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             };
             let now = Instant::now();
             renderer.presenter.note_event(&event);
-            // The height touches are judged against: with Moon's keyboard
-            // up the window ends above it (no home gesture there).
-            let touch_height = cx.height + if cx.view.keyboard { 400.0 } else { 0.0 };
             match event {
                 XEvent::Expose(event) if event.window == window && event.count == 0 => {
                     renderer.presenter.expose(&conn, 0)?;
@@ -973,11 +967,14 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                             event.root_y
                         );
                     }
+                    // Every press is the app's. Moon keeps a touch that
+                    // starts on its home gesture's area (the bottom 180 px)
+                    // and hands a tap there over when the finger lifts, as
+                    // a press and a release, to what is drawn there (the
+                    // composer's lower half, select mode's bar).
                     let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
-                    if y < touch_height - BOTTOM_GESTURE_RESERVE {
-                        for gesture in recognizer.down(x, y, now) {
-                            redraw |= cx.gesture(gesture, now);
-                        }
+                    for gesture in recognizer.down(x, y, now) {
+                        redraw |= cx.gesture(gesture, now);
                     }
                 }
                 XEvent::MotionNotify(event) if event.event == window => {
@@ -997,16 +994,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
                 XEvent::ButtonRelease(event) if event.event == window && event.detail == 1 => {
                     let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
-                    // Let go in Moon's gesture area: a drag ends, a press is
-                    // no tap.
-                    let gestures = if y < touch_height - BOTTOM_GESTURE_RESERVE
-                        || recognizer.dragging().is_some()
-                    {
-                        recognizer.up(x, y, now)
-                    } else {
-                        recognizer.cancel()
-                    };
-                    for gesture in gestures {
+                    for gesture in recognizer.up(x, y, now) {
                         redraw |= cx.gesture(gesture, now);
                     }
                 }
