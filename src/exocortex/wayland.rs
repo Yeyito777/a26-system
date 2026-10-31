@@ -762,6 +762,11 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                 if state.suspended != Some(suspended) {
                     state.suspended = Some(suspended);
                     state.events.push(Event::Shown(!suspended));
+                    // Back in front: no frame waits for a callback asked for
+                    // before it went (Moon answers only visible surfaces).
+                    if !suspended {
+                        state.frame_asked = None;
+                    }
                     if suspended && state.touch.take().is_some() {
                         state.events.push(Event::Cancel);
                     }
