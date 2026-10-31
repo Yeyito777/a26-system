@@ -72,6 +72,8 @@ struct XOutput {
     protocols: crate::WindowProtocols,
     key_map: KeyMap,
     presenter: Presenter,
+    /// Where the last motion or press was (a repeat is dropped).
+    last_motion: Option<(i16, i16)>,
 }
 
 impl XOutput {
@@ -90,6 +92,7 @@ impl XOutput {
             protocols,
             key_map,
             presenter,
+            last_motion: None,
         })
     }
 }
@@ -243,6 +246,7 @@ impl Renderer {
                         XEvent::ButtonPress(event)
                             if event.event == window && event.detail == 1 =>
                         {
+                            x.last_motion = Some((event.event_x, event.event_y));
                             DisplayEvent::Press(
                                 f32::from(event.event_x),
                                 f32::from(event.event_y),
@@ -250,7 +254,13 @@ impl Renderer {
                                 event_instant(event.time),
                             )
                         }
-                        XEvent::MotionNotify(event) if event.event == window => {
+                        // (Moon passes each touch report on twice: a motion to
+                        // where the finger already is says nothing.)
+                        XEvent::MotionNotify(event)
+                            if event.event == window
+                                && x.last_motion.replace((event.event_x, event.event_y))
+                                    != Some((event.event_x, event.event_y)) =>
+                        {
                             DisplayEvent::Motion(
                                 f32::from(event.event_x),
                                 f32::from(event.event_y),
@@ -937,15 +947,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let link = DaemonLink::spawn(proto::socket_path())?;
     let mut shell = ShellReader::spawn()?;
     let mut view = ViewState::new();
-    // The pages' drags follow the finger resampled at each frame and
-    // smoothed (finger.rs).
-    for scroll in [
-        &mut view.list_scroll,
-        &mut view.chat_scroll,
-        &mut view.settings_scroll,
-    ] {
-        scroll.smooth = true;
-    }
+    smooth_drags(&mut view, renderer.paced());
     // The chat's chips (E) float over the chat page under its header.
     view.overlays
         .push(Box::new(super::sheets::chips::ChatChips::default()));
@@ -1011,6 +1013,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     while running {
         if std::mem::take(&mut renderer.reopened) {
+            smooth_drags(&mut view, renderer.paced());
             // Back on X after Wayland failed: as at start.
             draw_frame(
                 &mut renderer,
@@ -1588,6 +1591,23 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let _ = x.conn.flush();
     }
     Ok(())
+}
+
+/// Whether the pages' drags draw the finger resampled at each frame and
+/// smoothed (finger.rs): where frames follow the panel (Wayland). On X a
+/// drag draws each report as it comes, as it always did: there touches come
+/// as Moon's XTEST events through the X server, and frames drawn on the
+/// app's own beat held them back in the server (the gate, X path: reports
+/// reached the app 5 ms late at p50 and 18 ms at p95 instead of 0.7 and 3,
+/// and the finger was drawn about 30 ms behind instead of 11 to 19).
+fn smooth_drags(view: &mut ViewState, on: bool) {
+    for scroll in [
+        &mut view.list_scroll,
+        &mut view.chat_scroll,
+        &mut view.settings_scroll,
+    ] {
+        scroll.smooth = on;
+    }
 }
 
 /// When an event with a CLOCK_MONOTONIC millisecond time (an X server time,

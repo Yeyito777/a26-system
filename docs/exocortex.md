@@ -414,16 +414,19 @@ what changes is how a frame reaches the panel and how input arrives:
 `EXOCORTEX_APP_PROFILE` also logs when each frame drawn for a finger row
 reached the panel (`presented at`, from wp_presentation).
 
-**Dragging** (any path): the list, the chat and Settings draw a drag from
+**Dragging** (on Wayland): the list, the chat and Settings draw a drag from
 the finger resampled at each frame's time and smoothed (`src/finger.rs`,
 used by `comms::Scroll` when its `smooth` is set). Each report keeps its own
-time (Moon's wl_touch time is when the X server read the touchscreen; on X,
-the event's), is put on the touchscreen's steady scan clock, and a frame
-shows where the finger was a moment before it is drawn (as long as reports
-lately take to arrive, 2 to 8 ms), with a 1€ filter that smooths slow
-movement and lets fast movement through. On the phone, without it, 45 % of
-a slow drag's frames showed no movement and 12-16 % of a faster one's moved
-twice as far as the next. `EXOCORTEX_APP_DRAG=lag=2,predict=8,min=5,beta=0.1,dcut=15`
+time (Moon's wl_touch time is when the X server read the touchscreen), is
+put on the touchscreen's steady scan clock, and a frame shows where the
+finger was a moment before it is drawn (as long as reports lately take to
+arrive, 2 to 8 ms), with a 1€ filter that smooths slow movement and lets
+fast movement through. On the phone, without it, 45 % of a slow drag's
+frames showed no movement and 12-16 % of a faster one's moved twice as far
+as the next. On X a drag draws each report as it comes, as before: the
+smoothed frames come on the app's own cadence, and in the X server they
+held up Moon's injected touches (the gate: the finger drawn about 30 ms
+behind instead of 11 to 19). `EXOCORTEX_APP_DRAG=lag=2,predict=8,min=5,beta=0.1,dcut=15`
 overrides its tuning (measuring).
 
 ## The code: who owns what, and the interfaces between

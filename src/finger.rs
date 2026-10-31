@@ -178,9 +178,14 @@ impl Follow {
     /// A report: the finger at `y` at `at` (the touchscreen's time), taken
     /// in at `arrived`.
     pub fn report(&mut self, at: Instant, y: f32, arrived: Instant) {
+        let t = self.ms(at).max(self.newest_at);
+        // The same report again (on X, Moon passes each one on twice, a
+        // tenth of a millisecond apart): not another scan.
+        if y == self.newest() && t - self.newest_at < 0.5 * self.clock.period {
+            return;
+        }
         let late = arrived.saturating_duration_since(at).as_secs_f64() * 1000.0;
         LATE.with(|mark| mark.set(late.min(50.0).max(mark.get() * LATE_FADE)));
-        let t = self.ms(at).max(self.newest_at);
         self.gap = t - self.newest_at;
         self.newest_at = t;
         let placed = self.clock.place(t);
@@ -451,6 +456,32 @@ mod tests {
                 );
             }
             assert_eq!(drawn, y, "{name}");
+        }
+    }
+
+    /// Reports that come twice (as Moon passes them on over X) are drawn
+    /// as if they came once.
+    #[test]
+    fn a_report_that_comes_twice_counts_once() {
+        let run = |twice: bool| {
+            let start = Instant::now();
+            let mut follow = Follow::new(start, 0.0);
+            let mut drawn = Vec::new();
+            for n in 1..80u32 {
+                let at = start + SCAN * n;
+                let y = (8.0 * n as f32).round();
+                follow.report(at, y, at);
+                if twice {
+                    let again = at + Duration::from_micros(100);
+                    follow.report(again, y, again);
+                }
+                drawn.push(follow.at(start + REFRESH * n + Duration::from_millis(3)));
+            }
+            drawn
+        };
+        let (once, twice) = (run(false), run(true));
+        for (a, b) in once.iter().zip(&twice).skip(20) {
+            assert!((a - b).abs() < 0.5, "{once:?}\n{twice:?}");
         }
     }
 
