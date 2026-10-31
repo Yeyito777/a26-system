@@ -88,6 +88,24 @@ pub struct Scroll {
     drag: Option<(f32, f32)>,
     samples: Vec<(Instant, f32)>,
     fling: Option<(Instant, f32, f32)>,
+    /// A drag is drawn from the finger resampled at each frame's time and
+    /// smoothed (`finger.rs`), set in `step`, rather than from each report
+    /// as it comes: the caller steps it every frame while it drags. Kept
+    /// across `reset`.
+    pub smooth: bool,
+    finger: Option<crate::finger::Follow>,
+}
+
+/// The offset a drag gives `raw` (start offset plus the finger's travel):
+/// past either end the list follows the finger at a third.
+fn rubber(raw: f32, max: f32) -> f32 {
+    if raw < 0.0 {
+        raw / 3.0
+    } else if raw > max {
+        max + (raw - max) / 3.0
+    } else {
+        raw
+    }
 }
 
 /// iOS's normal deceleration rate, per millisecond.
@@ -102,23 +120,20 @@ impl Scroll {
         self.drag = Some((y, self.offset));
         self.samples.clear();
         self.samples.push((now, y));
+        self.finger = self.smooth.then(|| crate::finger::Follow::new(now, y));
     }
 
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
     }
 
+    /// The finger at `y` at `now` (the report's time).
     pub fn moved(&mut self, y: f32, max: f32, now: Instant) {
         if let Some((start, from)) = self.drag {
-            let raw = from + start - y;
-            // Past either end the list follows the finger at a third.
-            self.offset = if raw < 0.0 {
-                raw / 3.0
-            } else if raw > max {
-                max + (raw - max) / 3.0
-            } else {
-                raw
-            };
+            match &mut self.finger {
+                Some(finger) => finger.report(now, y, Instant::now()),
+                None => self.offset = rubber(from + start - y, max),
+            }
             self.samples.push((now, y));
             self.samples
                 .retain(|(at, _)| now.saturating_duration_since(*at) < VELOCITY_WINDOW);
@@ -129,6 +144,8 @@ impl Scroll {
         if self.drag.take().is_none() {
             return;
         }
+        // Smoothed, the list stays where it is drawn: momentum starts there.
+        self.finger = None;
         // The speed at the release: over the last 100 ms up to it, the
         // finger resting where it last moved. Held still that long, a lift
         // is no fling.
@@ -161,9 +178,14 @@ impl Scroll {
         from + travel
     }
 
-    /// Advances the fling; returns true while it still moves. Overshoot
-    /// past an end eases back.
+    /// Advances the fling, or a smoothed drag to the frame at `now`;
+    /// returns true while either still moves. Overshoot past an end eases
+    /// back.
     pub fn step(&mut self, max: f32, now: Instant) -> bool {
+        if let (Some((start, from)), Some(finger)) = (self.drag, &mut self.finger) {
+            self.offset = rubber(from + start - finger.at(now), max);
+            return !finger.settled(now);
+        }
         let Some((started, _, velocity)) = self.fling else {
             return false;
         };
@@ -192,7 +214,17 @@ impl Scroll {
     }
 
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            smooth: self.smooth,
+            ..Self::default()
+        };
+    }
+
+    /// Where a drag draws the finger (a smoothed drag's resampled finger;
+    /// else its newest report): for measuring.
+    pub fn drawn_finger(&self) -> Option<f32> {
+        let (start, from) = self.drag?;
+        Some(start + from - self.offset)
     }
 
     /// Moves the content under the finger or fling by `delta` (content was

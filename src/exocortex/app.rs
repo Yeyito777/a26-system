@@ -108,10 +108,10 @@ enum DisplayEvent {
     Size(u16, u16),
     /// Mapped (in front) or not.
     Shown(bool),
-    /// A finger down; the last field is the screen row (profiling).
-    Press(f32, f32, i32),
-    Motion(f32, f32, i32),
-    Release(f32, f32),
+    /// A finger down, with the screen row (profiling) and the report's time.
+    Press(f32, f32, i32, Instant),
+    Motion(f32, f32, i32, Instant),
+    Release(f32, f32, Instant),
     /// Moon took the touch over (Wayland: its home gesture, the switcher).
     Cancel,
     Key(KeyInput),
@@ -247,6 +247,7 @@ impl Renderer {
                                 f32::from(event.event_x),
                                 f32::from(event.event_y),
                                 i32::from(event.root_y),
+                                event_instant(event.time),
                             )
                         }
                         XEvent::MotionNotify(event) if event.event == window => {
@@ -254,6 +255,7 @@ impl Renderer {
                                 f32::from(event.event_x),
                                 f32::from(event.event_y),
                                 i32::from(event.root_y),
+                                event_instant(event.time),
                             )
                         }
                         XEvent::ButtonRelease(event)
@@ -262,6 +264,7 @@ impl Renderer {
                             DisplayEvent::Release(
                                 f32::from(event.event_x),
                                 f32::from(event.event_y),
+                                event_instant(event.time),
                             )
                         }
                         XEvent::KeyPress(event) if event.event == window => {
@@ -291,13 +294,18 @@ impl Renderer {
                     events.push_back(match event {
                         wayland::Event::Size(width, height) => DisplayEvent::Size(width, height),
                         wayland::Event::Shown(shown) => DisplayEvent::Shown(shown),
-                        wayland::Event::Press(x, y) => {
-                            DisplayEvent::Press(x, y, (y + top).round() as i32)
+                        wayland::Event::Press(x, y, time) => {
+                            DisplayEvent::Press(x, y, (y + top).round() as i32, event_instant(time))
                         }
-                        wayland::Event::Motion(x, y) => {
-                            DisplayEvent::Motion(x, y, (y + top).round() as i32)
+                        wayland::Event::Motion(x, y, time) => DisplayEvent::Motion(
+                            x,
+                            y,
+                            (y + top).round() as i32,
+                            event_instant(time),
+                        ),
+                        wayland::Event::Release(x, y, time) => {
+                            DisplayEvent::Release(x, y, event_instant(time))
                         }
-                        wayland::Event::Release(x, y) => DisplayEvent::Release(x, y),
                         wayland::Event::Cancel => DisplayEvent::Cancel,
                         wayland::Event::Key(input) => DisplayEvent::Key(input),
                         wayland::Event::Close => DisplayEvent::Close,
@@ -929,6 +937,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let link = DaemonLink::spawn(proto::socket_path())?;
     let mut shell = ShellReader::spawn()?;
     let mut view = ViewState::new();
+    // The pages' drags follow the finger resampled at each frame and
+    // smoothed (finger.rs).
+    for scroll in [
+        &mut view.list_scroll,
+        &mut view.chat_scroll,
+        &mut view.settings_scroll,
+    ] {
+        scroll.smooth = true;
+    }
     // The chat's chips (E) float over the chat page under its header.
     view.overlays
         .push(Box::new(super::sheets::chips::ChatChips::default()));
@@ -1161,10 +1178,12 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                         cx.gesture(gesture, now);
                     }
                 }
-                DisplayEvent::Press(x, y, row) => {
+                DisplayEvent::Press(x, y, row, at) => {
                     if env_flag("EXOCORTEX_APP_PROFILE") {
                         eprintln!("exocortex: press at {:.3} y {row}", monotonic_ms());
                     }
+                    // The finger's own time: drags follow it by when it moved.
+                    let now = at;
                     // Every press is the app's. Moon keeps a touch that
                     // starts on its home gesture's area (the bottom 180 px)
                     // and hands a tap there over when the finger lifts, as
@@ -1174,16 +1193,22 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                         redraw |= cx.gesture(gesture, now);
                     }
                 }
-                DisplayEvent::Motion(x, y, row) => {
+                DisplayEvent::Motion(x, y, row, at) => {
                     finger = Some(row);
                     if env_flag("EXOCORTEX_APP_PROFILE") {
-                        eprintln!("exocortex: motion at {:.3} y {row}", monotonic_ms());
+                        eprintln!(
+                            "exocortex: motion at {:.3} y {row} reported {:.1} ms before",
+                            monotonic_ms(),
+                            now.saturating_duration_since(at).as_secs_f64() * 1000.0
+                        );
                     }
+                    let now = at;
                     for gesture in recognizer.moved(x, y, now) {
                         redraw |= cx.gesture(gesture, now);
                     }
                 }
-                DisplayEvent::Release(x, y) => {
+                DisplayEvent::Release(x, y, at) => {
+                    let now = at;
                     for gesture in recognizer.up(x, y, now) {
                         redraw |= cx.gesture(gesture, now);
                     }
@@ -1362,13 +1387,20 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // MapNotify draws what changed meanwhile.
         if (redraw || fling_frame || animating) && running && mapped && !holding && ready {
             let profile = env_flag("EXOCORTEX_APP_PROFILE");
+            // The finger as this frame draws it: a drag's resampled finger,
+            // else the newest report (profiling, the probe).
+            let drawn = [&view.chat_scroll, &view.list_scroll, &view.settings_scroll]
+                .into_iter()
+                .find_map(|scroll| scroll.drawn_finger())
+                .map(|y| (y + wayland::SCREEN_TOP).round() as i32)
+                .or(finger);
             if let Err(error) = draw_frame(
                 &mut renderer,
                 &mut model,
                 &mut view,
                 input.pressed.as_ref(),
                 now,
-                finger.filter(|_| profile),
+                drawn.filter(|_| profile),
             ) {
                 renderer.fall_back(error)?;
                 mapped = false;
@@ -1548,6 +1580,20 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let _ = x.conn.flush();
     }
     Ok(())
+}
+
+/// When an event with a CLOCK_MONOTONIC millisecond time (an X server time,
+/// a wl_touch time from Moon: when the touchscreen's report was read)
+/// happened; now, for a time that is not plausibly recent.
+fn event_instant(ms: u32) -> Instant {
+    let now = Instant::now();
+    let age = (monotonic_ms() as u64 as u32).wrapping_sub(ms);
+    if age < 1000 {
+        now.checked_sub(Duration::from_millis(u64::from(age)))
+            .unwrap_or(now)
+    } else {
+        now
+    }
 }
 
 /// CLOCK_MONOTONIC in milliseconds, to line profiles up with other
