@@ -39,3 +39,4 @@ pub mod toolcall;
 pub mod ui;
 pub mod view;
 pub mod viewer;
+pub mod wayland;
