@@ -1,11 +1,13 @@
-//! The Exocortex app's event loop (A): X input, the daemon link and Moon's
-//! state, one `poll(2)` for all of them. Touches become gestures
+//! The Exocortex app's event loop (A): the display's input (X, or Moon's
+//! Wayland server: `wayland.rs`), the daemon link and Moon's state, one
+//! `poll(2)` for all of them. Touches become gestures
 //! (`gesture.rs`), offered to the overlays first and then to the page; what
 //! the model asks for (overlays, haptics, the clipboard, the keyboard) is
 //! taken after every change; the kept files are written in the background.
 //! It draws only when something changed or animates (`Animator`), and never
 //! waits on the daemon: that is the link thread's job.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
@@ -16,6 +18,7 @@ use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
 use x11rb::protocol::xproto::{ConnectionExt as _, Window};
+use x11rb::rust_connection::RustConnection;
 
 use crate::control::{self, KeyboardPurpose, ShellInfo};
 use crate::gfx::Canvas;
@@ -38,6 +41,7 @@ use super::theme;
 use super::ui::overlay::Response;
 use super::ui::{self, Haptic};
 use super::view::{self, Frame, Hit, ScrollArea, ViewState, frame};
+use super::wayland::{self, Wayland};
 
 /// While in front, Moon's state (a tapped notification's target) is read
 /// this often.
@@ -63,44 +67,119 @@ const INPUT_BUDGET: Duration = Duration::from_millis(6);
 /// are its.
 const BOTTOM_GESTURE_RESERVE: f32 = 170.0;
 
-struct Renderer {
+/// The app's X window and what shows the canvas in it.
+struct XOutput {
+    conn: RustConnection,
     window: Window,
     depth: u8,
-    canvas: Canvas,
+    protocols: crate::WindowProtocols,
+    key_map: KeyMap,
     presenter: Presenter,
+}
+
+impl XOutput {
+    /// The window, not mapped yet (the first frame is drawn before).
+    fn open(width: u16, height: u16) -> Result<Self, Box<dyn Error>> {
+        let (conn, screen_number) = RustConnection::connect(None)?;
+        let screen = conn.setup().roots[screen_number].clone();
+        let (window, protocols) = crate::create_window(&conn, &screen, handoff::APP_ID)?;
+        let key_map = KeyMap::query(&conn)?;
+        let mut presenter = Presenter::create(&conn, window, screen.root_depth, width, height)?;
+        presenter.enable_shm(&conn);
+        Ok(Self {
+            conn,
+            window,
+            depth: screen.root_depth,
+            protocols,
+            key_map,
+            presenter,
+        })
+    }
+}
+
+/// Where frames go and input comes from: an X window, or Moon's Wayland
+/// server when Moon asks for it (`WAYLAND_DISPLAY`), whose frames reach
+/// moon-compositor without X's copies.
+enum Output {
+    X(Box<XOutput>),
+    Wayland(Box<Wayland>),
+}
+
+/// What the display reported, from X or Wayland alike (window pixels).
+#[derive(Debug, Clone, Copy)]
+enum DisplayEvent {
+    Size(u16, u16),
+    /// Mapped (in front) or not.
+    Shown(bool),
+    /// A finger down; the last field is the screen row (profiling).
+    Press(f32, f32, i32),
+    Motion(f32, f32, i32),
+    Release(f32, f32),
+    /// Moon took the touch over (Wayland: its home gesture, the switcher).
+    Cancel,
+    Key(KeyInput),
+    Close,
+}
+
+struct Renderer {
+    canvas: Canvas,
+    output: Output,
     /// What the last frame showed, so the next one draws only what changed.
     frame: Option<Frame>,
+    /// An X window opened in place of Wayland: its first frame, then map.
+    reopened: bool,
 }
 
 impl Renderer {
-    fn new<C: Connection>(
-        conn: &C,
-        window: Window,
-        depth: u8,
-        width: u16,
-        height: u16,
-    ) -> Result<Self, Box<dyn Error>> {
-        let mut presenter = Presenter::create(conn, window, depth, width, height)?;
-        presenter.enable_shm(conn);
+    /// Moon's Wayland server when it names one (and it works), else X.
+    fn open() -> Result<Self, Box<dyn Error>> {
+        if let Some(opened) = Wayland::connect(handoff::APP_ID) {
+            match opened {
+                Ok(wayland) => {
+                    let (width, height) = wayland.size();
+                    eprintln!("exocortex: on Wayland, {width}x{height}");
+                    return Ok(Self {
+                        canvas: Canvas::new(i32::from(width), i32::from(height)),
+                        output: Output::Wayland(Box::new(wayland)),
+                        frame: None,
+                        reopened: false,
+                    });
+                }
+                Err(error) => eprintln!("exocortex: Wayland unavailable ({error}); X instead"),
+            }
+        }
+        let (width, height) = (crate::REQUESTED_WIDTH, crate::REQUESTED_HEIGHT);
         Ok(Self {
-            window,
-            depth,
             canvas: Canvas::new(i32::from(width), i32::from(height)),
-            presenter,
+            output: Output::X(Box::new(XOutput::open(width, height)?)),
             frame: None,
+            reopened: false,
         })
     }
 
-    fn resize<C: Connection>(
-        &mut self,
-        conn: &C,
-        width: u16,
-        height: u16,
-    ) -> Result<(), Box<dyn Error>> {
-        let mut presenter = Presenter::create(conn, self.window, self.depth, width, height)?;
-        presenter.enable_shm(conn);
-        self.presenter.destroy(conn);
-        self.presenter = presenter;
+    /// The Wayland connection failed: the app goes on in an X window, with
+    /// everything it holds (drawn whole, then mapped). An X failure is the
+    /// app's end, as before.
+    fn fall_back(&mut self, error: Box<dyn Error>) -> Result<(), Box<dyn Error>> {
+        if let Output::X(_) = self.output {
+            return Err(error);
+        }
+        eprintln!("exocortex: Wayland failed ({error}); going on in X");
+        let (width, height) = (crate::REQUESTED_WIDTH, crate::REQUESTED_HEIGHT);
+        self.output = Output::X(Box::new(XOutput::open(width, height)?));
+        self.canvas = Canvas::new(i32::from(width), i32::from(height));
+        self.frame = None;
+        self.reopened = true;
+        Ok(())
+    }
+
+    fn resize(&mut self, width: u16, height: u16) -> Result<(), Box<dyn Error>> {
+        if let Output::X(x) = &mut self.output {
+            let mut presenter = Presenter::create(&x.conn, x.window, x.depth, width, height)?;
+            presenter.enable_shm(&x.conn);
+            x.presenter.destroy(&x.conn);
+            x.presenter = presenter;
+        }
         self.canvas = Canvas::new(i32::from(width), i32::from(height));
         self.frame = None;
         Ok(())
@@ -112,6 +191,124 @@ impl Renderer {
 
     fn height(&self) -> f32 {
         self.canvas.height as f32
+    }
+
+    /// Whether a frame may be drawn now: on Wayland once the last one is on
+    /// the panel (its frame callback), so frames follow the panel's refresh.
+    fn ready(&self) -> bool {
+        match &self.output {
+            Output::X(_) => true,
+            Output::Wayland(wayland) => wayland.ready(),
+        }
+    }
+
+    /// Frames are paced by the display (Wayland's frame callbacks), not by
+    /// the loop's own clock.
+    fn paced(&self) -> bool {
+        matches!(self.output, Output::Wayland(_))
+    }
+
+    /// Shows the window the first frame was drawn for: X maps it; Moon
+    /// shows a Wayland toplevel once it has content, and says so.
+    fn show(&mut self, events: &mut VecDeque<DisplayEvent>) -> Result<(), Box<dyn Error>> {
+        match &self.output {
+            Output::X(x) => {
+                x.conn.map_window(x.window)?;
+                x.conn.flush()?;
+            }
+            Output::Wayland(wayland) => events.push_back(DisplayEvent::Shown(wayland.shown())),
+        }
+        Ok(())
+    }
+
+    /// Reads what the display has queued, without waiting.
+    fn read(&mut self, events: &mut VecDeque<DisplayEvent>) -> Result<(), Box<dyn Error>> {
+        match &mut self.output {
+            Output::X(x) => {
+                let window = x.window;
+                while let Some(event) = x.conn.poll_for_event()? {
+                    x.presenter.note_event(&event);
+                    let event = match event {
+                        XEvent::Expose(event) if event.window == window && event.count == 0 => {
+                            x.presenter.expose(&x.conn, 0)?;
+                            x.conn.flush()?;
+                            continue;
+                        }
+                        XEvent::ConfigureNotify(event) if event.window == window => {
+                            DisplayEvent::Size(event.width, event.height)
+                        }
+                        XEvent::MapNotify(event) if event.window == window => {
+                            DisplayEvent::Shown(true)
+                        }
+                        XEvent::UnmapNotify(event) if event.window == window => {
+                            DisplayEvent::Shown(false)
+                        }
+                        XEvent::ButtonPress(event)
+                            if event.event == window && event.detail == 1 =>
+                        {
+                            DisplayEvent::Press(
+                                f32::from(event.event_x),
+                                f32::from(event.event_y),
+                                i32::from(event.root_y),
+                            )
+                        }
+                        XEvent::MotionNotify(event) if event.event == window => {
+                            DisplayEvent::Motion(
+                                f32::from(event.event_x),
+                                f32::from(event.event_y),
+                                i32::from(event.root_y),
+                            )
+                        }
+                        XEvent::ButtonRelease(event)
+                            if event.event == window && event.detail == 1 =>
+                        {
+                            DisplayEvent::Release(
+                                f32::from(event.event_x),
+                                f32::from(event.event_y),
+                            )
+                        }
+                        XEvent::KeyPress(event) if event.event == window => {
+                            match x.key_map.decode(event.detail, event.state) {
+                                Some(input) => DisplayEvent::Key(input),
+                                None => continue,
+                            }
+                        }
+                        XEvent::ClientMessage(event)
+                            if event.window == window
+                                && event.type_ == x.protocols.wm_protocols
+                                && event.data.as_data32()[0] == x.protocols.wm_delete_window =>
+                        {
+                            DisplayEvent::Close
+                        }
+                        XEvent::DestroyNotify(event) if event.window == window => {
+                            DisplayEvent::Close
+                        }
+                        _ => continue,
+                    };
+                    events.push_back(event);
+                }
+            }
+            Output::Wayland(wl) => {
+                let top = wayland::SCREEN_TOP;
+                for event in wl.events() {
+                    events.push_back(match event {
+                        wayland::Event::Size(width, height) => DisplayEvent::Size(width, height),
+                        wayland::Event::Shown(shown) => DisplayEvent::Shown(shown),
+                        wayland::Event::Press(x, y) => {
+                            DisplayEvent::Press(x, y, (y + top).round() as i32)
+                        }
+                        wayland::Event::Motion(x, y) => {
+                            DisplayEvent::Motion(x, y, (y + top).round() as i32)
+                        }
+                        wayland::Event::Release(x, y) => DisplayEvent::Release(x, y),
+                        wayland::Event::Cancel => DisplayEvent::Cancel,
+                        wayland::Event::Key(input) => DisplayEvent::Key(input),
+                        wayland::Event::Close => DisplayEvent::Close,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -731,17 +928,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     }
     ui::status_bar(&theme::status_bar());
 
-    let (conn, screen_number) = x11rb::rust_connection::RustConnection::connect(None)?;
-    let screen = &conn.setup().roots[screen_number];
-    let (window, protocols) = crate::create_window(&conn, screen, handoff::APP_ID)?;
-    let key_map = KeyMap::query(&conn)?;
-    let mut renderer = Renderer::new(
-        &conn,
-        window,
-        screen.root_depth,
-        crate::REQUESTED_WIDTH,
-        crate::REQUESTED_HEIGHT,
-    )?;
+    let mut renderer = Renderer::open()?;
     let link = DaemonLink::spawn(proto::socket_path())?;
     let mut shell = ShellReader::spawn()?;
     let mut view = ViewState::new();
@@ -749,7 +936,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     view.overlays
         .push(Box::new(super::sheets::chips::ChatChips::default()));
     let mut input = Input::default();
-    let mut recognizer = Recognizer::new(f32::from(crate::REQUESTED_WIDTH));
+    let mut recognizer = Recognizer::new(renderer.canvas.width as f32);
     let mut seen_target: Option<u64> = None;
     let mut shown: Option<Option<String>> = None;
     let mut mapped = false;
@@ -779,27 +966,48 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let mut hold_until: Option<Instant> = None;
     let mut held_for_backfill = false;
     // The finger's last screen row (profiling).
-    let mut finger: Option<i16> = None;
-    // An X event already read from the connection, not yet handled.
-    let mut queued_x: Option<XEvent> = None;
+    let mut finger: Option<i32> = None;
+    // What the display reported, not handled yet (the input budget).
+    let mut backlog: VecDeque<DisplayEvent> = VecDeque::new();
 
     view.take_ui(&mut model, Instant::now());
     // The first frame is drawn before the window maps (as the System app).
-    draw_frame(
-        &conn,
+    if let Err(error) = draw_frame(
         &mut renderer,
         &mut model,
         &mut view,
         input.pressed.as_ref(),
         Instant::now(),
-    )?;
+        None,
+    ) {
+        renderer.fall_back(error)?;
+        draw_frame(
+            &mut renderer,
+            &mut model,
+            &mut view,
+            input.pressed.as_ref(),
+            Instant::now(),
+            None,
+        )?;
+    }
     // When the next animation frame is wanted.
     let mut next_frame = view.animator.take();
-    conn.map_window(window)?;
-    conn.flush()?;
+    renderer.show(&mut backlog)?;
     shell.ask();
 
     while running {
+        if std::mem::take(&mut renderer.reopened) {
+            // Back on X after Wayland failed: as at start.
+            draw_frame(
+                &mut renderer,
+                &mut model,
+                &mut view,
+                input.pressed.as_ref(),
+                Instant::now(),
+                None,
+            )?;
+            renderer.show(&mut backlog)?;
+        }
         let now = Instant::now();
         let before_depth = page_depth(&model);
         let before_id = model.chat.id.clone();
@@ -888,44 +1096,38 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // X events, all that are queued (a motion only moves the scroll; the
-        // frame after shows the latest), within a budget so a flood of input
-        // can never hold frames off.
+        // The display's events, all that are queued (a motion only moves
+        // the scroll; the frame after shows the latest), within a budget so
+        // a flood of input can never hold frames off.
         let reading = Instant::now();
-        loop {
+        if let Err(error) = renderer.read(&mut backlog) {
+            renderer.fall_back(error)?;
+            mapped = false;
+            redraw = true;
+        }
+        while let Some(event) = backlog.pop_front() {
             if reading.elapsed() > INPUT_BUDGET {
+                backlog.push_front(event);
                 break;
             }
-            let event = match queued_x.take() {
-                Some(event) => event,
-                None => match conn.poll_for_event()? {
-                    Some(event) => event,
-                    None => break,
-                },
-            };
             let now = Instant::now();
-            renderer.presenter.note_event(&event);
             // The height touches are judged against: with Moon's keyboard
             // up the window ends above it (no home gesture there).
             let touch_height = cx.height + if cx.view.keyboard { 400.0 } else { 0.0 };
             match event {
-                XEvent::Expose(event) if event.window == window && event.count == 0 => {
-                    renderer.presenter.expose(&conn, 0)?;
-                    conn.flush()?;
-                }
-                XEvent::ConfigureNotify(event) if event.window == window => {
-                    if (event.width, event.height) != renderer.size() {
-                        renderer.resize(&conn, event.width, event.height)?;
+                DisplayEvent::Size(width, height) => {
+                    if (width, height) != renderer.size() {
+                        renderer.resize(width, height)?;
                         cx.height = renderer.height();
                         cx.width = renderer.canvas.width as f32;
                         recognizer.set_width(cx.width);
                         // Moon shrinks the window above its keyboard.
                         cx.view.keyboard =
-                            cx.input.keyboard && event.height < crate::REQUESTED_HEIGHT - 300;
+                            cx.input.keyboard && height < crate::REQUESTED_HEIGHT - 300;
                         redraw = true;
                     }
                 }
-                XEvent::MapNotify(event) if event.window == window => {
+                DisplayEvent::Shown(true) => {
                     mapped = true;
                     if env_flag("EXOCORTEX_APP_PROFILE") {
                         let hidden =
@@ -955,7 +1157,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     next_shell_poll = now + SHELL_POLL;
                     redraw = true;
                 }
-                XEvent::UnmapNotify(event) if event.window == window => {
+                DisplayEvent::Shown(false) => {
                     mapped = false;
                     if boost {
                         boost_ui_thread(false);
@@ -965,38 +1167,26 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                         cx.gesture(gesture, now);
                     }
                 }
-                XEvent::ButtonPress(event) if event.event == window && event.detail == 1 => {
+                DisplayEvent::Press(x, y, row) => {
                     if env_flag("EXOCORTEX_APP_PROFILE") {
-                        eprintln!(
-                            "exocortex: press at {:.3} y {}",
-                            monotonic_ms(),
-                            event.root_y
-                        );
+                        eprintln!("exocortex: press at {:.3} y {row}", monotonic_ms());
                     }
-                    let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
                     if y < touch_height - BOTTOM_GESTURE_RESERVE {
                         for gesture in recognizer.down(x, y, now) {
                             redraw |= cx.gesture(gesture, now);
                         }
                     }
                 }
-                XEvent::MotionNotify(event) if event.event == window => {
-                    finger = Some(event.root_y);
+                DisplayEvent::Motion(x, y, row) => {
+                    finger = Some(row);
                     if env_flag("EXOCORTEX_APP_PROFILE") {
-                        eprintln!(
-                            "exocortex: motion at {:.3} y {} time {}",
-                            monotonic_ms(),
-                            event.root_y,
-                            event.time
-                        );
+                        eprintln!("exocortex: motion at {:.3} y {row}", monotonic_ms());
                     }
-                    let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
                     for gesture in recognizer.moved(x, y, now) {
                         redraw |= cx.gesture(gesture, now);
                     }
                 }
-                XEvent::ButtonRelease(event) if event.event == window && event.detail == 1 => {
-                    let (x, y) = (f32::from(event.event_x), f32::from(event.event_y));
+                DisplayEvent::Release(x, y) => {
                     // Let go in Moon's gesture area: a drag ends, a press is
                     // no tap.
                     let gestures = if y < touch_height - BOTTOM_GESTURE_RESERVE
@@ -1010,20 +1200,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                         redraw |= cx.gesture(gesture, now);
                     }
                 }
-                XEvent::KeyPress(event) if event.event == window => {
-                    if let Some(input) = key_map.decode(event.detail, event.state) {
-                        redraw |= cx.key(input, now);
+                DisplayEvent::Cancel => {
+                    for gesture in recognizer.cancel() {
+                        redraw |= cx.gesture(gesture, now);
                     }
                 }
-                XEvent::ClientMessage(event)
-                    if event.window == window
-                        && event.type_ == protocols.wm_protocols
-                        && event.data.as_data32()[0] == protocols.wm_delete_window =>
-                {
-                    running = false;
-                }
-                XEvent::DestroyNotify(event) if event.window == window => running = false,
-                _ => {}
+                DisplayEvent::Key(input) => redraw |= cx.key(input, now),
+                DisplayEvent::Close => running = false,
             }
         }
         let now = Instant::now();
@@ -1140,8 +1323,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         // last frame was due whatever that frame took, so its steps stay
         // even (8 ms after each frame's end averaged 8.6 ms and beat against
         // the 120 Hz panel).
-        let fling_frame = flinging && fling_due.is_none_or(|due| now >= due);
-        if !flinging {
+        // On Wayland the panel paces them: a fling frame at every frame
+        // callback.
+        let paced = renderer.paced();
+        let fling_frame = flinging && (paced || fling_due.is_none_or(|due| now >= due));
+        if !flinging || paced {
             fling_due = None;
         } else if fling_frame {
             fling_due = Some(match fling_due {
@@ -1175,27 +1361,48 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
         // An animation's frame is due.
         let animating = next_frame.is_some_and(|at| now >= at);
+        // On Wayland the last frame must be on the panel first.
+        let ready = renderer.ready();
+        if let Output::Wayland(wayland) = &mut renderer.output
+            && let Err(error) = wayland.retry(&renderer.canvas)
+        {
+            renderer.fall_back(error)?;
+            mapped = false;
+            redraw = true;
+        }
         // Hidden (in the background, perhaps leased awake), nothing is drawn:
         // MapNotify draws what changed meanwhile.
-        if (redraw || fling_frame || animating) && running && mapped && !holding {
-            draw_frame(
-                &conn,
+        if (redraw || fling_frame || animating) && running && mapped && !holding && ready {
+            let profile = env_flag("EXOCORTEX_APP_PROFILE");
+            if let Err(error) = draw_frame(
                 &mut renderer,
                 &mut model,
                 &mut view,
                 input.pressed.as_ref(),
                 now,
-            )?;
+                finger.filter(|_| profile),
+            ) {
+                renderer.fall_back(error)?;
+                mapped = false;
+                redraw = true;
+                continue;
+            }
             next_frame = view.animator.take();
-            control::page_drawn(|| {
-                let _ = conn.get_input_focus().map(|cookie| cookie.reply());
+            control::page_drawn(|| match &mut renderer.output {
+                Output::X(x) => {
+                    let _ = x.conn.get_input_focus().map(|cookie| cookie.reply());
+                }
+                // Moon has the commit before it hears the page is drawn.
+                Output::Wayland(wayland) => {
+                    let _ = wayland.sync(Duration::from_millis(50));
+                }
             });
             redraw = false;
             if env_flag("EXOCORTEX_APP_PROFILE") {
                 eprintln!(
                     "exocortex: shown at {:.3} finger {}",
                     monotonic_ms(),
-                    finger.map_or(-1, i32::from)
+                    finger.unwrap_or(-1)
                 );
                 if !list_shown && model.sidebar.loaded {
                     list_shown = true;
@@ -1241,17 +1448,32 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // Sleep until X input, a daemon event, Moon's answer or a deadline.
+        // When frames flipped (Wayland's presentation feedback, profiling).
+        if let Output::Wayland(wayland) = &mut renderer.output {
+            for (at, row) in wayland.take_presented() {
+                eprintln!("exocortex: presented at {at:.3} finger {row}");
+            }
+        }
+
+        // Sleep until input, a daemon event, Moon's answer or a deadline.
         let mut deadline: Option<Instant> = None;
         let mut soonest = |at: Instant| deadline = Some(deadline.map_or(at, |d| d.min(at)));
+        // Waiting for the panel (Wayland): its frame callback wakes the
+        // loop, frames due meanwhile are drawn then.
+        let waiting = !renderer.ready();
         if mapped {
             soonest(next_shell_poll);
-            if let Some(at) = next_frame {
+            if let Some(at) = next_frame.filter(|_| !waiting) {
                 soonest(at);
             }
         }
-        if let Some(due) = fling_due {
+        if let Some(due) = fling_due.filter(|_| !waiting) {
             soonest(due);
+        }
+        if let Output::Wayland(wayland) = &renderer.output
+            && let Some(at) = wayland.ready_at()
+        {
+            soonest(at);
         }
         if dots {
             soonest(next_dots);
@@ -1272,17 +1494,43 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             soonest(at);
         }
         let mut timeout = deadline.map(|at| at.saturating_duration_since(Instant::now()));
-        conn.flush()?;
-        // An event the connection has already read (during a round trip, or
-        // left by the budget) does not make its socket readable: look first.
-        if queued_x.is_none() {
-            queued_x = conn.poll_for_event()?;
+        // Events the connection has already read (during a round trip, or
+        // left by the budget) do not make its socket readable: look first.
+        let mut guard = None;
+        let display_fd = match &mut renderer.output {
+            Output::X(x) => {
+                x.conn.flush()?;
+                x.conn.stream().as_raw_fd()
+            }
+            Output::Wayland(wayland) => {
+                match wayland.prepare() {
+                    Ok(read) => {
+                        if read.is_none() {
+                            timeout = Some(Duration::ZERO);
+                        }
+                        guard = read;
+                    }
+                    Err(error) => {
+                        renderer.fall_back(error)?;
+                        mapped = false;
+                        redraw = true;
+                        continue;
+                    }
+                }
+                wayland.fd()
+            }
+        };
+        if let Err(error) = renderer.read(&mut backlog) {
+            renderer.fall_back(error)?;
+            mapped = false;
+            redraw = true;
+            continue;
         }
-        if queued_x.is_some() {
+        if !backlog.is_empty() {
             timeout = Some(Duration::ZERO);
         }
         let mut fds = [
-            line::pollfd(conn.stream().as_raw_fd(), libc::POLLIN),
+            line::pollfd(display_fd, libc::POLLIN),
             line::pollfd(link.fd(), libc::POLLIN),
             line::pollfd(shell.waker.fd(), libc::POLLIN),
             line::pollfd(dictation::fd().unwrap_or(-1), libc::POLLIN),
@@ -1290,6 +1538,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         ];
         slept_at = Instant::now();
         line::poll(&mut fds, timeout)?;
+        if let Output::Wayland(wayland) = &mut renderer.output
+            && let Err(error) = wayland.after_poll(guard, fds[0].revents != 0)
+        {
+            renderer.fall_back(error)?;
+            mapped = false;
+            redraw = true;
+        }
     }
 
     if input.keyboard {
@@ -1300,8 +1555,10 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     store.take(&mut model.persist, Instant::now());
     store.flush_all();
     handoff::clear_view();
-    renderer.presenter.destroy(&conn);
-    let _ = conn.flush();
+    if let Output::X(x) = &renderer.output {
+        x.presenter.destroy(&x.conn);
+        let _ = x.conn.flush();
+    }
     Ok(())
 }
 
@@ -1336,13 +1593,15 @@ fn env_flag(name: &'static str) -> bool {
     }
 }
 
+/// Draws what changed and hands it to the display. `finger`: the screen row
+/// the frame is drawn for, when profiling (Wayland logs when it flips).
 fn draw_frame(
-    conn: &impl Connection,
     renderer: &mut Renderer,
     model: &mut Model,
     view: &mut ViewState,
     pressed: Option<&Hit>,
     now: Instant,
+    finger: Option<i32>,
 ) -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     let size = (renderer.canvas.width, renderer.canvas.height);
@@ -1365,18 +1624,35 @@ fn draw_frame(
     let (drawn, kind) = match update {
         // Nothing on screen changed.
         Some(damage) if damage.is_empty() => return Ok(()),
-        Some(damage) => {
-            if let Some((y0, y1, dy)) = damage.moved {
-                renderer.presenter.scroll(conn, y0, y1, dy)?;
+        Some(mut damage) => {
+            if probe(&mut renderer.canvas, finger) {
+                damage.areas.push((0, 0, 1, 1));
             }
             let drawn = started.elapsed();
-            renderer.presenter.present_rows_and_areas(
-                conn,
-                &renderer.canvas,
-                0,
-                &damage.rows,
-                &damage.areas,
-            )?;
+            match &mut renderer.output {
+                Output::X(x) => {
+                    if let Some((y0, y1, dy)) = damage.moved {
+                        x.presenter.scroll(&x.conn, y0, y1, dy)?;
+                    }
+                    x.presenter.present_rows_and_areas(
+                        &x.conn,
+                        &renderer.canvas,
+                        0,
+                        &damage.rows,
+                        &damage.areas,
+                    )?;
+                }
+                Output::Wayland(wayland) => {
+                    let width = renderer.canvas.width;
+                    let mut areas: Vec<wayland::Area> = damage.areas.clone();
+                    // A move changes every row it spans.
+                    if let Some((y0, y1, _)) = damage.moved {
+                        areas.push((0, y0, width, y1));
+                    }
+                    areas.extend(damage.rows.iter().map(|&(y0, y1)| (0, y0, width, y1)));
+                    wayland.present(&renderer.canvas, Some(&areas), finger)?;
+                }
+            }
             if env_flag("EXOCORTEX_APP_VERIFY") {
                 verify(&renderer.canvas, model, view, pressed, now, &damage);
             }
@@ -1385,12 +1661,22 @@ fn draw_frame(
         None => {
             frame::clear(&mut renderer.canvas);
             frame::draw_full(&mut renderer.canvas, model, view, pressed, now);
+            probe(&mut renderer.canvas, finger);
             let drawn = started.elapsed();
-            renderer.presenter.present(conn, &renderer.canvas, 0)?;
+            match &mut renderer.output {
+                Output::X(x) => {
+                    x.presenter.present(&x.conn, &renderer.canvas, 0)?;
+                }
+                Output::Wayland(wayland) => {
+                    wayland.present(&renderer.canvas, None, finger)?;
+                }
+            }
             (drawn, "full")
         }
     };
-    conn.flush()?;
+    if let Output::X(x) = &renderer.output {
+        x.conn.flush()?;
+    }
     if env_flag("EXOCORTEX_APP_PROFILE") {
         eprintln!(
             "exocortex: frame drawn in {:.2} ms (layout {:.2}), presented in {:.2} ms ({kind})",
@@ -1400,6 +1686,27 @@ fn draw_frame(
         );
     }
     Ok(())
+}
+
+/// Measurement (`EXOCORTEX_APP_PROBE`): the frame's top-left pixel says
+/// which frame it is and the finger row it was drawn for (a 12-bit count,
+/// then the row; 0xfff none), so a display that reports when that pixel
+/// changes (moon-compositor-sim's MOON_SIM_PROBE) times touch to panel.
+/// Returns whether it drew.
+fn probe(canvas: &mut Canvas, finger: Option<i32>) -> bool {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static ON: OnceLock<bool> = OnceLock::new();
+    static COUNT: AtomicU32 = AtomicU32::new(0);
+    if !*ON.get_or_init(|| std::env::var_os("EXOCORTEX_APP_PROBE").is_some()) {
+        return false;
+    }
+    let count = COUNT.fetch_add(1, Ordering::Relaxed).wrapping_add(1) & 0xfff;
+    let row = finger.map_or(0xfff, |row| row.clamp(0, 0xffe) as u32);
+    if let Some(pixel) = canvas.pixels.first_mut() {
+        *pixel = 0xff00_0000 | (count << 12) | row;
+    }
+    true
 }
 
 /// Development check (`EXOCORTEX_APP_VERIFY`): the partial frame equals a

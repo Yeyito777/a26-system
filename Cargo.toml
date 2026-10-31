@@ -17,6 +17,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"
 x11rb = { version = "0.14", features = ["shm"] }
+# The Exocortex app as a Wayland client of Moon (pure Rust, statically linked).
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
 zeroize = { version = "1.8", features = ["derive"] }
 
 [profile.release]

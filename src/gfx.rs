@@ -848,7 +848,7 @@ pub fn ease_spring(t: f32) -> f32 {
 
 /// `to.copy_from_slice(from)`, 16 pixels a step in vector registers (a
 /// slice copy is musl's `memcpy`, 16 bytes a step).
-fn copy_pixels(to: &mut [u32], from: &[u32]) {
+pub(crate) fn copy_pixels(to: &mut [u32], from: &[u32]) {
     let mut to = to.chunks_exact_mut(16);
     let mut from = from.chunks_exact(16);
     for (a, b) in (&mut to).zip(&mut from) {
