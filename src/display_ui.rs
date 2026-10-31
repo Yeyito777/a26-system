@@ -112,7 +112,8 @@ pub fn wallpaper_id(app: &AppModel, index: usize) -> Option<String> {
 /// Where the footer starts, unscrolled.
 fn footer_top(app: &AppModel) -> f32 {
     let last = thumbnail(item_count(app) - 1);
-    last.y + last.h + 70.0
+    // Under the last row's names.
+    last.y + last.h + 150.0
 }
 
 /// The picker's scroll range on a screen `height` tall.
