@@ -378,6 +378,42 @@ p95 21.9 ms, then 3.5 ms, p95 15 ms. Back in front after 30 s frozen while a
 reply streamed: first frame in 14 ms, caught up in 27 ms. The list on a cold
 start: about 95 ms after the process starts, both.
 
+## On Wayland: straight to the panel
+
+When Moon names the app in its `wayland_apps` setting (OSS-Phone-V1
+`docs/settings.md`, `notes/wayland/MOON-WAYLAND.md`) it starts the app with
+`WAYLAND_DISPLAY`, and the app is a Wayland client of Moon
+(`wayland.rs`, A) instead of an X window. Everything above works the same;
+what changes is how a frame reaches the panel and how input arrives:
+
+- **Frames.** The app draws into its canvas as on X, then copies what
+  changed into one of two dma-heap buffers (a third only while Moon holds
+  both; a memfd when there is no heap): what this frame drew, plus what the
+  frames that buffer missed drew. Moon hands the buffer to moon-compositor,
+  which shows it in place, on a display plane. On X the same frame went
+  through the app's shared memory, Xorg's pixmap, its window and Moon's X
+  mirror: three copies in Xorg and one more in the mirror.
+- **In step with the panel.** A frame is drawn only once the last one's
+  frame callback came: Moon answers it at the flip that showed that frame.
+  Input and changes in between are taken into the next frame, and a fling
+  draws a frame at every callback (on X it kept its own 8.33 ms cadence).
+  A callback that never comes holds frames back for 100 ms at most.
+- **Input.** Touches come from Moon as wl_touch (Moon forwards the touches
+  that are the app's; its home gesture cancels them), keys as wl_keyboard
+  keys of Moon's US map. The app asks for the keyboard, the status bar
+  colour, transitions, the clipboard and everything else over Moon's
+  control socket, as on X; `transition ready` follows a Wayland round trip,
+  so Moon has the new page first.
+- **Shown or not.** xdg-shell's `suspended` state is the X window's
+  unmapping: the app stops drawing and lowers its clamp, and comes back as
+  from a MapNotify.
+- **Falling back.** If Wayland cannot connect, or its connection fails
+  later (Moon restarted), the app opens its X window and goes on with
+  everything it holds. Moon starts an app that died on Wayland again on X.
+
+`EXOCORTEX_APP_PROFILE` also logs when each frame drawn for a finger row
+reached the panel (`presented at`, from wp_presentation).
+
 ## The code: who owns what, and the interfaces between
 
 The app is split along the work packages of `docs/exocortex-roadmap.md`
@@ -388,7 +424,8 @@ the interfaces below. Every file's header says whose it is.
 
 | `src/exocortex/` | Owner | What |
 | --- | --- | --- |
-| `app.rs` | A | the event loop: X input to gestures, overlays first, then the page; the link, Moon, the store, deadlines, frames |
+| `app.rs` | A | the event loop: X or Wayland input to gestures, overlays first, then the page; the link, Moon, the store, deadlines, frames |
+| `wayland.rs` | A | the app as a Wayland client of Moon: its toplevel, buffers, frame callbacks, touch and keys |
 | `gesture.rs`, `anim.rs` | A | the gesture recognizer; curves, tweens, pulses and the `Animator` |
 | `theme.rs` | A | palettes, composites, `mix()`, type tokens, metrics |
 | `store.rs`, `requests.rs`, `clipboard.rs` | A | kept files; request ids, owners and deadlines; copy and paste |
@@ -723,6 +760,9 @@ soon as it is.
 | `EXOCORTEX_APP_NO_BOOST` | unset | the app: no utilization clamp for its UI thread |
 | `EXOCORTEX_APP_VERIFY` | unset | the app: checks each partial frame against a full redraw (slow; development) |
 | `EXOCORTEX_APP_DATA` | `/var/lib/exocortex-app` | the app: its settings, UI state and drafts (`store.rs`) |
+| `WAYLAND_DISPLAY` | unset | the app: a Wayland client of Moon there (Moon sets it for the apps its `wayland_apps` setting names), else X |
+| `EXOCORTEX_APP_MEMFD` | unset | the app on Wayland: shared-memory buffers instead of dma-heap ones (testing) |
+| `EXOCORTEX_APP_PROBE` | unset | the app: each frame writes a 12-bit frame count and the finger row into its top-left pixel, for moon-compositor-sim's `MOON_SIM_PROBE` to time touch to panel (measurement) |
 
 The bridge logs connections and the conversations it notifies for (never
 their text) to stderr.
