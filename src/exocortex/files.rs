@@ -215,7 +215,7 @@ pub const NO_IMAGE: &str = "There is no image on the clipboard.";
 /// The clipboard's image from Moon, which keeps one (`clipboard get image`,
 /// docs/app-services.md: up to 8 MiB, so megabytes of base64 on a line);
 /// None when Moon does not answer (a development host): X's CLIPBOARD then.
-fn moon_image() -> Option<Result<Vec<u8>, String>> {
+pub(crate) fn moon_image() -> Option<Result<Vec<u8>, String>> {
     if cfg!(test) {
         return None;
     }
