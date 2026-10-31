@@ -426,10 +426,7 @@ fn draw_wallpaper(canvas: &mut Canvas, app: &AppModel, pressed: Option<Action>) 
     }
     let top = footer_top(app) - offset;
     let mut lines: Vec<(&str, u32)> = vec![
-        (
-            "Orbit, Ridge and your pictures move as you tilt.",
-            SECONDARY,
-        ),
+        ("Wallpapers marked with layers move as you tilt.", SECONDARY),
         ("Paste adds the picture you copied last.", SECONDARY),
         (
             "Black lights no pixels: it saves the most battery.",
