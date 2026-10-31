@@ -334,14 +334,6 @@ impl Wayland {
     ) -> Result<bool, Box<dyn Error>> {
         let (width, height) = (canvas.width, canvas.height);
         let all = (0, 0, width, height);
-        if self
-            .state
-            .slots
-            .iter()
-            .any(|slot| (slot.width, slot.height) != (width, height))
-        {
-            self.resize_slots(width, height)?;
-        }
         let areas: Vec<Area> = match damage {
             Some(areas) => areas
                 .iter()
@@ -361,7 +353,7 @@ impl Wayland {
         let index = match self.state.slots.iter().position(|slot| !slot.busy) {
             Some(index) => index,
             None if self.state.slots.len() < MAX_SLOTS => {
-                let slot = self.new_slot(width, height)?;
+                let slot = self.new_slot(width, height, self.state.slots.len())?;
                 self.state.slots.push(slot);
                 self.state.slots.len() - 1
             }
@@ -370,11 +362,22 @@ impl Wayland {
                 return Ok(false);
             }
         };
+        // Another size (Moon's keyboard came or went): this buffer, free
+        // now, is made again (in its memory when that is large enough); the
+        // ones Moon still holds wait until it lets them go.
+        if (
+            self.state.slots[index].width,
+            self.state.slots[index].height,
+        ) != (width, height)
+        {
+            self.refit_slot(index, width, height)?;
+        }
         let qh = self.queue.handle();
         let slot = &mut self.state.slots[index];
         let w = width as usize;
         for (x0, y0, x1, y1) in std::mem::take(&mut slot.behind) {
-            let (x0, x1) = (x0 as usize, x1 as usize);
+            let (x0, x1) = (x0.clamp(0, width) as usize, x1.clamp(0, width) as usize);
+            let (y0, y1) = (y0.clamp(0, height), y1.clamp(0, height));
             let pixels = slot.map.pixels();
             for row in y0 as usize..y1 as usize {
                 let from = &canvas.pixels[row * w + x0..row * w + x1];
@@ -444,16 +447,14 @@ impl Wayland {
         }
     }
 
-    /// Another size (Moon's keyboard came or went): new buffers, in the
-    /// memory the old ones had when it is large enough.
-    fn resize_slots(&mut self, width: i32, height: i32) -> Result<(), Box<dyn Error>> {
+    /// Slot `index` (not held by Moon) for a `width` x `height` canvas,
+    /// written whole next.
+    fn refit_slot(&mut self, index: usize, width: i32, height: i32) -> Result<(), Box<dyn Error>> {
         let stride_bytes = stride_bytes(width);
-        let qh = self.queue.handle();
-        for (index, slot) in self.state.slots.iter_mut().enumerate() {
-            if slot.stride * 4 != stride_bytes || stride_bytes * height as usize > slot.map.len {
-                continue;
-            }
-            slot.buffer.destroy();
+        let slot = &mut self.state.slots[index];
+        slot.buffer.destroy();
+        if slot.stride * 4 == stride_bytes && stride_bytes * height as usize <= slot.map.len {
+            let qh = self.queue.handle();
             slot.buffer = slot.pool.create_buffer(
                 0,
                 width,
@@ -464,25 +465,19 @@ impl Wayland {
                 index,
             );
             (slot.width, slot.height) = (width, height);
-            slot.busy = false;
             slot.behind = vec![(0, 0, width, height)];
+            return Ok(());
         }
-        // Too small: allocated again when needed.
-        if self
-            .state
-            .slots
-            .iter()
-            .any(|slot| (slot.width, slot.height) != (width, height))
-        {
-            self.drop_slots();
-        }
+        slot.pool.destroy();
+        let slot = self.new_slot(width, height, index)?;
+        self.state.slots[index] = slot;
         Ok(())
     }
 
     /// A buffer for a `width` x `height` canvas: a dma-heap buffer when the
     /// heap is there (Moon shows it in place), else a sealable memfd (Moon
     /// copies it to the compositor).
-    fn new_slot(&mut self, width: i32, height: i32) -> Result<Slot, Box<dyn Error>> {
+    fn new_slot(&mut self, width: i32, height: i32, index: usize) -> Result<Slot, Box<dyn Error>> {
         let stride_bytes = stride_bytes(width);
         let len = (stride_bytes * height as usize).div_ceil(4096) * 4096;
         let fd = match self.dmabuf.then(|| dma_heap_alloc(len)) {
@@ -498,7 +493,6 @@ impl Wayland {
         let qh = self.queue.handle();
         let shm = self.state.shm.as_ref().ok_or("no wl_shm")?;
         let pool = shm.create_pool(map.fd.as_fd(), len as i32, &qh, ());
-        let index = self.state.slots.len();
         let buffer = pool.create_buffer(
             0,
             width,
