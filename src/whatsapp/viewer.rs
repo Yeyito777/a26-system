@@ -4,6 +4,7 @@
 
 use std::time::Instant;
 
+use super::avatar;
 use super::icons::{self, Glyph};
 use super::{theme, time};
 use crate::exocortex::gesture::{Axis, Gesture};
@@ -115,7 +116,7 @@ pub fn draw(viewer: &mut Viewer, canvas: &mut Canvas, cx: &mut DrawCx) {
                 h: ih * scale,
             };
             if scale == 1.0 {
-                canvas.draw_image(&image, rect.x.round() as i32, rect.y.round() as i32, 1.0);
+                avatar::blit(canvas, &image, rect.x.round() as i32, rect.y.round() as i32);
             } else {
                 canvas.draw_image_scaled(&image, rect, 1.0);
             }

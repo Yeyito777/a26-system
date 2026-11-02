@@ -707,7 +707,7 @@ fn draw_media(
                 h: ih * scale,
             };
             if (scale - 1.0).abs() < 0.01 {
-                canvas.draw_image(&image, rect.x.round() as i32, rect.y.round() as i32, 1.0);
+                avatar::blit(canvas, &image, rect.x.round() as i32, rect.y.round() as i32);
             } else {
                 canvas.draw_image_scaled(&image, rect, 1.0);
             }

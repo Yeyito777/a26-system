@@ -563,6 +563,9 @@ impl App for WhatsApp {
         let Some(ask) = self.asked.remove(&id) else {
             return;
         };
+        // A chat's page shows in the chat only (a press on the list asks
+        // for one ahead: the list stays as drawn).
+        let elsewhere = !matches!(ask, Ask::History { .. });
         match (ask, result) {
             (Ask::List { folder }, Ok(value)) => {
                 if let Ok(chats) = serde_json::from_value::<Vec<Chat>>(value["chats"].clone()) {
@@ -663,7 +666,7 @@ impl App for WhatsApp {
             }
             _ => {}
         }
-        self.full |= self.page != Page::Chat;
+        self.full |= elsewhere && self.page != Page::Chat;
         cx.redraw();
     }
 
@@ -870,6 +873,16 @@ fn verify() -> bool {
 impl WhatsApp {
     fn verify(&mut self, canvas: &Canvas, cx: &mut DrawCx) {
         if !matches!(self.page, Page::List | Page::Archived | Page::Chat) {
+            return;
+        }
+        // A frame that put pictures off to the next (`avatar::arrived`'s
+        // budget) is not the whole frame yet.
+        let put_off = match self.page {
+            Page::List => self.list.backlog,
+            Page::Archived => self.archived.backlog,
+            _ => self.chat.as_ref().is_some_and(|chat| chat.backlog),
+        };
+        if put_off {
             return;
         }
         let mut whole = Canvas::new(canvas.width, canvas.height);
