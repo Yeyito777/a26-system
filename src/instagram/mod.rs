@@ -1,20 +1,21 @@
 //! The Instagram app: `a26-system --app instagram`, a client of the
-//! Instagram bridge (docs/social-protocol.md).
+//! Instagram bridge (docs/social-protocol.md), in Instagram's own dark look:
+//! Home (the stories tray and the feed), Messages, Search and Profile, with
+//! Activity behind Home's heart, and no Reels anywhere.
 
-use crate::social::starter::{self, Theme};
-
-const THEME: Theme = Theme {
-    name: "Instagram",
-    background: 0x000000,
-    bar: 0x000000,
-    text: 0xf5f5f5,
-    secondary: 0xa8a8a8,
-    accent: 0x0095f6,
-    mine: 0x3797f0,
-    theirs: 0x262626,
-    badge: 0xff3040,
-};
+mod activity;
+mod app;
+mod direct;
+mod feed;
+mod model;
+mod paint;
+mod post;
+mod profile;
+mod search;
+mod settings;
+mod stories;
+mod store;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    starter::run("instagram", THEME)
+    crate::social::shell::run(app::Instagram::new())
 }
