@@ -24,6 +24,7 @@ use super::layout::{self, DrawEnv, Hit, MessageLayout};
 use super::model::{Entry, Model};
 use super::theme::{self, dp};
 use super::ui;
+use crate::social::shell::Damage;
 
 /// Messages by one author closer than this share a group.
 const GROUP_MS: i64 = 7 * 60 * 1000;
@@ -48,8 +49,19 @@ pub struct Sheet {
     pub opened: Instant,
 }
 
+/// What the last frame showed, for drawing the next one in part.
+#[derive(Debug, Clone, PartialEq)]
+struct Frame {
+    offset: i32,
+    key: (u64, i32, i32, i32),
+    overlays: Vec<(i32, i32)>,
+}
+
 pub struct ChatView {
     pub chat: String,
+    last_frame: Option<Frame>,
+    /// Something besides the scroll offset changed: the next frame is drawn whole.
+    pub dirty: bool,
     pub scroll: Scroll,
     rows: Vec<Row>,
     heights: Vec<f32>,
@@ -69,6 +81,14 @@ pub struct ChatView {
     last_newest: Option<String>,
     pressed: Option<String>,
     client_seq: u64,
+}
+
+fn profile() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("SOCIAL_APP_PROFILE").is_some()
+            || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some()
+    })
 }
 
 pub fn channel_icon(
@@ -106,6 +126,8 @@ impl ChatView {
     pub fn new(chat: String) -> Self {
         Self {
             chat,
+            last_frame: None,
+            dirty: true,
             scroll: Scroll::default(),
             rows: Vec::new(),
             heights: Vec::new(),
@@ -210,6 +232,7 @@ impl ChatView {
         let old_total = self.total;
         let old_newest = self.last_newest.clone();
         self.built = key;
+        self.dirty = true;
         let entries = history.entries.clone();
         let mut rows = Vec::with_capacity(entries.len() + 8);
         if history.loaded && !history.more {
@@ -351,6 +374,7 @@ impl ChatView {
         if !self.focused {
             return false;
         }
+        self.dirty = true;
         match key {
             KeyInput::Character(c) => {
                 let mut buffer = [0; 4];
@@ -422,6 +446,22 @@ impl ChatView {
         height: f32,
         now: Instant,
     ) -> Vec<Action> {
+        if !matches!(
+            gesture,
+            Gesture::DragStart {
+                axis: Axis::Vertical,
+                ..
+            } | Gesture::Drag {
+                axis: Axis::Vertical,
+                ..
+            } | Gesture::DragEnd {
+                axis: Axis::Vertical,
+                ..
+            } | Gesture::Down { .. }
+                | Gesture::Lift { .. }
+        ) {
+            self.dirty = true;
+        }
         let mut actions = Vec::new();
         let max = self.max_offset(width, height);
         let composer_top = height - Self::bottom_inset(height) - self.composer_h(width);
@@ -731,163 +771,312 @@ impl ChatView {
     // ---------------------------------------------------------------------
     // Drawing
 
-    pub fn draw(&mut self, canvas: &mut Canvas, model: &Model, media: &mut Media, now: Instant) {
+    /// The pill over the bottom of the messages, if one shows: its words and box.
+    fn pill(&self, width: f32, height: f32, offset: f32) -> Option<(String, RectF)> {
+        if offset <= 1.0 {
+            return None;
+        }
+        let label = if self.new_below > 0 {
+            format!(
+                "{} new message{}",
+                self.new_below,
+                if self.new_below == 1 { "" } else { "s" }
+            )
+        } else if offset > self.visible(width, height) * 2.0 {
+            "Jump to Present".to_owned()
+        } else {
+            return None;
+        };
+        let composer_top = height - Self::bottom_inset(height) - self.composer_h(width);
+        let w = text::measure(&label, Weight::SemiBold, theme::T_SMALL) + dp(32.0);
+        Some((
+            label,
+            RectF {
+                x: (width - w) / 2.0,
+                y: composer_top - dp(48.0),
+                w,
+                h: dp(34.0),
+            },
+        ))
+    }
+
+    /// Row bands overlays cover inside the messages' area (redrawn when the rows move under them).
+    fn overlay_bands(
+        &self,
+        model: &Model,
+        width: f32,
+        height: f32,
+        offset: f32,
+    ) -> Vec<(i32, i32)> {
+        let mut bands = Vec::new();
+        if let Some((_, rect)) = self.pill(width, height, offset) {
+            bands.push((
+                (rect.y - dp(12.0)).floor() as i32,
+                (rect.y + rect.h + dp(12.0)).ceil() as i32,
+            ));
+        }
+        if model
+            .histories
+            .get(&self.chat)
+            .is_some_and(|h| h.loading_older)
+        {
+            let top = Self::content_top();
+            bands.push((top as i32, (top + dp(44.0)) as i32));
+        }
+        bands
+    }
+
+    /// Draws the frame. While only the messages scrolled since the last
+    /// one, they are moved and only what came into view (and what sits
+    /// under an overlay) is drawn: the damage says so.
+    pub fn draw(
+        &mut self,
+        canvas: &mut Canvas,
+        model: &Model,
+        media: &mut Media,
+        now: Instant,
+        full: bool,
+    ) -> Option<Damage> {
         let (width, height) = (canvas.width as f32, canvas.height as f32);
-        canvas.fill_rect(0, 0, width as i32, height as i32, theme::CHAT, 1.0);
-        let offset = self.scroll.value(now);
-        let bottom = self.content_bottom(width, height);
+        let offset = self.scroll.value(now).round();
         let top = Self::content_top();
-        canvas.set_clip(0, top as i32, width as i32, (bottom + dp(14.0)) as i32);
-        let history = model.histories.get(&self.chat);
-        if let Some(history) = history {
-            let entries = &history.entries;
-            for i in (0..self.rows.len()).rev() {
-                let row_bottom = bottom - (self.bottoms[i] - offset);
-                let row_top = row_bottom - self.heights[i];
-                if row_top > bottom + dp(14.0) {
-                    continue;
-                }
-                if row_bottom < top {
-                    break;
-                }
-                match &self.rows[i] {
-                    Row::Start => self.draw_start(canvas, model, row_top, width),
-                    Row::Day(label) => {
-                        let cy = row_top + self.heights[i] / 2.0;
-                        let w = text::measure(label, Weight::SemiBold, theme::T_TINY);
-                        let line = 0x3f4147;
-                        canvas.fill_rect(
-                            theme::MARGIN as i32,
-                            cy as i32,
-                            ((width - w) / 2.0 - dp(8.0) - theme::MARGIN) as i32,
-                            2,
-                            line,
-                            1.0,
-                        );
-                        canvas.fill_rect(
-                            ((width + w) / 2.0 + dp(8.0)) as i32,
-                            cy as i32,
-                            ((width - w) / 2.0 - dp(8.0) - theme::MARGIN) as i32,
-                            2,
-                            line,
-                            1.0,
-                        );
-                        text::draw_centered(
-                            canvas,
-                            label,
-                            width / 2.0,
-                            text::centered_baseline(cy, Weight::SemiBold, theme::T_TINY),
-                            Weight::SemiBold,
-                            theme::T_TINY,
-                            theme::MUTED,
-                            1.0,
-                        );
-                    }
-                    Row::Message { index, header } => {
-                        let Some(entry) = entries.get(*index) else {
-                            continue;
-                        };
-                        let Some((_, _, _, layout)) = self.layouts.get(&entry.message.id).cloned()
-                        else {
-                            continue;
-                        };
-                        let pad = if *header { dp(16.0) } else { dp(2.0) };
-                        self.draw_message(
-                            canvas,
-                            entry,
-                            &layout,
-                            row_top,
-                            pad,
-                            self.heights[i],
-                            media,
-                            now,
-                            width,
-                        );
+        let bottom = self.content_bottom(width, height).round();
+        let (top_i, bottom_i) = (top as i32, bottom as i32);
+        let revision = model.histories.get(&self.chat).map_or(0, |h| h.revision);
+        let key = (revision, canvas.width, canvas.height, bottom_i);
+        let overlays = self.overlay_bands(model, width, height, offset);
+        if let Some(last) = &self.last_frame
+            && !full
+            && !self.dirty
+            && self.sheet.is_none()
+            && last.key == key
+            && !ui::misses_ready(media)
+        {
+            let dy = offset as i32 - last.offset;
+            if dy == 0 && last.overlays == overlays {
+                return Some(Damage::default());
+            }
+            if dy.abs() < (bottom_i - top_i) / 2 {
+                canvas.move_rows(top_i, bottom_i, dy);
+                let exposed = if dy > 0 {
+                    (top_i, top_i + dy)
+                } else {
+                    (bottom_i + dy, bottom_i)
+                };
+                let mut bands: Vec<(i32, i32)> = std::iter::once(exposed)
+                    .chain(last.overlays.iter().copied())
+                    .chain(overlays.iter().copied())
+                    .filter(|band| band.1 > band.0)
+                    .collect();
+                bands.sort();
+                let mut merged: Vec<(i32, i32)> = Vec::new();
+                for band in bands {
+                    match merged.last_mut() {
+                        Some(last) if band.0 <= last.1 => last.1 = last.1.max(band.1),
+                        _ => merged.push(band),
                     }
                 }
-            }
-            if !history.loaded {
-                text::draw_centered(
-                    canvas,
-                    "Loading messages…",
-                    width / 2.0,
-                    (top + bottom) / 2.0,
-                    Weight::Medium,
-                    theme::T_SMALL,
-                    theme::MUTED,
-                    1.0,
-                );
-            } else if history.loading_older && offset > self.max_offset(width, height) - dp(60.0) {
-                text::draw_centered(
-                    canvas,
-                    "Loading…",
-                    width / 2.0,
-                    top + dp(24.0),
-                    Weight::Medium,
-                    theme::T_SMALL,
-                    theme::MUTED,
-                    1.0,
-                );
-            }
-            if let Some(error) = &history.error
-                && history.entries.is_empty()
-            {
-                text::draw_centered(
-                    canvas,
-                    &ui::fit(error, Weight::Medium, theme::T_SMALL, width - dp(40.0)),
-                    width / 2.0,
-                    (top + bottom) / 2.0 + dp(30.0),
-                    Weight::Medium,
-                    theme::T_SMALL,
-                    theme::MUTED,
-                    1.0,
-                );
+                for &(y0, y1) in &merged {
+                    let (c0, c1) = (y0.max(top_i), y1.min(bottom_i));
+                    if c1 > c0 {
+                        canvas.set_clip(0, c0, canvas.width, c1);
+                        canvas.fill_rect(0, c0, canvas.width, c1 - c0, theme::CHAT, 1.0);
+                        self.draw_rows(canvas, model, media, now, offset, top, bottom, width);
+                    }
+                    canvas.set_clip(0, y0, canvas.width, y1);
+                    self.draw_overlays(canvas, model, width, height, offset);
+                }
+                canvas.reset_clip();
+                if profile() {
+                    eprintln!(
+                        "discord: chat moved {dy} redrew {} rows",
+                        merged.iter().map(|b| b.1 - b.0).sum::<i32>()
+                    );
+                }
+                self.last_frame = Some(Frame {
+                    offset: offset as i32,
+                    key,
+                    overlays,
+                });
+                return Some(Damage {
+                    moved: Some((top_i, bottom_i, dy)),
+                    rows: merged,
+                });
             }
         }
+        // The whole frame.
+        if profile() {
+            eprintln!("discord: chat whole");
+        }
+        ui::clear_misses();
+        self.dirty = false;
+        canvas.fill_rect(0, 0, width as i32, height as i32, theme::CHAT, 1.0);
+        canvas.set_clip(0, top_i, canvas.width, bottom_i);
+        self.draw_rows(canvas, model, media, now, offset, top, bottom, width);
         canvas.reset_clip();
+        self.draw_overlays(canvas, model, width, height, offset);
         self.draw_header(canvas, model, media, width, now);
         self.draw_composer(canvas, model, width, height, now);
-        if offset > 1.0 {
-            let composer_top = height - Self::bottom_inset(height) - self.composer_h(width);
-            let label = if self.new_below > 0 {
-                format!(
-                    "{} new message{}",
-                    self.new_below,
-                    if self.new_below == 1 { "" } else { "s" }
-                )
-            } else if offset > self.visible(width, height) * 2.0 {
-                "Jump to Present".to_owned()
-            } else {
-                String::new()
-            };
-            if !label.is_empty() {
-                let w = text::measure(&label, Weight::SemiBold, theme::T_SMALL) + dp(32.0);
-                let rect = RectF {
-                    x: (width - w) / 2.0,
-                    y: composer_top - dp(48.0),
-                    w,
-                    h: dp(34.0),
-                };
-                canvas.shadow_rrect(rect, dp(17.0), dp(10.0), 0x000000, 0.35);
-                canvas.fill_rrect(rect, dp(17.0), theme::BLURPLE, 1.0);
-                text::draw_centered(
-                    canvas,
-                    &label,
-                    width / 2.0,
-                    text::centered_baseline(
-                        rect.y + rect.h / 2.0,
-                        Weight::SemiBold,
-                        theme::T_SMALL,
-                    ),
-                    Weight::SemiBold,
-                    theme::T_SMALL,
-                    theme::WHITE,
-                    1.0,
-                );
-            }
-        }
         if self.sheet.is_some() {
             self.draw_sheet(canvas, model, media, width, height, now);
+        }
+        self.last_frame = Some(Frame {
+            offset: offset as i32,
+            key,
+            overlays,
+        });
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_rows(
+        &self,
+        canvas: &mut Canvas,
+        model: &Model,
+        media: &mut Media,
+        now: Instant,
+        offset: f32,
+        top: f32,
+        bottom: f32,
+        width: f32,
+    ) {
+        let Some(history) = model.histories.get(&self.chat) else {
+            return;
+        };
+        let (clip_top, clip_bottom) = (canvas.clip().1 as f32, canvas.clip().3 as f32);
+        let entries = &history.entries;
+        for i in (0..self.rows.len()).rev() {
+            let row_bottom = bottom - (self.bottoms[i] - offset);
+            let row_top = row_bottom - self.heights[i];
+            if row_top > clip_bottom {
+                continue;
+            }
+            if row_bottom < clip_top {
+                break;
+            }
+            match &self.rows[i] {
+                Row::Start => self.draw_start(canvas, model, row_top, width),
+                Row::Day(label) => {
+                    let cy = row_top + self.heights[i] / 2.0;
+                    let w = text::measure(label, Weight::SemiBold, theme::T_TINY);
+                    let line = 0x3f4147;
+                    let side = ((width - w) / 2.0 - dp(8.0) - theme::MARGIN) as i32;
+                    canvas.fill_rect(theme::MARGIN as i32, cy as i32, side, 2, line, 1.0);
+                    canvas.fill_rect(
+                        ((width + w) / 2.0 + dp(8.0)) as i32,
+                        cy as i32,
+                        side,
+                        2,
+                        line,
+                        1.0,
+                    );
+                    text::draw_centered(
+                        canvas,
+                        label,
+                        width / 2.0,
+                        text::centered_baseline(cy, Weight::SemiBold, theme::T_TINY),
+                        Weight::SemiBold,
+                        theme::T_TINY,
+                        theme::MUTED,
+                        1.0,
+                    );
+                }
+                Row::Message { index, header } => {
+                    let Some(entry) = entries.get(*index) else {
+                        continue;
+                    };
+                    let Some((_, _, _, layout)) = self.layouts.get(&entry.message.id) else {
+                        continue;
+                    };
+                    let pad = if *header { dp(16.0) } else { dp(2.0) };
+                    let layout = layout.clone();
+                    self.draw_message(
+                        canvas,
+                        entry,
+                        &layout,
+                        row_top,
+                        pad,
+                        self.heights[i],
+                        media,
+                        now,
+                        width,
+                    );
+                }
+            }
+        }
+        if !history.loaded {
+            text::draw_centered(
+                canvas,
+                "Loading messages…",
+                width / 2.0,
+                (top + bottom) / 2.0,
+                Weight::Medium,
+                theme::T_SMALL,
+                theme::MUTED,
+                1.0,
+            );
+        }
+        if let Some(error) = &history.error
+            && history.entries.is_empty()
+        {
+            text::draw_centered(
+                canvas,
+                &ui::fit(error, Weight::Medium, theme::T_SMALL, width - dp(40.0)),
+                width / 2.0,
+                (top + bottom) / 2.0 + dp(30.0),
+                Weight::Medium,
+                theme::T_SMALL,
+                theme::MUTED,
+                1.0,
+            );
+        }
+    }
+
+    fn draw_overlays(
+        &self,
+        canvas: &mut Canvas,
+        model: &Model,
+        width: f32,
+        height: f32,
+        offset: f32,
+    ) {
+        if model
+            .histories
+            .get(&self.chat)
+            .is_some_and(|h| h.loading_older)
+        {
+            let top = Self::content_top();
+            let rect = RectF {
+                x: width / 2.0 - dp(50.0),
+                y: top + dp(8.0),
+                w: dp(100.0),
+                h: dp(28.0),
+            };
+            canvas.fill_rrect(rect, dp(14.0), theme::LIST, 1.0);
+            text::draw_centered(
+                canvas,
+                "Loading…",
+                width / 2.0,
+                text::centered_baseline(rect.y + rect.h / 2.0, Weight::Medium, theme::T_SMALL),
+                Weight::Medium,
+                theme::T_SMALL,
+                theme::MUTED,
+                1.0,
+            );
+        }
+        if let Some((label, rect)) = self.pill(width, height, offset) {
+            canvas.shadow_rrect(rect, dp(17.0), dp(10.0), 0x000000, 0.35);
+            canvas.fill_rrect(rect, dp(17.0), theme::BLURPLE, 1.0);
+            text::draw_centered(
+                canvas,
+                &label,
+                width / 2.0,
+                text::centered_baseline(rect.y + rect.h / 2.0, Weight::SemiBold, theme::T_SMALL),
+                Weight::SemiBold,
+                theme::T_SMALL,
+                theme::WHITE,
+                1.0,
+            );
         }
     }
 

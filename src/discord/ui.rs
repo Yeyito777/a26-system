@@ -32,10 +32,47 @@ struct Shaped {
 }
 
 thread_local! {
+    /// Pictures asked for and not ready, since the last full frame.
+    static MISSES: RefCell<Vec<(String, u32, u32, Fit)>> = const { RefCell::new(Vec::new()) };
     static SHAPED: RefCell<HashMap<ShapeKey, Shaped>> = RefCell::new(HashMap::new());
     static CORNERS: RefCell<HashMap<u32, Rc<[Vec<u8>; 4]>>> = RefCell::new(HashMap::new());
     static ITALIC: RefCell<HashMap<(String, u8, u32), Rc<(i32, i32, i32, Vec<u8>)>>> = RefCell::new(HashMap::new());
     static MASKS: RefCell<HashMap<(u8, u32), Rc<(i32, i32, i32, i32, Vec<u8>)>>> = RefCell::new(HashMap::new());
+}
+
+/// `Media::get`, remembering what was not ready (a frame drawn in part
+/// must be drawn whole once one of those comes).
+pub fn get(
+    media: &mut Media,
+    reference: &str,
+    width: u32,
+    height: u32,
+    fit: Fit,
+    now: Instant,
+) -> Option<Rc<Image>> {
+    let got = media.get(reference, width, height, fit, now);
+    if got.is_none() && !reference.is_empty() && width > 0 && height > 0 {
+        MISSES.with(|cell| {
+            let mut misses = cell.borrow_mut();
+            if misses.len() < 512 {
+                misses.push((reference.to_owned(), width.min(4096), height.min(4096), fit));
+            }
+        });
+    }
+    got
+}
+
+/// Has a picture missed since `clear_misses` come?
+pub fn misses_ready(media: &Media) -> bool {
+    MISSES.with(|cell| {
+        cell.borrow()
+            .iter()
+            .any(|(reference, w, h, fit)| media.peek(reference, *w, *h, *fit).is_some())
+    })
+}
+
+pub fn clear_misses() {
+    MISSES.with(|cell| cell.borrow_mut().clear());
 }
 
 /// A picture `size` px square, cut to a rounded square of `radius` (half
@@ -48,7 +85,7 @@ pub fn shaped(
     now: Instant,
 ) -> Option<Rc<Image>> {
     let px = size.round().max(1.0) as u32;
-    let source = media.get(&picture.reference, px, px, Fit::Cover, now)?;
+    let source = get(media, &picture.reference, px, px, Fit::Cover, now)?;
     let key = ShapeKey {
         reference: picture.reference.clone(),
         size: px,
@@ -668,4 +705,66 @@ pub fn file_size(bytes: u64) -> String {
 /// `fg` laid over `background` at `amount` (a tint).
 pub fn shade(fg: Rgb, background: Rgb, amount: f32) -> Rgb {
     crate::gfx::mix(background, fg, amount)
+}
+
+/// Drawing a scrolled list in part: while only its offset changed since
+/// the last frame, its rows are moved and only the band that came into
+/// view is drawn (`social::shell::Damage`).
+#[derive(Default)]
+pub struct Partial {
+    last: Option<(i32, u64)>,
+    /// Something besides the offset changed: the next frame is whole.
+    pub dirty: bool,
+}
+
+impl Partial {
+    /// How far to move the rows `y0..y1` for a list now at `offset`
+    /// (Some(0): nothing changed), or None to draw the frame whole.
+    pub fn plan(
+        &mut self,
+        offset: i32,
+        key: u64,
+        full: bool,
+        media: &Media,
+        span: i32,
+    ) -> Option<i32> {
+        let (last, last_key) = self.last?;
+        if full || self.dirty || last_key != key || misses_ready(media) {
+            return None;
+        }
+        let dy = last - offset;
+        (dy.abs() < span / 2).then_some(dy)
+    }
+
+    pub fn drawn(&mut self, offset: i32, key: u64, whole: bool) {
+        self.last = Some((offset, key));
+        if whole {
+            self.dirty = false;
+        }
+    }
+}
+
+/// Moves rows `y0..y1` by `dy`, then draws the band that came into view
+/// with `draw` (clipped to it); the damage for the shell.
+pub fn scroll_rows(
+    canvas: &mut Canvas,
+    y0: i32,
+    y1: i32,
+    dy: i32,
+    background: Rgb,
+    draw: impl FnOnce(&mut Canvas),
+) -> crate::social::shell::Damage {
+    if dy == 0 {
+        return crate::social::shell::Damage::default();
+    }
+    canvas.move_rows(y0, y1, dy);
+    let band = if dy > 0 { (y0, y0 + dy) } else { (y1 + dy, y1) };
+    canvas.set_clip(0, band.0, canvas.width, band.1);
+    canvas.fill_rect(0, band.0, canvas.width, band.1 - band.0, background, 1.0);
+    draw(canvas);
+    canvas.reset_clip();
+    crate::social::shell::Damage {
+        moved: Some((y0, y1, dy)),
+        rows: vec![band],
+    }
 }

@@ -72,8 +72,8 @@ pub const L_CODE: f32 = 52.0;
 
 // ----- Metrics (px) ----------------------------------------------------------
 
-/// Moon's status bar over the window's top.
-pub const TOP: f32 = 124.0;
+/// Where the page starts: Moon places app windows under its status bar.
+pub const TOP: f32 = 0.0;
 /// What stays clear at the bottom for Moon's home gesture (taps still come).
 pub const SAFE_BOTTOM: f32 = 94.0;
 /// Drags that start this close to the bottom are Moon's.

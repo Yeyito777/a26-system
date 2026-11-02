@@ -11,6 +11,7 @@ use crate::exocortex::ui::icons::{self, Icon};
 use crate::gfx::{Canvas, RectF};
 use crate::social::media::Media;
 use crate::social::proto::Chat;
+use crate::social::shell::Damage;
 use crate::text::{self, Weight};
 
 use super::Action;
@@ -86,6 +87,7 @@ const DM_HEADER: f32 = dp(64.0);
 
 pub struct MessagesView {
     pub list: ListScroll,
+    pub partial: ui::Partial,
     rows: Vec<String>,
     key: u64,
 }
@@ -98,6 +100,7 @@ impl MessagesView {
     pub fn new() -> Self {
         Self {
             list: ListScroll::new(),
+            partial: ui::Partial::default(),
             rows: Vec::new(),
             key: u64::MAX,
         }
@@ -162,13 +165,47 @@ impl MessagesView {
         actions
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas, model: &Model, media: &mut Media, now: Instant) {
+    /// Draws the tab's list (in part while it only scrolled).
+    pub fn draw(
+        &mut self,
+        canvas: &mut Canvas,
+        model: &Model,
+        media: &mut Media,
+        now: Instant,
+        full: bool,
+    ) -> Option<Damage> {
         self.sync(model);
+        let height = canvas.height as f32;
+        let (y0, y1) = (theme::TOP as i32, tab_bottom(height) as i32);
+        let offset = self.list.scroll.value(now).round();
+        let key = model.chats_revision ^ (canvas.height as u64) << 48;
+        if let Some(dy) = self.partial.plan(offset as i32, key, full, media, y1 - y0) {
+            let damage = ui::scroll_rows(canvas, y0, y1, dy, theme::RAIL, |canvas| {
+                self.draw_rows(canvas, model, media, now, offset)
+            });
+            self.partial.drawn(offset as i32, key, false);
+            return Some(damage);
+        }
+        ui::clear_misses();
+        canvas.fill_rect(0, 0, canvas.width, canvas.height, theme::RAIL, 1.0);
+        canvas.set_clip(0, y0, canvas.width, y1);
+        self.draw_rows(canvas, model, media, now, offset);
+        canvas.reset_clip();
+        self.partial.drawn(offset as i32, key, true);
+        None
+    }
+
+    fn draw_rows(
+        &self,
+        canvas: &mut Canvas,
+        model: &Model,
+        media: &mut Media,
+        now: Instant,
+        offset: f32,
+    ) {
         let (width, height) = (canvas.width as f32, canvas.height as f32);
-        let bottom = tab_bottom(height);
-        canvas.fill_rect(0, 0, width as i32, height as i32, theme::RAIL, 1.0);
-        let offset = self.list.scroll.value(now);
-        canvas.set_clip(0, theme::TOP as i32, width as i32, bottom as i32);
+        let bottom = (canvas.clip().3 as f32).min(tab_bottom(height));
+        let clip_top = canvas.clip().1 as f32;
         text::draw(
             canvas,
             "Messages",
@@ -179,7 +216,9 @@ impl MessagesView {
             theme::HEADER,
             1.0,
         );
-        let first = ((offset - DM_HEADER) / DM_ROW).floor().max(0.0) as usize;
+        let first = ((offset + clip_top - theme::TOP - DM_HEADER) / DM_ROW)
+            .floor()
+            .max(0.0) as usize;
         for (i, id) in self.rows.iter().enumerate().skip(first) {
             let y = theme::TOP + DM_HEADER + i as f32 * DM_ROW - offset;
             if y > bottom {
@@ -312,7 +351,6 @@ impl MessagesView {
                 1.0,
             );
         }
-        canvas.reset_clip();
     }
 }
 

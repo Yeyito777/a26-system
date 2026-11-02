@@ -81,6 +81,7 @@ pub struct DiscordApp {
     trace: Option<Trace>,
     /// A notification's chat, opened once the chats are known.
     pending_target: Option<String>,
+    last_tab_bar: Option<(Tab, u32, u32)>,
 }
 
 const TOAST_FOR: Duration = Duration::from_millis(2600);
@@ -122,6 +123,7 @@ impl DiscordApp {
             status_color: format!("#{:06x}", theme::RAIL),
             trace,
             pending_target: None,
+            last_tab_bar: None,
         }
     }
 
@@ -190,6 +192,7 @@ impl DiscordApp {
 
     fn back(&mut self, cx: &mut Cx) {
         if self.viewer.take().is_some() {
+            self.dirty();
             cx.redraw();
             return;
         }
@@ -200,6 +203,7 @@ impl DiscordApp {
             return;
         }
         if self.stack.pop().is_some() {
+            self.dirty();
             cx.hide_keyboard();
             cx.transition(false);
             self.editing = None;
@@ -209,6 +213,7 @@ impl DiscordApp {
     }
 
     fn toast(&mut self, cx: &mut Cx, text: String) {
+        self.dirty();
         self.toast = Some((text, cx.now));
         cx.wake_at(cx.now + TOAST_FOR);
         cx.redraw();
@@ -405,6 +410,15 @@ impl DiscordApp {
             history.entries[index] = std::rc::Rc::new(entry);
             history.revision = revision;
         }
+    }
+
+    /// The page in front will be drawn whole next (something besides scrolling changed).
+    fn dirty(&mut self) {
+        if let Some(Page::Chat(view)) = self.stack.last_mut() {
+            view.dirty = true;
+        }
+        self.messages.partial.dirty = true;
+        self.servers.dirty = true;
     }
 
     fn chat_view(&mut self) -> Option<&mut ChatView> {
@@ -688,12 +702,14 @@ impl DiscordApp {
         }
         self.model.typing.retain(|_, list| !list.is_empty());
         if changed {
+            self.dirty();
             cx.redraw();
         }
         // The dots move a few times a second while someone types in the open chat.
-        if let Some(Page::Chat(view)) = self.stack.last()
+        if let Some(Page::Chat(view)) = self.stack.last_mut()
             && self.model.typing.contains_key(&view.chat)
         {
+            view.dirty = true;
             cx.redraw();
             cx.wake_at(cx.now + Duration::from_millis(300));
         } else if let Some(at) = next {
@@ -765,6 +781,7 @@ impl App for DiscordApp {
     }
 
     fn event(&mut self, cx: &mut Cx, event: Event) {
+        self.dirty();
         match event {
             Event::Status(status) => self.model.status = status,
             Event::Chat(chat) => self.model.put_chat(*chat),
@@ -835,6 +852,7 @@ impl App for DiscordApp {
         let Some(ask) = self.asked.remove(&id) else {
             return;
         };
+        self.dirty();
         match (ask, result) {
             (Ask::Chats, Ok(value)) => {
                 let chats: Vec<Chat> =
@@ -962,6 +980,9 @@ impl App for DiscordApp {
         let (width, height, now) = (cx.width, cx.height, cx.now);
         if self.viewer.is_some() {
             self.viewer_gesture(cx, gesture);
+            if self.viewer.is_none() {
+                self.dirty();
+            }
             return;
         }
         let actions = match self.stack.last_mut() {
@@ -984,6 +1005,7 @@ impl App for DiscordApp {
                     };
                     if tab != self.tab {
                         self.tab = tab;
+                        self.dirty();
                         cx.haptic(Haptic::Light);
                     }
                     cx.redraw();
@@ -1076,6 +1098,7 @@ impl App for DiscordApp {
             && now.duration_since(*at) >= TOAST_FOR
         {
             self.toast = None;
+            self.dirty();
             cx.redraw();
         }
         self.tick_typing(cx);
@@ -1094,7 +1117,9 @@ impl App for DiscordApp {
         let page = match self.stack.last_mut() {
             Some(Page::Chat(view)) => {
                 view.sync(&self.model, canvas.width as f32, canvas.height as f32);
-                view.draw(canvas, &self.model, cx.media, now);
+                // Overlays over the messages (a toast, the viewer) need whole frames.
+                let full = cx.full || self.toast.is_some() || self.viewer.is_some();
+                cx.damage = view.draw(canvas, &self.model, cx.media, now, full);
                 "chat"
             }
             Some(Page::Forum(view)) => {
@@ -1106,13 +1131,17 @@ impl App for DiscordApp {
                 "members"
             }
             None => {
+                let mut whole = true;
                 let name = match self.tab {
                     Tab::Servers => {
-                        self.servers.draw(canvas, &self.model, cx.media, now);
+                        let full = cx.full || self.toast.is_some() || self.viewer.is_some();
+                        whole = self.servers.draw(canvas, &self.model, cx.media, now, full);
                         "servers"
                     }
                     Tab::Messages => {
-                        self.messages.draw(canvas, &self.model, cx.media, now);
+                        let full = cx.full || self.toast.is_some() || self.viewer.is_some();
+                        cx.damage = self.messages.draw(canvas, &self.model, cx.media, now, full);
+                        whole = cx.damage.is_none();
                         "messages"
                     }
                     Tab::You => {
@@ -1120,7 +1149,16 @@ impl App for DiscordApp {
                         "you"
                     }
                 };
-                self.tab_bar(canvas, cx.media, now);
+                // The tab bar, when the page was drawn whole or a badge changed.
+                let key = (
+                    self.tab,
+                    self.model.dm_unread(),
+                    self.model.guilds.iter().map(|g| g.mentions).sum::<u32>(),
+                );
+                if whole || self.last_tab_bar != Some(key) {
+                    self.last_tab_bar = Some(key);
+                    self.tab_bar(canvas, cx.media, now);
+                }
                 name
             }
         };

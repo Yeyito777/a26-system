@@ -1493,8 +1493,7 @@ pub fn draw_flow(canvas: &mut Canvas, flow: &Flow, x0: f32, y0: f32, env: &mut D
                     }
                     let px = size.round() as u32;
                     let picture = media.as_ref().and_then(|media| {
-                        env.media
-                            .get(&media.reference, px, px, Fit::Contain, env.now)
+                        ui::get(env.media, &media.reference, px, px, Fit::Contain, env.now)
                     });
                     match picture {
                         Some(image) => {
@@ -1551,7 +1550,7 @@ fn picture(
     radius: f32,
 ) {
     let (w, h) = (rect.w.round() as u32, rect.h.round() as u32);
-    match env.media.get(&media.reference, w, h, fit, env.now) {
+    match ui::get(env.media, &media.reference, w, h, fit, env.now) {
         Some(image) => {
             let x = rect.x + (rect.w - image.width as f32) / 2.0;
             let y = rect.y + (rect.h - image.height as f32) / 2.0;
@@ -1703,10 +1702,9 @@ pub fn draw_pieces(
                 let count_x = if emoji.starts_with('<') {
                     let size = dp(18.0);
                     let px = size.round() as u32;
-                    match media
-                        .as_ref()
-                        .and_then(|m| env.media.get(&m.reference, px, px, Fit::Contain, env.now))
-                    {
+                    match media.as_ref().and_then(|m| {
+                        ui::get(env.media, &m.reference, px, px, Fit::Contain, env.now)
+                    }) {
                         Some(image) => canvas.draw_image(
                             &image,
                             ex.round() as i32,

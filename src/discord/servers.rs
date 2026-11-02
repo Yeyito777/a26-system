@@ -63,6 +63,11 @@ pub struct ServersView {
     /// The channel last opened in each server (drawn selected).
     pub last_channel: HashMap<String, String>,
     dragging_rail: bool,
+    /// What the rail and the list showed last frame (each is redrawn only when it changes).
+    last_rail: Option<(u64, i32, Option<String>, usize, i32)>,
+    last_list: Option<(u64, u64, usize, i32, Option<String>, Option<String>, i32)>,
+    /// Something besides scrolling changed: the next frame is whole.
+    pub dirty: bool,
 }
 
 const ITEM: f32 = theme::SERVER_ICON + theme::SERVER_GAP;
@@ -101,6 +106,9 @@ impl ServersView {
             rows_key: (u64::MAX, u64::MAX, None, 0),
             last_channel: HashMap::new(),
             dragging_rail: false,
+            last_rail: None,
+            last_list: None,
+            dirty: true,
         }
     }
 
@@ -406,14 +414,73 @@ impl ServersView {
         actions
     }
 
-    pub fn draw(&mut self, canvas: &mut Canvas, model: &Model, media: &mut Media, now: Instant) {
+    /// Draws the tab. The rail and the channel list are each drawn only
+    /// when something in it changed (the canvas keeps the last frame).
+    pub fn draw(
+        &mut self,
+        canvas: &mut Canvas,
+        model: &Model,
+        media: &mut Media,
+        now: Instant,
+        full: bool,
+    ) -> bool {
         self.sync(model);
         let (width, height) = (canvas.width as f32, canvas.height as f32);
         let bottom = bottom(height);
-        canvas.fill_rect(0, 0, width as i32, height as i32, theme::RAIL, 1.0);
-        // The rail.
+        let selected = self.guild(model).map(|g| g.id.clone());
+        let rail_offset = self.rail_scroll.value(now).round();
+        let list_offset = self.list_scroll.value(now).round();
+        let rail_key = (
+            model.guilds_revision,
+            rail_offset as i32,
+            selected.clone(),
+            self.open_folders.len(),
+            canvas.height,
+        );
+        let channel = selected
+            .as_ref()
+            .and_then(|g| self.last_channel.get(g).cloned());
+        let list_key = (
+            self.rows_key.0,
+            self.rows_key.1,
+            self.rows_key.3,
+            list_offset as i32,
+            selected.clone(),
+            channel,
+            canvas.height,
+        );
+        let whole = full || self.dirty || self.last_rail.is_none() || ui::misses_ready(media);
+        if whole {
+            ui::clear_misses();
+            self.dirty = false;
+        }
+        let draw_rail = whole || self.last_rail.as_ref() != Some(&rail_key);
+        let draw_list = whole || self.last_list.as_ref() != Some(&list_key);
+        self.last_rail = Some(rail_key);
+        self.last_list = Some(list_key);
+        if draw_rail {
+            self.draw_rail(canvas, model, media, now, rail_offset, bottom);
+        }
+        if draw_list {
+            self.draw_list(canvas, model, now, list_offset, width, height, bottom);
+        }
+        whole
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_rail(
+        &self,
+        canvas: &mut Canvas,
+        model: &Model,
+        media: &mut Media,
+        now: Instant,
+        offset: f32,
+        bottom: f32,
+    ) {
+        let height = canvas.height as f32;
+        let _ = height;
+        canvas.fill_rect(0, 0, theme::RAIL_W as i32, bottom as i32, theme::RAIL, 1.0);
         canvas.set_clip(0, theme::TOP as i32, theme::RAIL_W as i32, bottom as i32);
-        let offset = self.rail_scroll.value(now);
         let selected = self.guild(model).map(|g| g.id.clone());
         let cx = theme::RAIL_W / 2.0;
         for (i, item) in self.rail.iter().enumerate() {
@@ -568,20 +635,52 @@ impl ServersView {
             }
         }
         canvas.reset_clip();
+    }
 
-        // The channel list.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_list(
+        &self,
+        canvas: &mut Canvas,
+        model: &Model,
+        now: Instant,
+        offset: f32,
+        width: f32,
+        height: f32,
+        bottom: f32,
+    ) {
+        let _ = now;
+        // Behind the panel's rounded corner.
+        canvas.fill_rect(
+            theme::RAIL_W as i32,
+            0,
+            (width - theme::RAIL_W) as i32,
+            (theme::TOP + dp(20.0)) as i32,
+            theme::RAIL,
+            1.0,
+        );
+        let _ = height;
+        // Down to the tab bar, which is drawn on its own.
         let panel = RectF {
             x: theme::RAIL_W,
             y: theme::TOP,
             w: width - theme::RAIL_W,
-            h: height - theme::TOP,
+            h: bottom - theme::TOP,
         };
-        canvas.fill_rrect(panel, dp(16.0), theme::LIST, 1.0);
+        // Only the top strip needs the rounded corner; the rest is a plain fill.
+        canvas.fill_rrect(
+            RectF {
+                h: dp(40.0),
+                ..panel
+            },
+            dp(16.0),
+            theme::LIST,
+            1.0,
+        );
         canvas.fill_rect(
             panel.x as i32,
-            (panel.y + dp(16.0)) as i32,
+            (panel.y + dp(20.0)) as i32,
             panel.w as i32,
-            (panel.h - dp(16.0)) as i32,
+            (panel.h - dp(20.0)) as i32,
             theme::LIST,
             1.0,
         );
@@ -604,7 +703,6 @@ impl ServersView {
             return;
         };
         let guild = guild.clone();
-        let offset = self.list_scroll.value(now);
         canvas.set_clip(panel.x as i32, panel.y as i32, width as i32, bottom as i32);
         let x0 = panel.x;
         let header_y = theme::TOP - offset;
