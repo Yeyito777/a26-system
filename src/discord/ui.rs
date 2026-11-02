@@ -175,6 +175,58 @@ pub fn shaped(
     })
 }
 
+/// Draws `image` (premultiplied) with its top left at (`x`, `y`), as
+/// Canvas::draw_image does at full alpha, but only within the clip and
+/// with rows of opaque pixels copied: most pictures are opaque, and a
+/// tall one in a thin band costs the band.
+pub fn blit(canvas: &mut Canvas, image: &Image, x: i32, y: i32) {
+    let (cx0, cy0, cx1, cy1) = canvas.clip();
+    let (x0, x1) = (
+        x.max(cx0).max(0),
+        (x + image.width).min(cx1).min(canvas.width),
+    );
+    let (y0, y1) = (
+        y.max(cy0).max(0),
+        (y + image.height).min(cy1).min(canvas.height),
+    );
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (from, n) = ((x0 - x) as usize, (x1 - x0) as usize);
+    let (stride, source) = (canvas.width as usize, image.width as usize);
+    for ty in y0..y1 {
+        let at = (ty - y) as usize * source + from;
+        let src = &image.pixels[at..at + n];
+        let at = ty as usize * stride + x0 as usize;
+        let dst = &mut canvas.pixels[at..at + n];
+        if src.iter().fold(0xff, |a, p| a & (p >> 24)) == 0xff {
+            for (d, s) in dst.iter_mut().zip(src) {
+                *d = s & 0x00ff_ffff;
+            }
+        } else {
+            for (d, s) in dst.iter_mut().zip(src) {
+                *d = over(*d, *s);
+            }
+        }
+    }
+}
+
+/// Premultiplied source-over, as the canvas blends at full alpha.
+#[inline]
+fn over(dst: u32, src: u32) -> u32 {
+    let sa = src >> 24;
+    if sa == 0 {
+        return dst;
+    }
+    let inverse = 256 - (sa + (sa >> 7));
+    let scale = |shift: u32| {
+        let s = src >> shift & 0xff;
+        let d = dst >> shift & 0xff;
+        (s + ((d * inverse) >> 8)).min(255) << shift
+    };
+    scale(16) | scale(8) | scale(0)
+}
+
 /// A round avatar at (`x`, `y`) (its top left); a disc of `fallback` while it loads.
 #[allow(clippy::too_many_arguments)]
 pub fn avatar(
@@ -189,7 +241,7 @@ pub fn avatar(
 ) {
     let image = picture.and_then(|picture| shaped(media, picture, size, size / 2.0, now));
     match image {
-        Some(image) => canvas.draw_image(&image, x.round() as i32, y.round() as i32, 1.0),
+        Some(image) => blit(canvas, &image, x.round() as i32, y.round() as i32),
         None => canvas.fill_circle(x + size / 2.0, y + size / 2.0, size / 2.0, fallback, 1.0),
     }
 }
@@ -883,7 +935,46 @@ pub fn move_columns(canvas: &mut Canvas, x0: i32, x1: i32, y0: i32, y1: i32, dy:
 
 #[cfg(test)]
 mod tests {
-    use super::emoji_presentation;
+    use super::{blit, emoji_presentation};
+    use crate::gfx::{Canvas, Image};
+
+    /// The blit draws what Canvas::draw_image draws, opaque rows or not,
+    /// and nothing outside the clip.
+    #[test]
+    fn blits_like_draw_image_within_the_clip() {
+        let (w, h) = (23, 17);
+        let pixels = (0..w * h)
+            .map(|i: i32| {
+                let row = i / w;
+                // Opaque rows, rows with transparent and half covered pixels.
+                let a: u32 = if row % 3 == 0 {
+                    0xff
+                } else {
+                    [0x00, 0x80, 0xff, 0x30][(i % 4) as usize]
+                };
+                let c = |v: i32| (((v * 37 + i * 11) % 256) as u32 * a) / 255;
+                (a << 24) | (c(1) << 16) | (c(2) << 8) | c(3)
+            })
+            .collect();
+        let image = Image {
+            width: w,
+            height: h,
+            pixels,
+        };
+        for (x, y) in [(3, 4), (-5, -6), (30, 25), (36, 2)] {
+            let mut a = Canvas::new(48, 32);
+            let mut b = Canvas::new(48, 32);
+            for (i, p) in a.pixels.iter_mut().enumerate() {
+                *p = (i as u32).wrapping_mul(2654435761) & 0x00ff_ffff;
+            }
+            b.pixels.copy_from_slice(&a.pixels);
+            a.set_clip(2, 5, 40, 20);
+            b.set_clip(2, 5, 40, 20);
+            a.draw_image(&image, x, y, 1.0);
+            blit(&mut b, &image, x, y);
+            assert!(a.pixels == b.pixels, "at ({x}, {y})");
+        }
+    }
 
     #[test]
     fn lone_pictographs_ask_for_colour() {

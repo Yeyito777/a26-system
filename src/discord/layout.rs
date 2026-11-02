@@ -1504,11 +1504,11 @@ pub fn draw_flow(canvas: &mut Canvas, flow: &Flow, x0: f32, y0: f32, env: &mut D
                         Some(image) => {
                             let ox = (px as i32 - image.width) / 2;
                             let oy = (px as i32 - image.height) / 2;
-                            canvas.draw_image(
+                            ui::blit(
+                                canvas,
                                 &image,
                                 ex.round() as i32 + ox,
                                 ey.round() as i32 + oy,
-                                1.0,
                             );
                         }
                         None => {
@@ -1559,7 +1559,7 @@ fn picture(
         Some(image) => {
             let x = rect.x + (rect.w - image.width as f32) / 2.0;
             let y = rect.y + (rect.h - image.height as f32) / 2.0;
-            canvas.draw_image(&image, x.round() as i32, y.round() as i32, 1.0);
+            ui::blit(canvas, &image, x.round() as i32, y.round() as i32);
             if radius > 0.0 {
                 let drawn = RectF {
                     x: x.round(),
@@ -1710,11 +1710,11 @@ pub fn draw_pieces(
                     match media.as_ref().and_then(|m| {
                         ui::get(env.media, &m.reference, px, px, Fit::Contain, env.now)
                     }) {
-                        Some(image) => canvas.draw_image(
+                        Some(image) => ui::blit(
+                            canvas,
                             &image,
                             ex.round() as i32,
                             (cy - size / 2.0).round() as i32,
-                            1.0,
                         ),
                         None => canvas.fill_rrect(
                             RectF {

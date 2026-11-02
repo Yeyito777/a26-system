@@ -568,7 +568,7 @@ impl DiscordApp {
             Some(image) => {
                 let x = (width - image.width as f32) / 2.0;
                 let y = theme::TOP + (box_h - image.height as f32) / 2.0;
-                canvas.draw_image(&image, x.round() as i32, y.round() as i32, 1.0);
+                ui::blit(canvas, &image, x.round() as i32, y.round() as i32);
             }
             None => text::draw_centered(
                 canvas,

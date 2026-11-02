@@ -13,6 +13,7 @@ use crate::exocortex::gesture::{Axis, Gesture};
 use crate::exocortex::ui::icons::{self, Icon};
 use crate::gfx::{Canvas, RectF};
 use crate::social::media::Media;
+use crate::social::proto::Chat;
 use crate::text::{self, Weight};
 
 use super::Action;
@@ -61,6 +62,11 @@ pub struct ServersView {
     rail_key: (u64, usize),
     rows: Vec<Row>,
     rows_key: (u64, u64, Option<String>, usize),
+    /// The selected server's chats the rows were built from, and a count
+    /// of rebuilds: a chat changing elsewhere (a DM, another server) leaves
+    /// the list as it is.
+    shown_chats: Vec<Chat>,
+    rows_revision: u64,
     /// The channel last opened in each server (drawn selected).
     pub last_channel: HashMap<String, String>,
     dragging_rail: bool,
@@ -80,6 +86,35 @@ const ITEM: f32 = theme::SERVER_ICON + theme::SERVER_GAP;
 /// What a missed picture redraws (`ui::set_tag`): the rail, the channel list.
 const RAIL_TAG: u64 = 2;
 const LIST_TAG: u64 = 4;
+/// The rail's items' own tags (even, above the fixed ones; messages' are
+/// odd): an icon that comes redraws its item, not the rail.
+const ITEM_TAGS: u64 = 1 << 20;
+
+fn item_tag(index: usize) -> u64 {
+    ITEM_TAGS + 2 * index as u64
+}
+
+/// A server's chats (channels, threads), in a stable order.
+fn guild_chats(model: &Model, guild: &str) -> Vec<Chat> {
+    let mut chats: Vec<Chat> = model
+        .chats
+        .iter()
+        .filter(|(id, _)| {
+            model
+                .ext(id)
+                .is_some_and(|ext| ext.guild.as_deref() == Some(guild))
+        })
+        .map(|(_, chat)| chat.clone())
+        .collect();
+    chats.sort_by(|a, b| a.id.cmp(&b.id));
+    chats
+}
+
+/// The rows rail item `index` draws on (its tint and badge stick out a little).
+fn item_band(index: usize, offset: f32) -> (f32, f32) {
+    let top = theme::TOP + dp(8.0) + index as f32 * ITEM - offset;
+    (top - dp(6.0), top + ITEM + dp(2.0))
+}
 
 /// How a frame of the tab was drawn.
 pub enum ServersFrame {
@@ -124,6 +159,8 @@ impl ServersView {
             rail_key: (u64::MAX, 0),
             rows: Vec::new(),
             rows_key: (u64::MAX, u64::MAX, None, 0),
+            shown_chats: Vec::new(),
+            rows_revision: 0,
             last_channel: HashMap::new(),
             dragging_rail: false,
             last_rail: None,
@@ -196,7 +233,20 @@ impl ServersView {
         if rows_key == self.rows_key {
             return;
         }
+        let shown = guild
+            .as_deref()
+            .map_or_else(Vec::new, |id| guild_chats(model, id));
+        if self.rows_key.0 != u64::MAX
+            && (rows_key.1, &rows_key.2, rows_key.3)
+                == (self.rows_key.1, &self.rows_key.2, self.rows_key.3)
+            && shown == self.shown_chats
+        {
+            self.rows_key = rows_key;
+            return;
+        }
         self.rows_key = rows_key;
+        self.shown_chats = shown;
+        self.rows_revision += 1;
         self.rows.clear();
         let Some(guild_id) = guild else { return };
         let Some(guild) = model.guild(&guild_id) else {
@@ -461,7 +511,7 @@ impl ServersView {
             .as_ref()
             .and_then(|g| self.last_channel.get(g).cloned());
         let list_key = (
-            self.rows_key.0,
+            self.rows_revision,
             self.rows_key.1,
             self.rows_key.3,
             list_offset as i32,
@@ -490,7 +540,22 @@ impl ServersView {
             self.draw_list(canvas, model, now, list_offset, width, height, bottom);
             return ServersFrame::Whole;
         }
-        let rail_changed = self.last_rail.as_ref() != Some(&rail_key) || ready.contains(&RAIL_TAG);
+        // Rail items whose icons came: where they are now.
+        let items: Vec<(i32, i32)> = ready
+            .iter()
+            .filter(|tag| **tag >= ITEM_TAGS && *tag % 2 == 0)
+            .map(|tag| item_band(((tag - ITEM_TAGS) / 2) as usize, rail_offset))
+            .map(|(a, b)| {
+                (
+                    a.floor().max(theme::TOP) as i32,
+                    b.ceil().min(bottom) as i32,
+                )
+            })
+            .filter(|(a, b)| b > a)
+            .collect();
+        let rail_changed = self.last_rail.as_ref() != Some(&rail_key)
+            || ready.contains(&RAIL_TAG)
+            || !items.is_empty();
         let list_changed = self.last_list.as_ref() != Some(&list_key) || ready.contains(&LIST_TAG);
         let last_rail = self.last_rail.replace(rail_key.clone());
         self.last_list = Some(list_key);
@@ -520,19 +585,32 @@ impl ServersView {
         }) && !ready.contains(&RAIL_TAG);
         let dy = last_rail.as_ref().map_or(0, |last| last.1 - rail_key.1);
         if scrolled_only && dy.abs() < (bottom_i - top_i) / 2 {
-            if dy == 0 {
+            if dy == 0 && items.is_empty() {
                 return ServersFrame::Unchanged;
             }
-            ui::move_columns(canvas, 0, rail_x, top_i, bottom_i, dy);
-            let band = if dy > 0 {
-                (top_i, top_i + dy)
-            } else {
-                (bottom_i + dy, bottom_i)
-            };
-            self.draw_rail(canvas, model, media, now, rail_offset, bottom, band);
+            let mut bands = items;
+            if dy != 0 {
+                ui::move_columns(canvas, 0, rail_x, top_i, bottom_i, dy);
+                bands.push(if dy > 0 {
+                    (top_i, top_i + dy)
+                } else {
+                    (bottom_i + dy, bottom_i)
+                });
+            }
+            bands.sort();
+            let mut merged: Vec<(i32, i32)> = Vec::new();
+            for band in bands {
+                match merged.last_mut() {
+                    Some(last) if band.0 <= last.1 => last.1 = last.1.max(band.1),
+                    _ => merged.push(band),
+                }
+            }
+            for &band in &merged {
+                self.draw_rail(canvas, model, media, now, rail_offset, bottom, band);
+            }
             return ServersFrame::Rail(Damage {
-                moved: Some((top_i, bottom_i, dy)),
-                rows: vec![band],
+                moved: (dy != 0).then_some((top_i, bottom_i, dy)),
+                rows: merged,
             });
         }
         self.draw_rail(
@@ -573,9 +651,11 @@ impl ServersView {
         let cx = theme::RAIL_W / 2.0;
         for (i, item) in self.rail.iter().enumerate() {
             let top = theme::TOP + dp(8.0) + i as f32 * ITEM - offset;
-            if top > bottom || top + ITEM < theme::TOP {
+            let (a, b) = item_band(i, offset);
+            if top > bottom || top + ITEM < theme::TOP || a > y1 as f32 || b < y0 as f32 {
                 continue;
             }
+            ui::set_tag(item_tag(i));
             let size = theme::SERVER_ICON;
             let icon = RectF {
                 x: cx - size / 2.0,
@@ -1042,7 +1122,7 @@ pub fn draw_guild_icon(
         .as_ref()
         .and_then(|icon| ui::shaped(media, icon, rect.w, radius, now));
     match image {
-        Some(image) => canvas.draw_image(&image, rect.x.round() as i32, rect.y.round() as i32, 1.0),
+        Some(image) => ui::blit(canvas, &image, rect.x.round() as i32, rect.y.round() as i32),
         None => {
             canvas.fill_rrect(
                 rect,
