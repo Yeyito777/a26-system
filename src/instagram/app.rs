@@ -859,6 +859,14 @@ impl App for Instagram {
 
     fn shown(&mut self, cx: &mut Cx, shown: bool) {
         self.shown = shown;
+        // A story holds still while the app is away (no clock, no frames).
+        if let Some(viewer) = &mut self.stories {
+            if shown {
+                viewer.resume(cx.now);
+            } else {
+                viewer.pause(cx.now);
+            }
+        }
         if shown {
             self.dirty = true;
             let action = self.show_top();

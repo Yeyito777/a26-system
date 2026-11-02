@@ -297,7 +297,13 @@ impl StoryViewer {
         }
     }
 
-    fn resume(&mut self, now: Instant) {
+    pub fn pause(&mut self, now: Instant) {
+        if self.paused_at.is_none() {
+            self.paused_at = Some(now);
+        }
+    }
+
+    pub fn resume(&mut self, now: Instant) {
         if let (Some(paused), Some(at)) = (self.paused_at.take(), self.ready_at) {
             self.ready_at = Some(at + now.saturating_duration_since(paused));
         }
