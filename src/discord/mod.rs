@@ -1,20 +1,67 @@
 //! The Discord app: `a26-system --app discord`, a client of the Discord
-//! bridge (docs/social-protocol.md).
+//! bridge (docs/social-protocol.md, §5 Discord), drawn like Discord's
+//! mobile app in its dark theme: the Servers tab (rail and channels), the
+//! Messages tab (DMs), You (the account and the bridge's settings), and a
+//! channel's chat with Discord's markdown, embeds, attachments, reactions
+//! and the composer.
 
-use crate::social::starter::{self, Theme};
+mod app;
+mod chat;
+mod layout;
+mod lists;
+mod markdown;
+mod model;
+mod servers;
+mod theme;
+mod ui;
+mod you;
 
-const THEME: Theme = Theme {
-    name: "Discord",
-    background: 0x313338,
-    bar: 0x1e1f22,
-    text: 0xf2f3f5,
-    secondary: 0x949ba4,
-    accent: 0x5865f2,
-    mine: 0x383a40,
-    theirs: 0x2b2d31,
-    badge: 0xf23f43,
-};
+use crate::social::shell;
+
+/// What a view asks the app to do (requests, navigation, the keyboard).
+#[derive(Debug, Clone)]
+pub enum Action {
+    Redraw,
+    Animate,
+    Haptic,
+    Back,
+    OpenChat(String),
+    OpenForum(String),
+    Members(String),
+    OpenUrl(String),
+    Viewer {
+        chat: String,
+        message: String,
+        index: usize,
+    },
+    Send {
+        chat: String,
+        text: String,
+        reply_to: Option<String>,
+        client_id: String,
+    },
+    React {
+        chat: String,
+        message: String,
+        emoji: String,
+        remove: bool,
+    },
+    Delete {
+        chat: String,
+        message: String,
+    },
+    EditStart(String),
+    Copy(String),
+    Toast(String),
+    ShowKeyboard,
+    HideKeyboard,
+    SetWrites(bool),
+    SetNotifications(bool),
+    SetPreviews(bool),
+    LoginFromClipboard,
+    Logout,
+}
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    starter::run("discord", THEME)
+    shell::run(app::DiscordApp::new())
 }
