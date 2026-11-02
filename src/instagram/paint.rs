@@ -39,8 +39,9 @@ pub const MINE_BOTTOM: Rgb = 0x3797f0;
 /// Instagram's point on this screen.
 pub const DP: f32 = 2.625;
 pub const W: f32 = 1080.0;
-/// Moon's status bar over the window.
-pub const STATUS: f32 = 124.0;
+/// Where the app's own content starts: Moon puts the window under its
+/// status bar (y 124 on the screen), so at the window's top.
+pub const STATUS: f32 = 0.0;
 pub const TOP_BAR: f32 = 147.0;
 pub const TAB_BAR: f32 = 131.0;
 /// Under the tab bar: Moon's home gesture (taps still come).
@@ -360,6 +361,8 @@ pub struct Want {
     pub w: u32,
     pub h: u32,
     pub fit: Fit,
+    /// The window rows it is drawn in (they move with a scroll).
+    pub rows: (i32, i32),
 }
 
 /// What drawing needs beside the canvas.
@@ -371,8 +374,9 @@ pub struct Paint<'a> {
 }
 
 impl Paint<'_> {
-    /// The picture, or None (and it is asked for).
-    pub fn picture(&mut self, reference: &str, w: u32, h: u32, fit: Fit) -> Option<Rc<Image>> {
+    /// The picture, or None (and it is asked for); `y` is the window row
+    /// its top is drawn at.
+    pub fn picture(&mut self, reference: &str, w: u32, h: u32, fit: Fit, y: f32) -> Option<Rc<Image>> {
         if reference.is_empty() || w == 0 || h == 0 {
             return None;
         }
@@ -383,6 +387,7 @@ impl Paint<'_> {
                 w,
                 h,
                 fit,
+                rows: (y.floor() as i32 - 1, (y + h as f32).ceil() as i32 + 1),
             });
         }
         image
@@ -557,7 +562,7 @@ pub fn blit(canvas: &mut Canvas, cache: &Cache, image: &Rc<Image>, x: i32, y: i3
 /// A picture in `rect` (Fit::Cover), or a placeholder while it loads.
 pub fn picture(canvas: &mut Canvas, p: &mut Paint, reference: &str, rect: RectF, placeholder: Rgb) -> bool {
     let (w, h) = (rect.w.round() as u32, rect.h.round() as u32);
-    match p.picture(reference, w, h, Fit::Cover) {
+    match p.picture(reference, w, h, Fit::Cover, rect.y) {
         Some(image) => {
             blit(canvas, p.cache, &image, rect.x.round() as i32, rect.y.round() as i32);
             true
@@ -617,7 +622,7 @@ pub fn avatar(canvas: &mut Canvas, p: &mut Paint, reference: Option<&str>, cx: f
     let size = inner.round() as i32;
     let x = (cx - size as f32 / 2.0).round() as i32;
     let y = (cy - size as f32 / 2.0).round() as i32;
-    let image = reference.and_then(|r| p.picture(r, size as u32, size as u32, Fit::Cover));
+    let image = reference.and_then(|r| p.picture(r, size as u32, size as u32, Fit::Cover, y as f32));
     match image {
         Some(image) => {
             let round = p.cache.round(&image, size);

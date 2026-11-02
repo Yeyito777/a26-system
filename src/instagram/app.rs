@@ -28,7 +28,7 @@ use crate::exocortex::ui::Haptic;
 use crate::gfx::{Canvas, RectF};
 use crate::keys::KeyInput;
 use crate::social::proto::{BridgeError, Event, Hello};
-use crate::social::shell::{App, Cx, DrawCx};
+use crate::social::shell::{App, Cx, Damage, DrawCx};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -181,6 +181,10 @@ pub struct Instagram {
     profile: bool,
     sends: u32,
     verify: bool,
+    /// The finger's newest row (profiling).
+    finger: Option<i32>,
+    /// A chat being opened and since when (profiling).
+    opening: Option<(String, Instant)>,
 }
 
 /// A client message id in the format Instagram's web app makes them
@@ -217,9 +221,11 @@ impl Instagram {
             drag: None,
             started: Instant::now(),
             frames: 0,
-            profile: std::env::var_os("INSTAGRAM_APP_PROFILE").is_some(),
+            profile: std::env::var_os("INSTAGRAM_APP_PROFILE").is_some() || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some(),
             sends: 0,
             verify: std::env::var_os("INSTAGRAM_APP_VERIFY").is_some(),
+            finger: None,
+            opening: None,
         }
     }
 
@@ -268,6 +274,9 @@ impl Instagram {
             Action::None => {}
             Action::Redraw => self.dirty = true,
             Action::Push(mut screen) => {
+                if let Some(chat) = screen.chat() {
+                    self.opening = Some((chat.to_owned(), Instant::now()));
+                }
                 self.hide_keyboard(cx);
                 cx.transition(true);
                 let shown = screen.shown(&self.store);
@@ -402,7 +411,7 @@ impl Instagram {
 
     /// Development check (`INSTAGRAM_APP_VERIFY`): a frame that moved rows
     /// equals one drawn whole.
-    fn check_band(&mut self, canvas: &Canvas, media: &mut crate::social::media::Media, now: Instant, area: Area) {
+    fn check_band(&mut self, canvas: &Canvas, media: &mut crate::social::media::Media, now: Instant, area: Area) -> bool {
         let mut full = Canvas::new(canvas.width, canvas.height);
         full.clear(BG);
         let store = &self.store;
@@ -418,7 +427,7 @@ impl Instagram {
         screen.draw(&mut full, &mut p, store, Area { band: (area.top, area.bottom), ..area });
         if !missing.is_empty() || !self.missing.is_empty() {
             // Pictures still on their way: placeholders differ by design.
-            return;
+            return true;
         }
         let width = full.width as usize;
         let rows: Vec<usize> = (area.top as usize..area.bottom as usize)
@@ -437,7 +446,9 @@ impl Instagram {
                 canvas.pixels[row.start + xs[0]] & 0xffffff,
                 area.offset,
             );
+            return false;
         }
+        true
     }
 
     fn full_frame(&mut self, canvas: &mut Canvas, media: &mut crate::social::media::Media, now: Instant) {
@@ -469,7 +480,11 @@ impl Instagram {
             canvas.set_clip(0, area.top as i32, canvas.width, area.bottom as i32);
             screen.draw(canvas, &mut p, store, area);
             canvas.reset_clip();
+            let content = p.missing.len();
             screen.chrome(canvas, &mut p, store, area);
+            for want in &mut p.missing[content..] {
+                want.rows = (i32::MIN, i32::MIN);
+            }
         }
         if tab_bar {
             let mut p = Paint {
@@ -478,7 +493,11 @@ impl Instagram {
                 missing: &mut self.missing,
                 cache: &self.cache,
             };
+            let content = p.missing.len();
             draw_tab_bar(canvas, &mut p, &self.store, self.tab, height);
+            for want in &mut p.missing[content..] {
+                want.rows = (i32::MIN, i32::MIN);
+            }
         }
         self.draw_toast(canvas, height);
     }
@@ -594,6 +613,16 @@ impl App for Instagram {
 
     fn gesture(&mut self, cx: &mut Cx, gesture: Gesture) {
         let now = cx.now;
+        if self.profile {
+            match gesture {
+                Gesture::Down { y, .. } => {
+                    self.finger = Some(y.round() as i32);
+                    eprintln!("instagram: press at {:.3} y {}", monotonic_ms(), y.round() as i32 + 124);
+                }
+                Gesture::DragStart { y, .. } | Gesture::Drag { y, .. } | Gesture::DragEnd { y, .. } => self.finger = Some(y.round() as i32),
+                _ => {}
+            }
+        }
         let (width, height) = (cx.width, cx.height);
         if let Some(viewer) = &mut self.stories {
             let action = viewer.gesture(&self.store, &gesture, width, height, now);
@@ -818,6 +847,8 @@ impl App for Instagram {
             if partial {
                 kind = "progress";
                 viewer.draw_progress(canvas, &self.store, width, now, false);
+                let (y0, y1) = StoryViewer::progress_rows();
+                cx.damage = Some(Damage { moved: None, rows: vec![(y0, y1)] });
             } else {
                 self.full_frame(canvas, cx.media, now);
             }
@@ -843,43 +874,67 @@ impl App for Instagram {
                 !last.stories && last.tab == self.tab && last.depth == depth && last.screen == screen_id && last.area == geometry
             });
             let view_h = (area.bottom - area.top) as i32;
+            let (top, bottom) = (area.top as i32, area.bottom as i32);
             let mut done = false;
-            if same && !cx.full && !self.dirty && !arrived && blit_ok {
+            // Pictures that arrived: their rows are drawn again, when all
+            // of them lie in the content (else the frame is drawn whole).
+            let arrived_rows: Option<Vec<(i32, i32)>> = arrived.then(|| {
+                self.missing
+                    .iter()
+                    .filter(|want| cx.media.peek(&want.reference, want.w, want.h, want.fit).is_some())
+                    .map(|want| want.rows)
+                    .collect()
+            });
+            // (Pictures in the bars and the tab bar: drawn with the whole frame.)
+            let rows_ok = arrived_rows.as_ref().is_none_or(|rows| rows.iter().all(|&(a, _)| a != i32::MIN));
+            if same && !cx.full && !self.dirty && rows_ok && blit_ok {
                 let last_offset = self.last.as_ref().map_or(0.0, |last| last.offset);
                 let delta = (area.offset - last_offset) as i32;
                 // Content moves up as the offset grows (down, inverted).
                 let dy = if inverted { delta } else { -delta };
-                if dy == 0 {
-                    kind = "none";
-                    done = true;
-                } else if dy.abs() < view_h - 8 {
-                    let (top, bottom) = (area.top as i32, area.bottom as i32);
-                    canvas.move_rows(top, bottom, dy);
-                    let band = if dy < 0 { (bottom + dy, bottom) } else { (top, top + dy) };
-                    canvas.set_clip(0, band.0, canvas.width, band.1);
-                    canvas.fill_rect(0, band.0, canvas.width, band.1 - band.0, BG, 1.0);
+                if dy.abs() < view_h - 8 {
+                    let mut bands: Vec<(i32, i32)> = Vec::new();
+                    if dy != 0 {
+                        canvas.move_rows(top, bottom, dy);
+                        bands.push(if dy < 0 { (bottom + dy, bottom) } else { (top, top + dy) });
+                        // What waits for pictures moved with the rows.
+                        for want in self.missing.iter_mut().filter(|want| want.rows.0 != i32::MIN) {
+                            want.rows = (want.rows.0 + dy, want.rows.1 + dy);
+                        }
+                    }
+                    for (a, b) in arrived_rows.unwrap_or_default() {
+                        let (a, b) = ((a + dy).max(top), (b + dy).min(bottom));
+                        if a < b {
+                            bands.push((a, b));
+                        }
+                    }
+                    // Drawn below; what is still missing is asked for again there.
+                    self.missing.retain(|want| cx.media.peek(&want.reference, want.w, want.h, want.fit).is_none());
+                    let bands = merge_rows(bands);
+                    cx.damage = Some(Damage {
+                        moved: (dy != 0).then_some((top, bottom, dy)),
+                        rows: bands.clone(),
+                    });
                     let store = &self.store;
                     let screen = self.stacks[self.tab as usize].last_mut().expect("root");
-                    let mut p = Paint {
-                        media: cx.media,
-                        now,
-                        missing: &mut self.missing,
-                        cache: &self.cache,
-                    };
-                    screen.draw(
-                        canvas,
-                        &mut p,
-                        store,
-                        Area {
-                            band: (band.0 as f32, band.1 as f32),
-                            ..area
-                        },
-                    );
+                    for &(a, b) in &bands {
+                        canvas.set_clip(0, a, canvas.width, b);
+                        canvas.fill_rect(0, a, canvas.width, b - a, BG, 1.0);
+                        let mut p = Paint {
+                            media: cx.media,
+                            now,
+                            missing: &mut self.missing,
+                            cache: &self.cache,
+                        };
+                        screen.draw(canvas, &mut p, store, Area { band: (a as f32, b as f32), ..area });
+                    }
                     canvas.reset_clip();
-                    kind = "band";
+                    kind = if bands.is_empty() { "none" } else if dy == 0 { "pictures" } else { "band" };
                     done = true;
-                    if self.verify {
-                        self.check_band(canvas, cx.media, now, area);
+                    if self.verify && !bands.is_empty() {
+                        if !self.check_band(canvas, cx.media, now, area) {
+                            eprintln!("instagram: ({kind} frame, dy {dy}, bands {bands:?})");
+                        }
                     }
                 }
             }
@@ -897,13 +952,48 @@ impl App for Instagram {
         }
         self.dirty = false;
         self.frames += 1;
-        if self.profile {
+        // Profiling (the perf bench reads the Exocortex app's lines): what
+        // the frame cost to draw (presenting is the shell's, after), when it
+        // was done and the finger it was drawn for.
+        if self.profile && kind != "none" {
             eprintln!(
-                "instagram: frame {} {kind} in {:.2} ms at {:.1} s",
-                self.frames,
-                started.elapsed().as_secs_f64() * 1000.0,
-                self.started.elapsed().as_secs_f64()
+                "instagram: frame drawn in {:.2} ms (layout 0.00), presented in 0.00 ms ({kind})",
+                started.elapsed().as_secs_f64() * 1000.0
             );
+            // Screen rows: Moon puts the window under its 124-row status bar.
+            eprintln!("instagram: shown at {:.3} finger {}", monotonic_ms(), self.finger.map_or(-1, |y| y + 124));
+            if let Some((chat, at)) = &self.opening
+                && self.stacks[Tab::Messages as usize].last().and_then(|s| s.chat()) == Some(chat.as_str())
+                && self.store.threads.get(chat).is_some_and(|t| t.loaded)
+            {
+                eprintln!(
+                    "instagram: opened {chat} in {:.1} ms ({} entries)",
+                    at.elapsed().as_secs_f64() * 1000.0,
+                    self.store.threads[chat].messages.len()
+                );
+                self.opening = None;
+            }
         }
     }
+}
+
+/// Overlapping or touching row ranges as one.
+fn merge_rows(mut rows: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
+    rows.sort();
+    let mut out: Vec<(i32, i32)> = Vec::with_capacity(rows.len());
+    for (a, b) in rows {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// CLOCK_MONOTONIC in milliseconds (the clock the bench's touch reports use).
+fn monotonic_ms() -> f64 {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: writes the time into a live timespec.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec as f64 * 1000.0 + now.tv_nsec as f64 / 1e6
 }

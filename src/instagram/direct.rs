@@ -757,7 +757,7 @@ impl ThreadScreen {
                 }
             }
             Body::Sticker(reference, w, h) => {
-                if let Some(image) = p.picture(reference, *w as u32, *h as u32, Fit::Contain) {
+                if let Some(image) = p.picture(reference, *w as u32, *h as u32, Fit::Contain, y) {
                     canvas.draw_image(&image, x as i32, y as i32, 1.0);
                 }
             }

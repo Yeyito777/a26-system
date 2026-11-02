@@ -124,7 +124,7 @@ pub fn draw_post(canvas: &mut Canvas, p: &mut Paint, post: &Post, layout: &PostL
         let draw_item = |canvas: &mut Canvas, p: &mut Paint, i: usize, dx: f32| {
             if let Some(media) = item(i) {
                 let r = rect(dx);
-                match p.picture(&media.reference, w, h, Fit::Cover) {
+                match p.picture(&media.reference, w, h, Fit::Cover, r.y) {
                     Some(image) => paint::blit(canvas, p.cache, &image, r.x.round() as i32, r.y.round() as i32),
                     None => {
                         // The small version while the full one loads.

@@ -255,7 +255,133 @@ service's section is written by its bridge's provider.
 
 ### Instagram
 
-(to come: feed, stories, profiles, posts, comments, search, activity)
+Direct is the core: chats are threads (`dm`, `group`), `folder` `inbox` or
+`requests` (message requests: reading one accepts nothing), `format`
+`instagram` (plain text). There is no Reels feed: a reel someone sends, or a
+followed account's reel post, is one video, never a page of reels.
+
+Capabilities: `send`, `react`, `mark_read`, `instagram.feed`,
+`instagram.stories`, `instagram.profiles`, `instagram.posts`,
+`instagram.comments`, `instagram.search`, `instagram.activity`,
+`instagram.badge`, and `login.browser` (the live account) or `fixtures`.
+
+**Chat `ext`**: `users` (the other people: User + `verified`, `story`),
+`seen` (the newest message is the account's and the other side has seen it),
+`call` (`{video, outcome}`: the newest item is a call; `outcome` `missed`,
+`ended`, `started`, `unknown`), `request` (a message request), `read_only`
+(the chat takes no messages).
+
+**Message `ext`**: `username` (the author's), `heart` (a like-heart, `text`
+"❤️"), `call` (`{video, outcome, duration}`, with `system` true), `voice`
+(`{duration_ms}`; `media[0]` is the clip), `alt` (a sticker's), `view_once`
+(`{video}`: disappearing media, shown as a placeholder, never kept),
+`unsupported` (Instagram's own one-line description is `text`),
+`preview_only` (the inbox's short copy of a message; its full content comes
+with `history`), and `share`:
+
+```json
+{"kind":"post","title":"","caption":"…","author":"username","url":"https://…","code":"…",
+ "username":null,"story":null,"context":null,"expired":false,"portrait":false,
+ "preview":Media|null}
+```
+
+`kind`: `post`, `reel`, `story`, `profile`, `link`, `unavailable`;
+`context` for stories: `share`, `reply`, `reaction`, `mention`; `portrait`:
+a 9:16 card. A share's own note is the message's `text`.
+
+**Objects.** Users (`IgUser`) are the core User with `verified`, `private`
+and `story`: the ring the app draws, `unseen`, `close_friends` (unseen, close
+friends' green), `seen`, or null (no live story).
+
+```json
+Post     {"id","code","ts","author":IgUser,"coauthors":[IgUser],"caption","location",
+          "media":[Media],"likes":123|null,"comments":4,"liked","saved","liked_by":"username"|null,
+          "reel","pinned","paid","comments_off"}
+Reel     {"id","user":IgUser,"latest_ts","seen_ts","unseen","close_friends","muted","own",
+          "title"(highlights),"cover":Media|null}               (the tray's summary)
+Reel+    {...Reel, "items":[Story]}
+Story    {"id","ts","expires","media":Media,"video","duration_ms","close_friends",
+          "stickers":[{"kind","x","y","w","h","label","target"}],"reshared_from"}
+Profile  {"user":IgUser,"bio","links":[{"title","url"}],"category","posts","followers","following",
+          "relation":"following"|"requested"|"none"|"self","followed_by","mutuals","locked"}
+Highlight {"id":"highlight:…","title","cover":Media|null}
+Comment  {"id","ts","author":IgUser,"text","likes","liked","replies","parent"}
+Badge    {"total","likes","comments","relationships","usertags","unseen"}
+Activity {"id","kind","ts","text","bold":[{"start","end","username"}],"actors":[IgUser],
+          "media":Media|null,"target":{"kind":"post"|"profile"|"story"|"none","id"},"following"}
+Hashtag  {"name","posts"}
+```
+
+A post's `media` items carry the full-width picture in `ref` and a grid
+tile in `thumb`, with the original `w`/`h` (a post's shape is its first
+item's, clamped to 4:5 … 1.91:1); a video's `ref` is its poster
+(`duration_ms` set). Story stickers are fractions of the 9:16 canvas
+(centre and size); `target` is a username, a post id, a URL or a tag.
+`likes` is null when the author hides the count. `liked_by`: someone the
+account follows who liked it. `locked`: a private account the account
+doesn't follow (its posts, tagged posts, highlights and lists are empty).
+Activity `kind`: `like`, `comment`, `mention`, `follow`, `tag`,
+`story_like`, `comment_like`, `request`, `system`; `bold` ranges are UTF-16
+offsets into `text`.
+
+**Commands** (reads unless marked):
+
+| `cmd` | Arguments | Result |
+| --- | --- | --- |
+| `instagram.feed` | optional `cursor`, `variant` (`following`, the default: newest first; `home`), `cached` | `{"posts":[Post],"cursor","end","cached"}`: only posts from accounts followed (no ads, suggestions or reel recommendations); `end`: "You're all caught up" |
+| `instagram.tray` | optional `cached` | `{"reels":[Reel],"own":Reel\|null,"cached"}`: unseen first, muted last |
+| `instagram.reels` | `ids` (up to 8 reel ids: users' ids, `highlight:…`) | `{"reels":[Reel+]}` in that order; gone ones left out |
+| `instagram.story.seen` | `reel`, `item`, `ts` (the item's) | `{}`: the reel shows seen up to it here; with writes on the bridge also sends Instagram's view receipt (never for the account's own reel or highlights) |
+| `instagram.profile` | `user` or `username`, optional `cached` (the account's own) | `{"profile":Profile\|null,"cached","thread":chat id\|null}` (the 1:1 chat, when known) |
+| `instagram.posts`, `instagram.tagged` | `user`, optional `username`, `cursor` | `{"posts":[Post],"cursor"}` (a reel on a grid is one video) |
+| `instagram.highlights` | `user` | `{"highlights":[Highlight]}` |
+| `instagram.post` | `post` | `{"post":Post}` |
+| `instagram.comments` | `post`, optional `cursor` | `{"comments":[Comment],"cursor","count"}` |
+| `instagram.replies` | `post`, `comment`, optional `cursor` | `{"comments":[Comment],"cursor"}` |
+| `instagram.search` | `query` | `{"users":[IgUser],"hashtags":[Hashtag]}` (nothing is added to Instagram's recent searches) |
+| `instagram.recent` | | the recent searches, as `instagram.search` answers |
+| `instagram.follows` | `user`, `kind` (`followers`, `following`), optional `cursor`, `query` | `{"users":[IgUser],"cursor"}` |
+| `instagram.activity` | optional `cached` | `{"badge":Badge,"items":[Activity]\|null,"requests":[IgUser],"writes","cached"}` |
+| `instagram.activity.viewed` | | `{"badge":Badge}`: the user saw Activity here; its part of the app's badge clears (Instagram's count is untouched) |
+| `instagram.badge` | | `{"badge":Badge}` |
+| `instagram.chat_with` | `user` | `{"chat":id\|null}` |
+| `instagram.like`, `instagram.save` | `post`, optional `remove` | `{}` (write) |
+| `instagram.follow` | `user`, optional `remove` | `{"following"}` (write) |
+| `instagram.fixtures.poke` | optional `chat`, `text` | `{"chat"}`: someone writes now (`--fixtures` only) |
+
+`cached: true` answers at once from what the bridge kept from the last
+read (the first page of the feed, the tray, the account's profile, the
+activity list), so the app draws in its first frame, then asks again
+without it. Instagram marks its activity seen when the activity list is
+read, so with writes off `instagram.activity` answers `items` from the last
+list read with writes on (or null) and the badge's counts; the follow
+requests are a plain read.
+
+**Events**: `instagram.badge` `{badge}` (the activity counts or what was
+seen here changed).
+
+**Notifications and the badge.** A new message notifies as the core says
+(not for messages found long after, at a restart: at most 6 h old); a missed
+call is a message like any other. New activity (Instagram's count past what
+was announced or seen here) notifies once with tag `activity` and `open`
+target `activity` ("3 likes, 1 comment"); the first count after signing in
+only records. The badge is the unread chats (inbox, not muted) plus the
+activity not seen here.
+
+**Polling.** Instagram's web has no push for this bridge, so it polls, as
+Instagram's web app and record do: the open chat every 10 s and the inbox
+every 25 s while the app is in front, the inbox every minute while the
+screen is on, every 5 minutes while it is off; message requests every tenth
+poll; the activity count every minute in front (2 min awake, 10 min off).
+±10 % jitter, doubling backoff on failures up to 10 minutes, 5 minutes after
+a rate limit; a session Instagram refused is retried every 30 minutes, or
+when the app comes to the front (at most every 5 minutes).
+
+**Signing in** (`login.start`): `method` `browser` imports instagram.com's
+session from the phone's Browser (sign in there first; nothing else is read
+from it), or `cookies` with `cookies` (a Cookie header: `sessionid`,
+`csrftoken`, `ds_user_id`, …). `login` events: `waiting`, `done`, `failed`
+(`detail`). `logout` forgets the session on the phone only.
 
 ### WhatsApp
 

@@ -292,7 +292,7 @@ impl StoryViewer {
             return;
         };
         let (w, h) = (rect.w.round() as u32, rect.h.round() as u32);
-        match p.picture(&item.media.reference, w, h, Fit::Cover) {
+        match p.picture(&item.media.reference, w, h, Fit::Cover, rect.y) {
             Some(image) => {
                 paint::blit(canvas, p.cache, &image, rect.x as i32, rect.y as i32);
                 if self.ready_at.is_none() {
@@ -361,6 +361,11 @@ impl StoryViewer {
             paint::icon(canvas, p.cache, Icon::Heart, width - 220.0, by + field.h / 2.0 - 36.0, 72.0, false, 0xffffff);
             paint::icon(canvas, p.cache, Icon::Share, width - 112.0, by + field.h / 2.0 - 36.0, 72.0, false, 0xffffff);
         }
+    }
+
+    /// The window rows the progress segments cover.
+    pub fn progress_rows() -> (i32, i32) {
+        ((BAR_Y - 2.0) as i32, (BAR_Y + BAR_H + 3.0) as i32)
     }
 
     /// The progress segments: all of them (`full`), or only the shown

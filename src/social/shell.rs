@@ -159,6 +159,18 @@ pub struct DrawCx<'a> {
     /// The whole canvas must be drawn (the first frame, a resize, a
     /// reopened window); otherwise it holds the last frame.
     pub full: bool,
+    /// What the frame changed, when the app knows (it leaves None
+    /// otherwise): the display is then told to move the rows itself and
+    /// sent only the rows drawn anew.
+    pub damage: Option<Damage>,
+}
+
+/// A frame's changes: rows `y0..y1` moved by `dy` (as `Canvas::move_rows`
+/// moved them), and the rows drawn anew. Nothing else may have changed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Damage {
+    pub moved: Option<(i32, i32, i32)>,
+    pub rows: Vec<(i32, i32)>,
 }
 
 /// The app's X window and what shows the canvas in it.
@@ -295,14 +307,32 @@ impl Renderer {
 
     /// Hands the canvas to the display (X compares it with what the server
     /// has and uploads only what changed).
-    fn present(&mut self) -> Result<(), Box<dyn Error>> {
+    fn present(&mut self, damage: Option<Damage>) -> Result<(), Box<dyn Error>> {
         match &mut self.output {
             Output::X(x) => {
-                x.presenter.present(&x.conn, &self.canvas, 0)?;
+                match damage {
+                    Some(damage) => {
+                        if let Some((y0, y1, dy)) = damage.moved {
+                            x.presenter.scroll(&x.conn, y0, y1, dy)?;
+                        }
+                        x.presenter.present_rows(&x.conn, &self.canvas, 0, &damage.rows)?;
+                    }
+                    None => {
+                        x.presenter.present(&x.conn, &self.canvas, 0)?;
+                    }
+                }
                 x.conn.flush()?;
             }
             Output::Wayland(wayland) => {
-                wayland.present(&self.canvas, None, None)?;
+                let width = self.canvas.width;
+                let areas: Option<Vec<wayland::Area>> = damage.map(|damage| {
+                    let mut areas: Vec<wayland::Area> = damage.rows.iter().map(|&(y0, y1)| (0, y0, width, y1)).collect();
+                    if let Some((y0, y1, _)) = damage.moved {
+                        areas.push((0, y0, width, y1));
+                    }
+                    areas
+                });
+                wayland.present(&self.canvas, areas.as_deref(), None)?;
             }
         }
         self.full = false;
@@ -595,17 +625,19 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
             media: &mut media,
             now: Instant::now(),
             full,
+            damage: None,
         };
         app.draw(&mut renderer.canvas, &mut dcx);
-        if let Err(error) = renderer.present() {
+        if let Err(error) = renderer.present(None) {
             renderer.fall_back(error)?;
             let mut dcx = DrawCx {
                 media: &mut media,
                 now: Instant::now(),
                 full: true,
+                damage: None,
             };
             app.draw(&mut renderer.canvas, &mut dcx);
-            renderer.present()?;
+            renderer.present(None)?;
         }
         redraw = false;
     }
@@ -773,9 +805,12 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
                 media: &mut media,
                 now,
                 full,
+                damage: None,
             };
             app.draw(&mut renderer.canvas, &mut dcx);
-            if let Err(error) = renderer.present() {
+            // A frame drawn whole (a resize, a reopened window) is sent whole.
+            let damage = if full { None } else { dcx.damage.take() };
+            if let Err(error) = renderer.present(damage) {
                 renderer.fall_back(error)?;
                 mapped = false;
                 redraw = true;
