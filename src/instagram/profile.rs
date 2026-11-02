@@ -365,7 +365,19 @@ impl Screen for ProfileScreen {
                     break;
                 }
                 let cy = hy + HIGHLIGHT / 2.0 + 10.0;
-                canvas.stroke_circle(cx, cy, HIGHLIGHT / 2.0, 3.0, 0x3a3a3a, 1.0);
+                paint::outline(
+                    canvas,
+                    RectF::new(
+                        cx - HIGHLIGHT / 2.0,
+                        cy - HIGHLIGHT / 2.0,
+                        HIGHLIGHT,
+                        HIGHLIGHT,
+                    ),
+                    HIGHLIGHT / 2.0,
+                    3.0,
+                    0x3a3a3a,
+                    BG,
+                );
                 paint::avatar(
                     canvas,
                     p,
@@ -420,7 +432,14 @@ impl Screen for ProfileScreen {
         let gy = base + self.grid_y;
         if profile.is_some_and(|p| p.locked) {
             if area.visible(gy, gy + 600.0) {
-                canvas.stroke_circle(width / 2.0, gy + 160.0, 90.0, 5.0, TEXT, 1.0);
+                paint::outline(
+                    canvas,
+                    RectF::new(width / 2.0 - 90.0, gy + 70.0, 180.0, 180.0),
+                    90.0,
+                    5.0,
+                    TEXT,
+                    BG,
+                );
                 paint::icon(
                     canvas,
                     p.cache,

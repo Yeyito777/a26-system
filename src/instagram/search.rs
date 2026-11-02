@@ -142,13 +142,14 @@ impl Screen for SearchScreen {
                     );
                 }
                 Row::Tag(tag) => {
-                    canvas.stroke_circle(
-                        MARGIN + AVATAR / 2.0,
-                        cy,
-                        AVATAR / 2.0 - 2.0,
+                    let d = AVATAR - 4.0;
+                    paint::outline(
+                        canvas,
+                        RectF::new(MARGIN + 2.0, cy - d / 2.0, d, d),
+                        d / 2.0,
                         3.0,
                         0x363636,
-                        1.0,
+                        BG,
                     );
                     paint::icon(
                         canvas,

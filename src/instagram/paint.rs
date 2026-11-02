@@ -803,6 +803,21 @@ pub fn fill_rrect4(canvas: &mut Canvas, rect: RectF, radii: [f32; 4], shade: &dy
     }
 }
 
+/// A rounded outline `width` thick over the background `bg`, drawn only
+/// in the clip's rows (a band frame pays for its own rows).
+pub fn outline(canvas: &mut Canvas, rect: RectF, radius: f32, width: f32, color: Rgb, bg: Rgb) {
+    let r = radius.min(rect.w / 2.0).min(rect.h / 2.0);
+    fill_rrect4(canvas, rect, [r; 4], &|_| color);
+    let inner = RectF::new(
+        rect.x + width,
+        rect.y + width,
+        rect.w - 2.0 * width,
+        rect.h - 2.0 * width,
+    );
+    let ir = (r - width).max(0.0);
+    fill_rrect4(canvas, inner, [ir; 4], &|_| bg);
+}
+
 /// Paints `bg` over the outside of a rounded corner box: rounds a picture
 /// drawn square.
 pub fn round_corners(canvas: &mut Canvas, rect: RectF, radius: f32, bg: Rgb) {

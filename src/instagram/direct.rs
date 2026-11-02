@@ -1156,7 +1156,7 @@ impl ThreadScreen {
                 let px = if mine { right - w } else { x };
                 if *expired {
                     let r = RectF::new(px, cy, w, 120.0);
-                    canvas.stroke_rrect(r, 30.0, 3.0, SEPARATOR, 1.0);
+                    paint::outline(canvas, r, 30.0, 3.0, SEPARATOR, BG);
                     paint::draw_text_centered(
                         canvas,
                         "Story unavailable",
@@ -1195,7 +1195,7 @@ impl ThreadScreen {
                 }
             }
             Body::Outline(label) => {
-                canvas.stroke_rrect(rect, RADIUS, 3.0, 0x363636, 1.0);
+                paint::outline(canvas, rect, RADIUS, 3.0, 0x363636, BG);
                 paint::draw_text(
                     canvas,
                     label,

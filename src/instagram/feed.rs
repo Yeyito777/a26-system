@@ -832,7 +832,14 @@ impl Screen for FeedScreen {
                 }
             } else if store.feed.end {
                 canvas.fill_circle(area.width / 2.0, end + 90.0, 50.0, 0x000000, 1.0);
-                canvas.stroke_circle(area.width / 2.0, end + 90.0, 50.0, 5.0, 0xc13584, 1.0);
+                paint::outline(
+                    canvas,
+                    RectF::new(area.width / 2.0 - 50.0, end + 40.0, 100.0, 100.0),
+                    50.0,
+                    5.0,
+                    0xc13584,
+                    BG,
+                );
                 paint::icon(
                     canvas,
                     p.cache,
