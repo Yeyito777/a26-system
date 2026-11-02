@@ -44,8 +44,10 @@ struct Mask {
     coverage: Vec<u8>,
 }
 
+type Cache = HashMap<(Glyph, u16), Rc<Option<Mask>>>;
+
 thread_local! {
-    static CACHE: RefCell<HashMap<(Glyph, u16), Rc<Option<Mask>>>> = RefCell::new(HashMap::new());
+    static CACHE: RefCell<Cache> = RefCell::new(HashMap::new());
 }
 
 /// The glyph's outline on a 24-unit grid scaled to `size` px, its box at 0,0.
@@ -76,7 +78,17 @@ fn build(glyph: Glyph, size: f32) -> Path {
             stroke(&mut path, &[(1.5, 12.5), (6.5, 17.0), (16.5, 7.0)], 1.9);
             stroke(&mut path, &[(11.5, 16.0), (12.5, 17.0), (22.5, 7.0)], 1.9);
         }
-        Glyph::Send => poly(&mut path, &[(3.0, 3.5), (21.5, 12.0), (3.0, 20.5), (5.0, 13.2), (14.0, 12.0), (5.0, 10.8)]),
+        Glyph::Send => poly(
+            &mut path,
+            &[
+                (3.0, 3.5),
+                (21.5, 12.0),
+                (3.0, 20.5),
+                (5.0, 13.2),
+                (14.0, 12.0),
+                (5.0, 10.8),
+            ],
+        ),
         Glyph::Smiley => {
             let (cx, cy, r) = (12.0 * k, 12.0 * k, 9.0 * k);
             path.circle(cx, cy, r);
@@ -100,7 +112,10 @@ fn build(glyph: Glyph, size: f32) -> Path {
             stroke(&mut path, &smile, 1.8);
         }
         Glyph::Lock => {
-            poly(&mut path, &[(5.0, 10.5), (19.0, 10.5), (19.0, 20.5), (5.0, 20.5)]);
+            poly(
+                &mut path,
+                &[(5.0, 10.5), (19.0, 10.5), (19.0, 20.5), (5.0, 20.5)],
+            );
             let arc: Vec<(f32, f32)> = (0..=16)
                 .map(|i| {
                     let a = std::f32::consts::PI + std::f32::consts::PI * i as f32 / 16.0;
@@ -114,12 +129,26 @@ fn build(glyph: Glyph, size: f32) -> Path {
         }
         Glyph::PlayFill => poly(&mut path, &[(7.0, 4.5), (20.0, 12.0), (7.0, 19.5)]),
         Glyph::PauseFill => {
-            poly(&mut path, &[(6.5, 5.0), (10.0, 5.0), (10.0, 19.0), (6.5, 19.0)]);
-            poly(&mut path, &[(14.0, 5.0), (17.5, 5.0), (17.5, 19.0), (14.0, 19.0)]);
+            poly(
+                &mut path,
+                &[(6.5, 5.0), (10.0, 5.0), (10.0, 19.0), (6.5, 19.0)],
+            );
+            poly(
+                &mut path,
+                &[(14.0, 5.0), (17.5, 5.0), (17.5, 19.0), (14.0, 19.0)],
+            );
         }
         Glyph::Archive => {
-            stroke(&mut path, &[(3.5, 5.0), (20.5, 5.0), (20.5, 9.0), (3.5, 9.0), (3.5, 5.0)], 1.8);
-            stroke(&mut path, &[(5.0, 9.0), (5.0, 19.5), (19.0, 19.5), (19.0, 9.0)], 1.8);
+            stroke(
+                &mut path,
+                &[(3.5, 5.0), (20.5, 5.0), (20.5, 9.0), (3.5, 9.0), (3.5, 5.0)],
+                1.8,
+            );
+            stroke(
+                &mut path,
+                &[(5.0, 9.0), (5.0, 19.5), (19.0, 19.5), (19.0, 9.0)],
+                1.8,
+            );
             stroke(&mut path, &[(9.5, 12.5), (14.5, 12.5)], 1.8);
         }
         Glyph::Forward => {
@@ -175,11 +204,40 @@ fn build(glyph: Glyph, size: f32) -> Path {
             stroke(&mut path, &arc, 2.2);
         }
         Glyph::VideoMissed => {
-            stroke(&mut path, &[(3.0, 7.0), (15.0, 7.0), (15.0, 17.0), (3.0, 17.0), (3.0, 7.0)], 1.9);
-            poly(&mut path, &[(16.0, 10.5), (21.0, 7.5), (21.0, 16.5), (16.0, 13.5)]);
+            stroke(
+                &mut path,
+                &[
+                    (3.0, 7.0),
+                    (15.0, 7.0),
+                    (15.0, 17.0),
+                    (3.0, 17.0),
+                    (3.0, 7.0),
+                ],
+                1.9,
+            );
+            poly(
+                &mut path,
+                &[(16.0, 10.5), (21.0, 7.5), (21.0, 16.5), (16.0, 13.5)],
+            );
         }
         Glyph::Paperclip => {
-            stroke(&mut path, &[(16.5, 7.0), (8.0, 15.5), (8.5, 18.0), (11.0, 18.5), (19.0, 10.5), (19.0, 6.0), (15.5, 4.5), (6.0, 14.0), (6.0, 19.0), (10.5, 21.0), (17.0, 14.5)], 1.7);
+            stroke(
+                &mut path,
+                &[
+                    (16.5, 7.0),
+                    (8.0, 15.5),
+                    (8.5, 18.0),
+                    (11.0, 18.5),
+                    (19.0, 10.5),
+                    (19.0, 6.0),
+                    (15.5, 4.5),
+                    (6.0, 14.0),
+                    (6.0, 19.0),
+                    (10.5, 21.0),
+                    (17.0, 14.5),
+                ],
+                1.7,
+            );
         }
         Glyph::Person => {
             path.circle(12.0 * k, 8.5 * k, 4.6 * k);
@@ -210,7 +268,16 @@ fn build(glyph: Glyph, size: f32) -> Path {
             poly(&mut path, &b);
         }
         Glyph::Doc => {
-            poly(&mut path, &[(5.0, 2.5), (14.5, 2.5), (19.0, 7.0), (19.0, 21.5), (5.0, 21.5)]);
+            poly(
+                &mut path,
+                &[
+                    (5.0, 2.5),
+                    (14.5, 2.5),
+                    (19.0, 7.0),
+                    (19.0, 21.5),
+                    (5.0, 21.5),
+                ],
+            );
         }
         Glyph::Settings => {
             let mut points = Vec::new();
@@ -240,20 +307,32 @@ fn mask(glyph: Glyph, size: f32) -> Rc<Option<Mask>> {
             .borrow_mut()
             .entry(key)
             .or_insert_with(|| {
-                Rc::new(build(glyph, size).rasterize().map(|(x, y, w, h, coverage)| Mask {
-                    x,
-                    y,
-                    w,
-                    h,
-                    coverage,
-                }))
+                Rc::new(
+                    build(glyph, size)
+                        .rasterize()
+                        .map(|(x, y, w, h, coverage)| Mask {
+                            x,
+                            y,
+                            w,
+                            h,
+                            coverage,
+                        }),
+                )
             })
             .clone()
     })
 }
 
 /// Draws `glyph` in a `size` box centred on (`cx`, `cy`).
-pub fn draw(canvas: &mut Canvas, glyph: Glyph, cx: f32, cy: f32, size: f32, color: Rgb, alpha: f32) {
+pub fn draw(
+    canvas: &mut Canvas,
+    glyph: Glyph,
+    cx: f32,
+    cy: f32,
+    size: f32,
+    color: Rgb,
+    alpha: f32,
+) {
     let left = (cx - size / 2.0).round() as i32;
     let top = (cy - size / 2.0).round() as i32;
     if let Some(m) = mask(glyph, size).as_ref() {

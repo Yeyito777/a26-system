@@ -29,7 +29,6 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::exocortex::gesture::Gesture;
-use crate::exocortex::ui::Haptic;
 use crate::gfx::{Canvas, RectF};
 use crate::keys::KeyInput;
 use crate::social::proto::{BridgeError, Chat, Event, Hello, Status};
@@ -688,7 +687,11 @@ impl App for WhatsApp {
                 if profile() {
                     eprintln!(
                         "whatsapp: opened {} in {:.1} ms ({} messages)",
-                        if chat.messages.is_empty() { "empty" } else { "chat" },
+                        if chat.messages.is_empty() {
+                            "empty"
+                        } else {
+                            "chat"
+                        },
                         cx.now.duration_since(at).as_secs_f64() * 1000.0,
                         chat.messages.len()
                     );
@@ -719,7 +722,8 @@ fn profile() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var_os("SOCIAL_APP_PROFILE").is_some() || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some()
+        std::env::var_os("SOCIAL_APP_PROFILE").is_some()
+            || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some()
     })
 }
 
@@ -739,7 +743,9 @@ impl WhatsApp {
         let saved = (
             self.list.waiting.clone(),
             self.archived.waiting.clone(),
-            self.chat.as_ref().map(|chat| (chat.waiting.clone(), chat.header_waiting.clone())),
+            self.chat
+                .as_ref()
+                .map(|chat| (chat.waiting.clone(), chat.header_waiting.clone())),
             std::mem::take(&mut self.damage),
         );
         match self.page {
@@ -785,28 +791,53 @@ impl WhatsApp {
 /// A sub-page's bar: back arrow, title (and subtitle).
 pub fn draw_bar(canvas: &mut Canvas, title: &str, subtitle: Option<&str>, color: crate::gfx::Rgb) {
     let width = canvas.width as f32;
-    canvas.fill_rect(0, 0, canvas.width, (theme::TOP + theme::HEADER) as i32, color, 1.0);
+    canvas.fill_rect(
+        0,
+        0,
+        canvas.width,
+        (theme::TOP + theme::HEADER) as i32,
+        color,
+        1.0,
+    );
     let cy = theme::TOP + theme::HEADER / 2.0;
     icons::draw(canvas, icons::Glyph::Back, 70.0, cy, 66.0, theme::TEXT, 1.0);
     let x = 150.0;
     let title = text::fit(title, Weight::Medium, theme::T_HEADER, width - x - 60.0);
     match subtitle {
         Some(sub) => {
-            text::draw(canvas, &title, x, cy - 6.0, Weight::Medium, theme::T_HEADER, theme::TEXT, 1.0);
+            text::draw(
+                canvas,
+                &title,
+                x,
+                cy - 6.0,
+                Weight::Medium,
+                theme::T_HEADER,
+                theme::TEXT,
+                1.0,
+            );
             let sub = text::fit(sub, Weight::Regular, theme::T_SUB, width - x - 60.0);
-            text::draw(canvas, &sub, x, cy + 42.0, Weight::Regular, theme::T_SUB, theme::SECONDARY, 1.0);
+            text::draw(
+                canvas,
+                &sub,
+                x,
+                cy + 42.0,
+                Weight::Regular,
+                theme::T_SUB,
+                theme::SECONDARY,
+                1.0,
+            );
         }
         None => {
             text::draw(
-            canvas,
-            &title,
-            x,
-            text::centered_baseline(cy, Weight::Medium, theme::T_HEADER),
-            Weight::Medium,
-            theme::T_HEADER,
-            theme::TEXT,
-            1.0,
-        );
+                canvas,
+                &title,
+                x,
+                text::centered_baseline(cy, Weight::Medium, theme::T_HEADER),
+                Weight::Medium,
+                theme::T_HEADER,
+                theme::TEXT,
+                1.0,
+            );
         }
     }
 }
@@ -814,8 +845,4 @@ pub fn draw_bar(canvas: &mut Canvas, title: &str, subtitle: Option<&str>, color:
 /// Whether a tap at (x, y) is on a sub-page bar's back arrow.
 pub fn on_back(x: f32, y: f32) -> bool {
     y < theme::TOP + theme::HEADER && y > theme::TOP - 20.0 && x < 140.0
-}
-
-pub fn haptic(cx: &Cx, haptic: Haptic) {
-    cx.haptic(haptic);
 }

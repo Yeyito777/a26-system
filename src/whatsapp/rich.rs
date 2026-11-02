@@ -92,16 +92,17 @@ pub fn spans(text: &str) -> Vec<(String, Style)> {
     };
     while i < chars.len() {
         // ```mono```
-        if chars[i] == '`' && chars.get(i + 1) == Some(&'`') && chars.get(i + 2) == Some(&'`') {
-            if let Some(end) = (i + 3..chars.len().saturating_sub(2))
+        if chars[i] == '`'
+            && chars.get(i + 1) == Some(&'`')
+            && chars.get(i + 2) == Some(&'`')
+            && let Some(end) = (i + 3..chars.len().saturating_sub(2))
                 .find(|&j| chars[j] == '`' && chars[j + 1] == '`' && chars[j + 2] == '`')
-                && end > i + 3
-            {
-                flush(&mut plain, &mut out);
-                out.push((chars[i + 3..end].iter().collect(), Style::Mono));
-                i = end + 3;
-                continue;
-            }
+            && end > i + 3
+        {
+            flush(&mut plain, &mut out);
+            out.push((chars[i + 3..end].iter().collect(), Style::Mono));
+            i = end + 3;
+            continue;
         }
         let marker = match chars[i] {
             '*' => Some(Style::Bold),
@@ -185,8 +186,10 @@ pub fn url_of(link: &str) -> String {
 pub fn emojify(text_in: &str) -> std::borrow::Cow<'_, str> {
     let needs = |c: char, next: Option<char>| {
         let code = c as u32;
-        ((0x1f300..=0x1faff).contains(&code) && !(0x1f3fb..=0x1f3ff).contains(&code) || emoji_presentation(code))
-            && !next.is_some_and(|n| matches!(n as u32, 0xfe0e | 0xfe0f | 0x200d | 0x1f3fb..=0x1f3ff))
+        ((0x1f300..=0x1faff).contains(&code) && !(0x1f3fb..=0x1f3ff).contains(&code)
+            || emoji_presentation(code))
+            && !next
+                .is_some_and(|n| matches!(n as u32, 0xfe0e | 0xfe0f | 0x200d | 0x1f3fb..=0x1f3ff))
     };
     let mut chars = text_in.chars().peekable();
     let mut any = false;
@@ -372,8 +375,21 @@ pub fn draw(
         }
         for run in &line.runs {
             let weight = run.style.weight(base);
-            let color = if run.style == Style::Link { link } else { color };
-            text::draw(canvas, &run.text, x + run.x, y, weight, laid.size, color, 1.0);
+            let color = if run.style == Style::Link {
+                link
+            } else {
+                color
+            };
+            text::draw(
+                canvas,
+                &run.text,
+                x + run.x,
+                y,
+                weight,
+                laid.size,
+                color,
+                1.0,
+            );
             if run.style == Style::Strike {
                 canvas.fill_rect(
                     (x + run.x) as i32,
@@ -411,7 +427,8 @@ pub fn emoji_only(text_in: &str) -> bool {
         if c.is_whitespace() {
             continue;
         }
-        let modifier = matches!(code, 0xfe0f | 0x200d | 0x1f3fb..=0x1f3ff | 0x20e3 | 0xe0020..=0xe007f);
+        let modifier =
+            matches!(code, 0xfe0f | 0x200d | 0x1f3fb..=0x1f3ff | 0x20e3 | 0xe0020..=0xe007f);
         let pictograph = matches!(code, 0x2600..=0x27bf | 0x1f000..=0x1faff | 0x2190..=0x21ff | 0x2b00..=0x2bff | 0x00a9 | 0x00ae | 0x203c | 0x2049 | 0x2122 | 0x2139 | 0x3030 | 0x303d | 0x3297 | 0x3299);
         if !(modifier || pictograph) {
             return false;
@@ -438,9 +455,15 @@ mod tests {
                 (" what I said".to_owned(), Style::Plain),
             ]
         );
-        assert_eq!(spans("~cancelled~ moved")[0], ("cancelled".to_owned(), Style::Strike));
+        assert_eq!(
+            spans("~cancelled~ moved")[0],
+            ("cancelled".to_owned(), Style::Strike)
+        );
         assert_eq!(spans("2*3*4 stays")[0].1, Style::Plain);
-        assert_eq!(spans("```npm run build``` fails")[0], ("npm run build".to_owned(), Style::Mono));
+        assert_eq!(
+            spans("```npm run build``` fails")[0],
+            ("npm run build".to_owned(), Style::Mono)
+        );
         let linked = spans("see https://example.com/a, ok");
         assert_eq!(linked[1], ("https://example.com/a".to_owned(), Style::Link));
         assert_eq!(linked[2].0, ", ok");
@@ -455,4 +478,3 @@ mod tests {
         assert!(!emoji_only("🔥🔥🔥🔥"));
     }
 }
-

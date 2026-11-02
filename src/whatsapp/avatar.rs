@@ -41,7 +41,14 @@ impl<'a> Pics<'a> {
         }
     }
 
-    pub fn get(&mut self, reference: &str, w: u32, h: u32, fit: Fit, now: Instant) -> Option<Rc<Image>> {
+    pub fn get(
+        &mut self,
+        reference: &str,
+        w: u32,
+        h: u32,
+        fit: Fit,
+        now: Instant,
+    ) -> Option<Rc<Image>> {
         let got = self.media.get(reference, w, h, fit, now);
         if got.is_none() && !reference.is_empty() {
             let key = (reference.to_owned(), w.min(4096), h.min(4096), fit);
@@ -88,7 +95,8 @@ impl Rounded {
         }
         let rounded = Rc::new(round(image, radius));
         if self.cache.len() > 400 {
-            self.cache.retain(|_, (source, _)| Rc::strong_count(source) > 1);
+            self.cache
+                .retain(|_, (source, _)| Rc::strong_count(source) > 1);
         }
         self.cache.insert(key, (image.clone(), rounded.clone()));
         rounded
@@ -168,5 +176,13 @@ pub fn silhouette(canvas: &mut Canvas, group: bool, x: f32, y: f32, size: f32) {
     let r = size / 2.0;
     canvas.fill_circle(x + r, y + r, r, theme::AVATAR_BG, 1.0);
     let glyph = if group { Glyph::Group } else { Glyph::Person };
-    icons::draw(canvas, glyph, x + r, y + r + size * 0.04, size * 0.62, theme::AVATAR_FG, 1.0);
+    icons::draw(
+        canvas,
+        glyph,
+        x + r,
+        y + r + size * 0.04,
+        size * 0.62,
+        theme::AVATAR_FG,
+        1.0,
+    );
 }

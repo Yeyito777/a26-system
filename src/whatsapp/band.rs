@@ -14,11 +14,6 @@ pub struct Band {
 }
 
 impl Band {
-    /// Forgets what was drawn (the next frame draws the whole band).
-    pub fn invalidate(&mut self) {
-        self.drawn = None;
-    }
-
     /// Draws rows `y0..y1` at `translate` (the content's y offset; rounded)
     /// for content `key`. `draw` draws the content clipped to a row range.
     /// What changed goes into `damage`. Returns how far the band moved (0:
@@ -44,7 +39,11 @@ impl Band {
         }
         if shift.abs() < (y1 - y0) / 2 {
             canvas.move_rows(y0, y1, shift);
-            let strip = if shift < 0 { (y1 + shift, y1) } else { (y0, y0 + shift) };
+            let strip = if shift < 0 {
+                (y1 + shift, y1)
+            } else {
+                (y0, y0 + shift)
+            };
             canvas.set_clip(0, strip.0, canvas.width, strip.1);
             draw(canvas, strip);
             canvas.reset_clip();

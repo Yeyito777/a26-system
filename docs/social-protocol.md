@@ -259,7 +259,85 @@ service's section is written by its bridge's provider.
 
 ### WhatsApp
 
-(to come: the QR login, status updates)
+The bridge is one more of the account's linked devices, as WhatsApp Web
+is: record's own Baileys code (`src/whatsapp/`: its browser identity, web
+version, history settings and auth store), run in the bridge's process
+(record `src/service/providers/whatsapp.ts`). One setting differs from
+record's terminal client: it never marks itself online, so the account
+never shows "online" from it and the primary phone keeps its pushes; its
+delivery receipts are WhatsApp Web's background ("inactive") ones. Read
+receipts, presence and typing are never sent; `send`, `react` and
+`mark_read` go through §4's switch.
+
+**Signing in.** `login.start` with `method: "qr"` (the only one). `login`
+events: `qr` (`qr.size`, `qr.rows`, `expires_ms`: 60 s for the first code,
+20 s for each next one; a new event replaces the code), `waiting` once the
+primary phone has scanned it, `done` when the device is linked (then
+`status` goes `online` and the first history sync fills the list over the
+next minutes), `failed` (`detail`). A login ends by itself after 5 minutes;
+`login.cancel` ends it at once. `logout` unlinks this device from the
+account and removes the session, the chats and their media. WhatsApp
+unlinking the device (from the primary phone) does the same and leaves
+`status` `signed_out` with a `detail`; another client resuming the same
+session (two bridges on one state) leaves `error`.
+
+**Ids.** Chat ids are `wa:` and the chat's jid in base64url (a phone number
+appears in no log); a chat known first by its LID becomes its phone
+number's when WhatsApp maps them (`chat_removed` for the old id, `chat` for
+the merged one). User ids are `u:` and a base64url jid; the account's own
+messages have author `{"id": "me", "name": "You"}`. Message ids are
+WhatsApp's.
+
+**Names.** A chat's `title` is the contact's name as the primary phone
+saved it, else a business's verified name, else the number as WhatsApp
+shows it (`+1 555-010-1234`), else the person's own push name; a group's is
+its subject. `ext.push_name` (chats and messages) is the person's own name
+when the account has not saved them: show it as WhatsApp does (`~ Ana`).
+
+**Chats.** `unread` is WhatsApp's count (kept as the primary phone reads and
+marks chats); `ext.marked_unread` a chat marked unread there (`unread` 1).
+`members` is a group's size once known. `last.text` is a summary (`📷
+Photo`, `🎤 Voice message (0:42)`, a notice's sentence); `ext.status` is the
+last message's receipt when it is the account's, `ext.deleted` when it was
+deleted, `ext.notice` when it is a notice. Archived chats are in the
+`archived` folder. Status updates and channels are not chats.
+
+**Messages.** `format` is `whatsapp` (`*bold*`, `_italic_`, `~strike~`,
+```` ```mono``` ````). Media: `image`, `video`, `gif` (a looping silent
+video), `sticker` (WebP), `audio` (`ext.voice` for a voice note,
+`duration_ms`), `file` (`name`, `size`). `thumb` is the small preview
+WhatsApp carries in the message (a video's poster): `media.fetch` it like
+any picture; the full file needs the connection (`unavailable` without
+it). A reply's `reply_to.text` is the quoted message's summary. Deleted
+messages stay as `deleted` with no text and no media; group changes and
+missed calls are `system` notices whose `text` is the sentence (with the
+names known now). `status` (the account's messages): `pending`, `sent`,
+`delivered`, `read` (or played), `failed`. `ext.view_once` marks a view-once
+message (its media is not shown).
+
+**History.** `history` answers from what the bridge has kept (what WhatsApp
+synced when the device was linked, and everything since); past its oldest
+message it asks the primary phone for the page before it (50 messages) and
+answers when that comes, within 12 s. The phone must be online for that:
+otherwise the answer is what there is, `more` false, and a later request
+asks again.
+
+**Pictures.** A chat's `avatar` is its profile picture (preview size),
+fetched through the session one at a time when the app first draws it and
+kept a week; a chat found to have none gets `avatar: null` (asked again in
+three days).
+
+**Commands.** `whatsapp.chat_info` (`chat`): `title`, `phone` (a person's
+number, as shown), `push_name`, `members`, `group`, `muted`, `messages` (how
+many the bridge keeps). With `--fixtures`: `whatsapp.fixtures.poke`
+(`chat`, `text`: someone writes now) and `whatsapp.fixtures.scan` (the
+made-up QR is scanned), and `RECORD_WA_FIXTURES_SIGNED_OUT=1` starts signed
+out, `RECORD_WA_FIXTURES_ANCHOR=ms` pins the made-up times.
+
+**State.** `STATE/auth/` holds the linked device's keys (record's auth
+store, `0600`), `STATE/wa/` what the bridge keeps (`meta.json`: contacts and
+chats; `messages/`: a file per chat, up to 5,000 messages each). A second
+bridge on the same state directory refuses to start.
 
 ## 6. Running a bridge
 

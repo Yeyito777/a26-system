@@ -3,9 +3,27 @@
 
 #![allow(dead_code)]
 
-const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
 const MONTHS: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
     "December",
 ];
 
@@ -28,7 +46,11 @@ pub fn now_secs() -> i64 {
 /// A local day as a number (days since 1970 in local time): for "same day".
 pub fn day_of(t_ms: i64) -> i64 {
     let tm = local(t_ms / 1000);
-    days_from_civil(i64::from(tm.tm_year) + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32)
+    days_from_civil(
+        i64::from(tm.tm_year) + 1900,
+        tm.tm_mon as u32 + 1,
+        tm.tm_mday as u32,
+    )
 }
 
 /// Local days of many times in order (a chat's messages): one look at the
@@ -47,9 +69,15 @@ impl Days {
             return day;
         }
         let tm = local(t_ms.div_euclid(1000));
-        let day = days_from_civil(i64::from(tm.tm_year) + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32);
-        let into = (i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec)) * 1000
-            + t_ms.rem_euclid(1000);
+        let day = days_from_civil(
+            i64::from(tm.tm_year) + 1900,
+            tm.tm_mon as u32 + 1,
+            tm.tm_mday as u32,
+        );
+        let into =
+            (i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec))
+                * 1000
+                + t_ms.rem_euclid(1000);
         let start = t_ms - into;
         // A day with a clock change is an hour shorter or longer: the span
         // stops short of the next midnight rather than past it.

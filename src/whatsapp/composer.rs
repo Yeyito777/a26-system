@@ -54,7 +54,10 @@ impl Composer {
                 // A whole emoji sequence goes at once: its modifiers, and
                 // what a joiner ties it to.
                 while let Some(c) = self.text.pop() {
-                    if c == '\u{fe0f}' || c == '\u{200d}' || ('\u{1f3fb}'..='\u{1f3ff}').contains(&c) {
+                    if c == '\u{fe0f}'
+                        || c == '\u{200d}'
+                        || ('\u{1f3fb}'..='\u{1f3ff}').contains(&c)
+                    {
                         continue;
                     }
                     if self.text.ends_with('\u{200d}') {
@@ -74,13 +77,23 @@ fn keyboard_up(height: f32) -> bool {
 }
 
 fn bottom_inset(height: f32) -> f32 {
-    if keyboard_up(height) { 14.0 } else { theme::SAFE_BOTTOM }
+    if keyboard_up(height) {
+        14.0
+    } else {
+        theme::SAFE_BOTTOM
+    }
 }
 
 /// The field's text as laid out (lines), within its width.
 fn lines(app: &WhatsApp, width: f32) -> Vec<String> {
     let inner = field_rect(width, 0.0, 1).w - 140.0;
-    let laid = super::rich::layout(&app.composer.text, inner, FIELD_SIZE, FIELD_LINE, Weight::Regular);
+    let laid = super::rich::layout(
+        &app.composer.text,
+        inner,
+        FIELD_SIZE,
+        FIELD_LINE,
+        Weight::Regular,
+    );
     laid.lines
         .iter()
         .map(|line| line.runs.iter().map(|r| r.text.as_str()).collect())
@@ -107,13 +120,20 @@ pub fn height(app: &WhatsApp, height: f32) -> f32 {
     }
     let lines = lines(app, f32::from(crate::REQUESTED_WIDTH)).len();
     let field = field_rect(f32::from(crate::REQUESTED_WIDTH), 0.0, lines);
-    let reply = if app.composer.reply.is_some() { REPLY_H } else { 0.0 };
+    let reply = if app.composer.reply.is_some() {
+        REPLY_H
+    } else {
+        0.0
+    };
     field.h + reply + 26.0 + bottom_inset(height)
 }
 
 /// What the composer shows (the band above it redraws whole when it changes).
 pub fn key(app: &WhatsApp) -> u64 {
-    let mut parts = vec![app.composer.text.len() as u64, u64::from(app.composer.reply.is_some())];
+    let mut parts = vec![
+        app.composer.text.len() as u64,
+        u64::from(app.composer.reply.is_some()),
+    ];
     parts.extend(app.composer.text.bytes().map(u64::from));
     super::band::key_of(&parts)
 }
@@ -156,7 +176,14 @@ pub fn tap(app: &mut WhatsApp, cx: &mut Cx, hit: Hit) {
 pub fn draw(app: &WhatsApp, canvas: &mut Canvas, width: f32, height: f32) {
     let area = self::height(app, height);
     let top = height - area;
-    canvas.fill_rect(0, top as i32, canvas.width, area.ceil() as i32 + 1, theme::BG, 1.0);
+    canvas.fill_rect(
+        0,
+        top as i32,
+        canvas.width,
+        area.ceil() as i32 + 1,
+        theme::BG,
+        1.0,
+    );
     if !app.settings.writes {
         let rect = RectF {
             x: 20.0,
@@ -165,9 +192,35 @@ pub fn draw(app: &WhatsApp, canvas: &mut Canvas, width: f32, height: f32) {
             h: READ_ONLY_H - 28.0,
         };
         canvas.fill_rrect(rect, 30.0, theme::CHIP, 1.0);
-        icons::draw(canvas, Glyph::Lock, rect.x + 60.0, rect.y + rect.h / 2.0, 48.0, theme::SECONDARY, 1.0);
-        text::draw(canvas, "Writes are off on this phone", rect.x + 116.0, rect.y + 52.0, Weight::Medium, 36.0, theme::TEXT, 1.0);
-        text::draw(canvas, "Turn them on in Settings to send", rect.x + 116.0, rect.y + 98.0, Weight::Regular, 32.0, theme::SECONDARY, 1.0);
+        icons::draw(
+            canvas,
+            Glyph::Lock,
+            rect.x + 60.0,
+            rect.y + rect.h / 2.0,
+            48.0,
+            theme::SECONDARY,
+            1.0,
+        );
+        text::draw(
+            canvas,
+            "Writes are off on this phone",
+            rect.x + 116.0,
+            rect.y + 52.0,
+            Weight::Medium,
+            36.0,
+            theme::TEXT,
+            1.0,
+        );
+        text::draw(
+            canvas,
+            "Turn them on in Settings to send",
+            rect.x + 116.0,
+            rect.y + 98.0,
+            Weight::Regular,
+            32.0,
+            theme::SECONDARY,
+            1.0,
+        );
         return;
     }
     let bottom = height - bottom_inset(height);
@@ -188,16 +241,64 @@ pub fn draw(app: &WhatsApp, canvas: &mut Canvas, width: f32, height: f32) {
             h: REPLY_H - 22.0,
         };
         canvas.fill_rrect(q, 16.0, 0x000000, 0.22);
-        let color = if reply.author == "You" { theme::TEAL } else { theme::name_color(&reply.author) };
-        canvas.fill_rrect(RectF { x: q.x, y: q.y, w: 9.0, h: q.h }, 4.0, color, 1.0);
+        let color = if reply.author == "You" {
+            theme::TEAL
+        } else {
+            theme::name_color(&reply.author)
+        };
+        canvas.fill_rrect(
+            RectF {
+                x: q.x,
+                y: q.y,
+                w: 9.0,
+                h: q.h,
+            },
+            4.0,
+            color,
+            1.0,
+        );
         let author = text::fit(&reply.author, Weight::SemiBold, 34.0, q.w - 120.0);
-        text::draw(canvas, &author, q.x + 30.0, q.y + 44.0, Weight::SemiBold, 34.0, color, 1.0);
+        text::draw(
+            canvas,
+            &author,
+            q.x + 30.0,
+            q.y + 44.0,
+            Weight::SemiBold,
+            34.0,
+            color,
+            1.0,
+        );
         let quoted = text::fit(&reply.text, Weight::Regular, 34.0, q.w - 120.0);
-        text::draw(canvas, &quoted, q.x + 30.0, q.y + 90.0, Weight::Regular, 34.0, theme::SECONDARY, 1.0);
-        crate::exocortex::ui::icons::draw(canvas, Icon::X, q.x + q.w - 50.0, q.y + q.h / 2.0, 44.0, theme::SECONDARY, 1.0);
+        text::draw(
+            canvas,
+            &quoted,
+            q.x + 30.0,
+            q.y + 90.0,
+            Weight::Regular,
+            34.0,
+            theme::SECONDARY,
+            1.0,
+        );
+        crate::exocortex::ui::icons::draw(
+            canvas,
+            Icon::X,
+            q.x + q.w - 50.0,
+            q.y + q.h / 2.0,
+            44.0,
+            theme::SECONDARY,
+            1.0,
+        );
     }
     canvas.fill_rrect(field, BUTTON / 2.0, theme::SURFACE, 1.0);
-    icons::draw(canvas, Glyph::Smiley, field.x + 66.0, field.y + field.h - BUTTON / 2.0, 58.0, theme::SECONDARY, 1.0);
+    icons::draw(
+        canvas,
+        Glyph::Smiley,
+        field.x + 66.0,
+        field.y + field.h - BUTTON / 2.0,
+        58.0,
+        theme::SECONDARY,
+        1.0,
+    );
     let text_x = field.x + 124.0;
     let shown = lines.len().min(MAX_LINES);
     let first = lines.len() - shown;
@@ -214,19 +315,43 @@ pub fn draw(app: &WhatsApp, canvas: &mut Canvas, width: f32, height: f32) {
         );
     } else {
         for (n, line) in lines.iter().skip(first).enumerate() {
-            text::draw(canvas, line, text_x, field.y + 30.0 + FIELD_SIZE * 0.9 + n as f32 * FIELD_LINE, Weight::Regular, FIELD_SIZE, theme::TEXT, 1.0);
+            text::draw(
+                canvas,
+                line,
+                text_x,
+                field.y + 30.0 + FIELD_SIZE * 0.9 + n as f32 * FIELD_LINE,
+                Weight::Regular,
+                FIELD_SIZE,
+                theme::TEXT,
+                1.0,
+            );
         }
     }
     if keyboard_up(height) {
         let last = lines.last().map_or("", String::as_str);
-        let w = if app.composer.text.is_empty() { 0.0 } else { text::measure(last, Weight::Regular, FIELD_SIZE) };
-        let row = if app.composer.text.is_empty() { 0 } else { shown - 1 };
+        let w = if app.composer.text.is_empty() {
+            0.0
+        } else {
+            text::measure(last, Weight::Regular, FIELD_SIZE)
+        };
+        let row = if app.composer.text.is_empty() {
+            0
+        } else {
+            shown - 1
+        };
         let caret_y = if app.composer.text.is_empty() {
             field.y + field.h / 2.0 - 28.0
         } else {
             field.y + 30.0 + row as f32 * FIELD_LINE + 4.0
         };
-        canvas.fill_rect((text_x + w + 2.0) as i32, caret_y as i32, 4, 56, theme::GREEN, 1.0);
+        canvas.fill_rect(
+            (text_x + w + 2.0) as i32,
+            caret_y as i32,
+            4,
+            56,
+            theme::GREEN,
+            1.0,
+        );
     }
     let bx = field.x + field.w + 14.0 + BUTTON / 2.0;
     let by = bottom - BUTTON / 2.0;
@@ -234,6 +359,14 @@ pub fn draw(app: &WhatsApp, canvas: &mut Canvas, width: f32, height: f32) {
     if app.composer.text.trim().is_empty() {
         crate::exocortex::ui::icons::draw(canvas, Icon::Mic, bx, by, 60.0, theme::ON_GREEN, 1.0);
     } else {
-        icons::draw(canvas, Glyph::Send, bx + 4.0, by, 58.0, theme::ON_GREEN, 1.0);
+        icons::draw(
+            canvas,
+            Glyph::Send,
+            bx + 4.0,
+            by,
+            58.0,
+            theme::ON_GREEN,
+            1.0,
+        );
     }
 }

@@ -25,7 +25,11 @@ pub enum Filter {
     Groups,
 }
 
-const FILTERS: [(Filter, &str); 3] = [(Filter::All, "All"), (Filter::Unread, "Unread"), (Filter::Groups, "Groups")];
+const FILTERS: [(Filter, &str); 3] = [
+    (Filter::All, "All"),
+    (Filter::Unread, "Unread"),
+    (Filter::Groups, "Groups"),
+];
 const ARCHIVED_ROW: f32 = 150.0;
 const SEARCH_TOP: f32 = 14.0;
 const CHIPS_TOP: f32 = SEARCH_TOP + theme::SEARCH_H + 34.0;
@@ -104,7 +108,11 @@ impl ListView {
         if self.rows_for.as_ref() == Some(&key) {
             return;
         }
-        let source = if self.archive() { &chats.archived } else { &chats.inbox };
+        let source = if self.archive() {
+            &chats.archived
+        } else {
+            &chats.inbox
+        };
         self.rows = source
             .iter()
             .filter(|id| {
@@ -170,7 +178,7 @@ pub fn tick(list: &mut ListView, chats: &mut super::Chats, cx: &mut Cx) {
     }
 }
 
-fn view<'a>(app: &'a mut WhatsApp) -> &'a mut ListView {
+fn view(app: &mut WhatsApp) -> &mut ListView {
     if app.page == Page::Archived {
         &mut app.archived
     } else {
@@ -300,7 +308,11 @@ fn hit(app: &mut WhatsApp, x: f32, y: f32, height: f32, now: Instant) -> Option<
     app.chats.sort();
     let archived_count = app.chats.archived.len();
     let page = app.page;
-    let list = if page == Page::Archived { &mut app.archived } else { &mut app.list };
+    let list = if page == Page::Archived {
+        &mut app.archived
+    } else {
+        &mut app.list
+    };
     list.refresh_rows(&mut app.chats);
     let (top, bottom) = band_of(list, height);
     if y < top {
@@ -314,7 +326,11 @@ fn hit(app: &mut WhatsApp, x: f32, y: f32, height: f32, now: Instant) -> Option<
     }
     if y >= bottom {
         if page == Page::List && !list.searching() {
-            return Some(Hit::Tab(if x < app_width() / 2.0 { Page::List } else { Page::Settings }));
+            return Some(Hit::Tab(if x < app_width() / 2.0 {
+                Page::List
+            } else {
+                Page::Settings
+            }));
         }
         return None;
     }
@@ -368,7 +384,11 @@ fn chip_label(label: &str, filter: Filter, chats: &super::Chats) -> String {
 }
 
 fn chip_width(label: &str, filter: Filter, chats: &super::Chats) -> f32 {
-    text::measure(&chip_label(label, filter, chats), Weight::Medium, theme::T_CHIP) + 70.0
+    text::measure(
+        &chip_label(label, filter, chats),
+        Weight::Medium,
+        theme::T_CHIP,
+    ) + 70.0
 }
 
 pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool, archive: bool) {
@@ -381,7 +401,11 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let status = app.status.clone();
     let page = app.page;
     {
-        let list = if archive { &mut app.archived } else { &mut app.list };
+        let list = if archive {
+            &mut app.archived
+        } else {
+            &mut app.list
+        };
         list.refresh_rows(&mut app.chats);
     }
     let list = if archive { &app.archived } else { &app.list };
@@ -411,7 +435,11 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let pressed = list.pressed.clone();
     let chats = &app.chats;
     let rounded = &mut app.rounded;
-    let view = if archive { &mut app.archived } else { &mut app.list };
+    let view = if archive {
+        &mut app.archived
+    } else {
+        &mut app.list
+    };
     // Lent to the drawing, given back below.
     let rows = std::mem::take(&mut view.rows);
     let ready = avatar::arrived(cx.media, &mut view.waiting);
@@ -430,7 +458,9 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
                 }
             }
         }
-        let first = (((y0 as f32 - base - rows_top) / theme::ROW).floor().max(0.0)) as usize;
+        let first = (((y0 as f32 - base - rows_top) / theme::ROW)
+            .floor()
+            .max(0.0)) as usize;
         for (index, id) in rows.iter().enumerate().skip(first) {
             let y = base + rows_top + index as f32 * theme::ROW;
             if y > y1 as f32 {
@@ -479,7 +509,10 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     // Pictures that came: only their rows again.
     if drawn.is_some() {
         for (c0, c1) in ready {
-            let (y0, y1) = (((c0 + translate) as i32).max(top as i32), ((c1 + translate) as i32).min(bottom as i32));
+            let (y0, y1) = (
+                ((c0 + translate) as i32).max(top as i32),
+                ((c1 + translate) as i32).min(bottom as i32),
+            );
             if y1 > y0 {
                 canvas.set_clip(0, y0, canvas.width, y1);
                 draw_rows(canvas, (y0, y1));
@@ -501,9 +534,13 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     {
         if let Some(avatar) = app.chats.get(id).and_then(|chat| chat.avatar.as_ref()) {
             let px = theme::AVATAR.round() as u32;
-            let _ = cx
-                .media
-                .get(&avatar.reference, px, px, crate::social::media::Fit::Cover, now);
+            let _ = cx.media.get(
+                &avatar.reference,
+                px,
+                px,
+                crate::social::media::Fit::Cover,
+                now,
+            );
         }
     }
 }
@@ -520,8 +557,21 @@ fn hash_pressed(pressed: Option<&Pressed>) -> u64 {
     }
 }
 
-fn draw_app_bar(canvas: &mut Canvas, status: &crate::social::proto::Status, list: &ListView, archive: bool, width: f32) {
-    canvas.fill_rect(0, 0, canvas.width, (theme::TOP + theme::APP_BAR) as i32, theme::BAR, 1.0);
+fn draw_app_bar(
+    canvas: &mut Canvas,
+    status: &crate::social::proto::Status,
+    list: &ListView,
+    archive: bool,
+    width: f32,
+) {
+    canvas.fill_rect(
+        0,
+        0,
+        canvas.width,
+        (theme::TOP + theme::APP_BAR) as i32,
+        theme::BAR,
+        1.0,
+    );
     let cy = theme::TOP + theme::APP_BAR / 2.0;
     if archive {
         icons::draw(canvas, Glyph::Back, 70.0, cy, 66.0, theme::TEXT, 1.0);
@@ -541,29 +591,100 @@ fn draw_app_bar(canvas: &mut Canvas, status: &crate::social::proto::Status, list
         icons::draw(canvas, Glyph::Back, 70.0, cy, 66.0, theme::TEXT, 1.0);
         let baseline = text::centered_baseline(cy, Weight::Regular, theme::T_TITLE);
         if query.is_empty() {
-            text::draw(canvas, "Search…", 150.0, baseline, Weight::Regular, theme::T_TITLE, theme::SECONDARY, 1.0);
+            text::draw(
+                canvas,
+                "Search…",
+                150.0,
+                baseline,
+                Weight::Regular,
+                theme::T_TITLE,
+                theme::SECONDARY,
+                1.0,
+            );
             canvas.fill_rect(150, (cy - 30.0) as i32, 3, 60, theme::GREEN, 1.0);
         } else {
             let shown = text::fit(query, Weight::Regular, theme::T_TITLE, width - 220.0);
-            text::draw(canvas, &shown, 150.0, baseline, Weight::Regular, theme::T_TITLE, theme::TEXT, 1.0);
+            text::draw(
+                canvas,
+                &shown,
+                150.0,
+                baseline,
+                Weight::Regular,
+                theme::T_TITLE,
+                theme::TEXT,
+                1.0,
+            );
             let w = text::measure(&shown, Weight::Regular, theme::T_TITLE);
-            canvas.fill_rect((152.0 + w) as i32, (cy - 30.0) as i32, 3, 60, theme::GREEN, 1.0);
+            canvas.fill_rect(
+                (152.0 + w) as i32,
+                (cy - 30.0) as i32,
+                3,
+                60,
+                theme::GREEN,
+                1.0,
+            );
         }
         return;
     }
     let (title, weight, size, color) = match status.state.as_str() {
-        "online" => ("WhatsApp", Weight::SemiBold, theme::T_APP_TITLE, theme::TEXT),
-        "offline" => ("Waiting for network…", Weight::Medium, theme::T_HEADER, theme::TEXT),
-        "error" => ("WhatsApp", Weight::SemiBold, theme::T_APP_TITLE, theme::TEXT),
+        "online" => (
+            "WhatsApp",
+            Weight::SemiBold,
+            theme::T_APP_TITLE,
+            theme::TEXT,
+        ),
+        "offline" => (
+            "Waiting for network…",
+            Weight::Medium,
+            theme::T_HEADER,
+            theme::TEXT,
+        ),
+        "error" => (
+            "WhatsApp",
+            Weight::SemiBold,
+            theme::T_APP_TITLE,
+            theme::TEXT,
+        ),
         _ => ("Connecting…", Weight::Medium, theme::T_HEADER, theme::TEXT),
     };
-    text::draw(canvas, title, theme::MARGIN, text::centered_baseline(cy, weight, size), weight, size, color, 1.0);
-    icons::draw(canvas, Glyph::More, width - 70.0, cy, 62.0, theme::TEXT, 1.0);
+    text::draw(
+        canvas,
+        title,
+        theme::MARGIN,
+        text::centered_baseline(cy, weight, size),
+        weight,
+        size,
+        color,
+        1.0,
+    );
+    icons::draw(
+        canvas,
+        Glyph::More,
+        width - 70.0,
+        cy,
+        62.0,
+        theme::TEXT,
+        1.0,
+    );
     if status.state == "error"
         && let Some(detail) = &status.detail
     {
-        let detail = text::fit(detail, Weight::Regular, 30.0, width - 2.0 * theme::MARGIN - 120.0);
-        text::draw(canvas, &detail, theme::MARGIN, cy + 58.0, Weight::Regular, 30.0, theme::DANGER, 1.0);
+        let detail = text::fit(
+            detail,
+            Weight::Regular,
+            30.0,
+            width - 2.0 * theme::MARGIN - 120.0,
+        );
+        text::draw(
+            canvas,
+            &detail,
+            theme::MARGIN,
+            cy + 58.0,
+            Weight::Regular,
+            30.0,
+            theme::DANGER,
+            1.0,
+        );
     }
 }
 
@@ -575,7 +696,14 @@ fn draw_search_pill(canvas: &mut Canvas, y: f32, width: f32) {
         h: theme::SEARCH_H,
     };
     canvas.fill_rrect(rect, theme::SEARCH_H / 2.0, theme::SURFACE, 1.0);
-    icons::shared(canvas, Icon::Search, rect.x + 75.0, y + theme::SEARCH_H / 2.0, 54.0, theme::SECONDARY);
+    icons::shared(
+        canvas,
+        Icon::Search,
+        rect.x + 75.0,
+        y + theme::SEARCH_H / 2.0,
+        54.0,
+        theme::SECONDARY,
+    );
     text::draw(
         canvas,
         "Search",
@@ -622,10 +750,25 @@ fn draw_chips(canvas: &mut Canvas, y: f32, active: Filter, chats: &super::Chats)
 
 fn draw_archived_row(canvas: &mut Canvas, y: f32, chats: &super::Chats, pressed: bool, width: f32) {
     if pressed {
-        canvas.fill_rect(0, y as i32, canvas.width, ARCHIVED_ROW as i32, theme::PRESSED, 1.0);
+        canvas.fill_rect(
+            0,
+            y as i32,
+            canvas.width,
+            ARCHIVED_ROW as i32,
+            theme::PRESSED,
+            1.0,
+        );
     }
     let cy = y + ARCHIVED_ROW / 2.0;
-    icons::draw(canvas, Glyph::Archive, theme::MARGIN + theme::AVATAR / 2.0, cy, 62.0, theme::SECONDARY, 1.0);
+    icons::draw(
+        canvas,
+        Glyph::Archive,
+        theme::MARGIN + theme::AVATAR / 2.0,
+        cy,
+        62.0,
+        theme::SECONDARY,
+        1.0,
+    );
     text::draw(
         canvas,
         "Archived",
@@ -656,7 +799,14 @@ fn draw_archived_row(canvas: &mut Canvas, y: f32, chats: &super::Chats, pressed:
 }
 
 /// The ticks for one of the account's messages, at (x, cy); returns their width.
-pub fn draw_ticks(canvas: &mut Canvas, status: &str, x: f32, cy: f32, size: f32, color: crate::gfx::Rgb) -> f32 {
+pub fn draw_ticks(
+    canvas: &mut Canvas,
+    status: &str,
+    x: f32,
+    cy: f32,
+    size: f32,
+    color: crate::gfx::Rgb,
+) -> f32 {
     match status {
         "pending" => {
             icons::shared(canvas, Icon::Clock, x + size * 0.45, cy, size * 0.82, color);
@@ -667,16 +817,41 @@ pub fn draw_ticks(canvas: &mut Canvas, status: &str, x: f32, cy: f32, size: f32,
             size * 0.9
         }
         "delivered" => {
-            icons::draw(canvas, Glyph::DoubleTick, x + size * 0.55, cy, size * 1.1, color, 1.0);
+            icons::draw(
+                canvas,
+                Glyph::DoubleTick,
+                x + size * 0.55,
+                cy,
+                size * 1.1,
+                color,
+                1.0,
+            );
             size * 1.15
         }
         "read" => {
-            icons::draw(canvas, Glyph::DoubleTick, x + size * 0.55, cy, size * 1.1, theme::TICK_READ, 1.0);
+            icons::draw(
+                canvas,
+                Glyph::DoubleTick,
+                x + size * 0.55,
+                cy,
+                size * 1.1,
+                theme::TICK_READ,
+                1.0,
+            );
             size * 1.15
         }
         "failed" => {
             canvas.fill_circle(x + size * 0.45, cy, size * 0.4, theme::DANGER, 1.0);
-            text::draw_centered(canvas, "!", x + size * 0.45, cy + size * 0.22, Weight::Bold, size * 0.6, 0xffffff, 1.0);
+            text::draw_centered(
+                canvas,
+                "!",
+                x + size * 0.45,
+                cy + size * 0.22,
+                Weight::Bold,
+                size * 0.6,
+                0xffffff,
+                1.0,
+            );
             size * 0.95
         }
         _ => 0.0,
@@ -695,7 +870,14 @@ fn draw_row(
     now: Instant,
 ) {
     if pressed {
-        canvas.fill_rect(0, y as i32, canvas.width, theme::ROW as i32, theme::PRESSED, 1.0);
+        canvas.fill_rect(
+            0,
+            y as i32,
+            canvas.width,
+            theme::ROW as i32,
+            theme::PRESSED,
+            1.0,
+        );
     }
     let cy = y + theme::ROW / 2.0;
     avatar::draw(
@@ -721,11 +903,29 @@ fn draw_row(
         cy - 18.0,
         Weight::Regular,
         theme::T_TIME,
-        if unread { theme::GREEN } else { theme::SECONDARY },
+        if unread {
+            theme::GREEN
+        } else {
+            theme::SECONDARY
+        },
         1.0,
     );
-    let title = text::fit(&super::rich::emojify(&chat.title), Weight::Medium, theme::T_TITLE, right - x - when_w - 30.0);
-    text::draw(canvas, &title, x, cy - 16.0, Weight::Medium, theme::T_TITLE, theme::TEXT, 1.0);
+    let title = text::fit(
+        &super::rich::emojify(&chat.title),
+        Weight::Medium,
+        theme::T_TITLE,
+        right - x - when_w - 30.0,
+    );
+    text::draw(
+        canvas,
+        &title,
+        x,
+        cy - 16.0,
+        Weight::Medium,
+        theme::T_TITLE,
+        theme::TEXT,
+        1.0,
+    );
 
     // The marks on the right of the preview: unread, muted, pinned.
     let line = cy + 50.0;
@@ -743,19 +943,51 @@ fn draw_row(
             w,
             h: 58.0,
         };
-        canvas.fill_rrect(rect, 29.0, if chat.muted { theme::SECONDARY } else { theme::GREEN }, 1.0);
-        text::draw_centered(canvas, &label, rect.x + w / 2.0, line - 3.0, Weight::SemiBold, 30.0, theme::ON_GREEN, 1.0);
+        canvas.fill_rrect(
+            rect,
+            29.0,
+            if chat.muted {
+                theme::SECONDARY
+            } else {
+                theme::GREEN
+            },
+            1.0,
+        );
+        text::draw_centered(
+            canvas,
+            &label,
+            rect.x + w / 2.0,
+            line - 3.0,
+            Weight::SemiBold,
+            30.0,
+            theme::ON_GREEN,
+            1.0,
+        );
         marks_right -= w + 16.0;
     } else if unread {
         canvas.fill_circle(marks_right - 22.0, line - 14.0, 22.0, theme::GREEN, 1.0);
         marks_right -= 60.0;
     }
     if chat.muted {
-        icons::shared(canvas, Icon::BellOff, marks_right - 24.0, line - 14.0, 44.0, theme::SECONDARY);
+        icons::shared(
+            canvas,
+            Icon::BellOff,
+            marks_right - 24.0,
+            line - 14.0,
+            44.0,
+            theme::SECONDARY,
+        );
         marks_right -= 56.0;
     }
     if chat.pinned {
-        icons::shared(canvas, Icon::Pin, marks_right - 24.0, line - 14.0, 44.0, theme::SECONDARY);
+        icons::shared(
+            canvas,
+            Icon::Pin,
+            marks_right - 24.0,
+            line - 14.0,
+            44.0,
+            theme::SECONDARY,
+        );
         marks_right -= 56.0;
     }
     let mut px = x;
@@ -770,10 +1002,19 @@ fn draw_row(
     }
     let deleted = chat.ext["deleted"].as_bool().unwrap_or(false);
     if deleted {
-        icons::draw(canvas, Glyph::Blocked, px + 20.0, line - 13.0, 38.0, theme::SECONDARY, 1.0);
+        icons::draw(
+            canvas,
+            Glyph::Blocked,
+            px + 20.0,
+            line - 13.0,
+            38.0,
+            theme::SECONDARY,
+            1.0,
+        );
         px += 50.0;
     }
-    let preview = if chat.is_group() && !last.mine && !chat.ext["notice"].as_bool().unwrap_or(false) {
+    let preview = if chat.is_group() && !last.mine && !chat.ext["notice"].as_bool().unwrap_or(false)
+    {
         match &last.author {
             Some(author) if !author.is_empty() => format!("{author}: {}", last.text),
             _ => last.text.clone(),
@@ -781,15 +1022,39 @@ fn draw_row(
     } else {
         last.text.clone()
     };
-    let preview = text::fit(&super::rich::emojify(&preview.replace('\n', " ")), Weight::Regular, theme::T_PREVIEW, marks_right - px - 16.0);
-    text::draw(canvas, &preview, px, line, Weight::Regular, theme::T_PREVIEW, theme::SECONDARY, 1.0);
+    let preview = text::fit(
+        &super::rich::emojify(&preview.replace('\n', " ")),
+        Weight::Regular,
+        theme::T_PREVIEW,
+        marks_right - px - 16.0,
+    );
+    text::draw(
+        canvas,
+        &preview,
+        px,
+        line,
+        Weight::Regular,
+        theme::T_PREVIEW,
+        theme::SECONDARY,
+        1.0,
+    );
 }
 
 fn draw_tabs(canvas: &mut Canvas, width: f32, height: f32) {
     let top = height - theme::TAB_BAR;
-    canvas.fill_rect(0, top as i32, canvas.width, theme::TAB_BAR as i32, theme::BAR, 1.0);
+    canvas.fill_rect(
+        0,
+        top as i32,
+        canvas.width,
+        theme::TAB_BAR as i32,
+        theme::BAR,
+        1.0,
+    );
     canvas.fill_rect(0, top as i32, canvas.width, 2, theme::DIVIDER, 1.0);
-    let tabs = [(Glyph::Chats, "Chats", true), (Glyph::Settings, "Settings", false)];
+    let tabs = [
+        (Glyph::Chats, "Chats", true),
+        (Glyph::Settings, "Settings", false),
+    ];
     let slot = width / tabs.len() as f32;
     for (index, (glyph, label, active)) in tabs.into_iter().enumerate() {
         let cx = slot * (index as f32 + 0.5);
@@ -807,13 +1072,29 @@ fn draw_tabs(canvas: &mut Canvas, width: f32, height: f32) {
                 1.0,
             );
         }
-        icons::draw(canvas, glyph, cx, icon_y, 60.0, if active { theme::GREEN_TEXT } else { theme::TEXT }, 1.0);
+        icons::draw(
+            canvas,
+            glyph,
+            cx,
+            icon_y,
+            60.0,
+            if active {
+                theme::GREEN_TEXT
+            } else {
+                theme::TEXT
+            },
+            1.0,
+        );
         text::draw_centered(
             canvas,
             label,
             cx,
             top + 152.0,
-            if active { Weight::SemiBold } else { Weight::Medium },
+            if active {
+                Weight::SemiBold
+            } else {
+                Weight::Medium
+            },
             32.0,
             theme::TEXT,
             1.0,

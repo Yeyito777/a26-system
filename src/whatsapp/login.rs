@@ -55,7 +55,11 @@ pub fn event(app: &mut WhatsApp, cx: &mut Cx, value: &Value) {
             let size = value["qr"]["size"].as_u64().unwrap_or(0) as usize;
             let rows: Vec<String> = value["qr"]["rows"]
                 .as_array()
-                .map(|rows| rows.iter().filter_map(|r| r.as_str().map(str::to_owned)).collect())
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|r| r.as_str().map(str::to_owned))
+                        .collect()
+                })
                 .unwrap_or_default();
             if size > 0 && rows.len() == size {
                 app.login.qr = Some((size, rows));
@@ -70,7 +74,9 @@ pub fn event(app: &mut WhatsApp, cx: &mut Cx, value: &Value) {
             app.login.state = State::Linking;
         }
         "failed" => {
-            let detail = value["detail"].as_str().unwrap_or("Linking failed. Try again.");
+            let detail = value["detail"]
+                .as_str()
+                .unwrap_or("Linking failed. Try again.");
             app.login.state = State::Failed(detail.to_owned());
             app.login.qr = None;
         }
@@ -130,7 +136,16 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx) {
     let height = canvas.height as f32;
     canvas.clear(theme::BG);
     let mut y = theme::TOP + 120.0;
-    text::draw_centered(canvas, "Link this phone", width / 2.0, y, Weight::SemiBold, 64.0, theme::TEXT, 1.0);
+    text::draw_centered(
+        canvas,
+        "Link this phone",
+        width / 2.0,
+        y,
+        Weight::SemiBold,
+        64.0,
+        theme::TEXT,
+        1.0,
+    );
     y += 80.0;
     text::draw_centered(
         canvas,
@@ -185,25 +200,74 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx) {
                 } else {
                     "Refreshing the code…".to_owned()
                 };
-                text::draw_centered(canvas, &note, width / 2.0, qr_rect.y + side + 64.0, Weight::Regular, 32.0, theme::SECONDARY, 1.0);
+                text::draw_centered(
+                    canvas,
+                    &note,
+                    width / 2.0,
+                    qr_rect.y + side + 64.0,
+                    Weight::Regular,
+                    32.0,
+                    theme::SECONDARY,
+                    1.0,
+                );
             }
         }
         (State::Linking, _) => {
             canvas.fill_rrect(qr_rect, 36.0, theme::SURFACE, 1.0);
             spinner(canvas, width / 2.0, qr_rect.y + side / 2.0 - 40.0, cx.now);
-            text::draw_centered(canvas, "Linking…", width / 2.0, qr_rect.y + side / 2.0 + 110.0, Weight::Medium, 44.0, theme::TEXT, 1.0);
-            text::draw_centered(canvas, "Keep WhatsApp open on your phone", width / 2.0, qr_rect.y + side / 2.0 + 170.0, Weight::Regular, 34.0, theme::SECONDARY, 1.0);
+            text::draw_centered(
+                canvas,
+                "Linking…",
+                width / 2.0,
+                qr_rect.y + side / 2.0 + 110.0,
+                Weight::Medium,
+                44.0,
+                theme::TEXT,
+                1.0,
+            );
+            text::draw_centered(
+                canvas,
+                "Keep WhatsApp open on your phone",
+                width / 2.0,
+                qr_rect.y + side / 2.0 + 170.0,
+                Weight::Regular,
+                34.0,
+                theme::SECONDARY,
+                1.0,
+            );
         }
         (State::Failed(detail), _) => {
             canvas.fill_rrect(qr_rect, 36.0, theme::SURFACE, 1.0);
             let detail = text::fit(detail, Weight::Regular, 38.0, side - 80.0);
-            text::draw_centered(canvas, &detail, width / 2.0, qr_rect.y + side / 2.0, Weight::Regular, 38.0, theme::TEXT, 1.0);
+            text::draw_centered(
+                canvas,
+                &detail,
+                width / 2.0,
+                qr_rect.y + side / 2.0,
+                Weight::Regular,
+                38.0,
+                theme::TEXT,
+                1.0,
+            );
         }
         _ => {
             canvas.fill_rrect(qr_rect, 36.0, theme::SURFACE, 1.0);
             spinner(canvas, width / 2.0, qr_rect.y + side / 2.0 - 30.0, cx.now);
-            let note = if cx_connected(app) { "Loading the QR code…" } else { "Connecting to the bridge…" };
-            text::draw_centered(canvas, note, width / 2.0, qr_rect.y + side / 2.0 + 110.0, Weight::Regular, 38.0, theme::SECONDARY, 1.0);
+            let note = if cx_connected(app) {
+                "Loading the QR code…"
+            } else {
+                "Connecting to the bridge…"
+            };
+            text::draw_centered(
+                canvas,
+                note,
+                width / 2.0,
+                qr_rect.y + side / 2.0 + 110.0,
+                Weight::Regular,
+                38.0,
+                theme::SECONDARY,
+                1.0,
+            );
         }
     }
     let mut sy = qr_rect.y + side + 150.0;
@@ -215,13 +279,31 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx) {
     ];
     for step in steps {
         let step = text::fit(step, Weight::Regular, 38.0, width - 2.0 * 110.0);
-        text::draw(canvas, &step, 110.0, sy, Weight::Regular, 38.0, theme::TEXT, 1.0);
+        text::draw(
+            canvas,
+            &step,
+            110.0,
+            sy,
+            Weight::Regular,
+            38.0,
+            theme::TEXT,
+            1.0,
+        );
         sy += 70.0;
     }
     if matches!(app.login.state, State::Failed(_)) {
         let rect = button_rect(width, height);
         canvas.fill_rrect(rect, rect.h / 2.0, theme::GREEN, 1.0);
-        text::draw_centered(canvas, "Try again", width / 2.0, rect.y + 84.0, Weight::SemiBold, 42.0, theme::ON_GREEN, 1.0);
+        text::draw_centered(
+            canvas,
+            "Try again",
+            width / 2.0,
+            rect.y + 84.0,
+            Weight::SemiBold,
+            42.0,
+            theme::ON_GREEN,
+            1.0,
+        );
     }
     text::draw_centered(
         canvas,
