@@ -27,6 +27,8 @@ use crate::text::{self, Weight};
 
 /// Older pages are asked for this far before the top.
 const PREFETCH: f32 = 2400.0;
+/// An older page goes on top this many messages a frame.
+const OLDER_SHARE: usize = 20;
 const SCROLL_BUTTON: f32 = 116.0;
 const MEDIA_MAX: f32 = 700.0;
 const STICKER: f32 = 400.0;
@@ -87,7 +89,7 @@ pub struct Bubble {
 
 #[derive(Debug, Clone)]
 enum Item {
-    Day(String),
+    Day(Rc<str>),
     Unread(u32),
     Message {
         index: usize,
@@ -102,13 +104,21 @@ pub struct ChatView {
     pub messages: Vec<Message>,
     pub more: bool,
     pub loading_older: bool,
+    /// An older page's messages not shown yet (oldest first): each frame
+    /// puts `OLDER_SHARE` of them on top (a whole page laid out at once
+    /// cost its frame up to 25 M instructions).
+    older: Vec<Message>,
     pub requested: bool,
     pub loaded: bool,
     pub scroll: Scroll,
     unread: u32,
     unread_marker: Option<String>,
     jump_to_unread: bool,
-    layouts: HashMap<String, (u64, Rc<Bubble>)>,
+    layouts: HashMap<String, Rc<Bubble>>,
+    /// Messages replaced since their layout was made (made again).
+    stale: std::collections::HashSet<String>,
+    /// Day chips' words by local day, for the day they were made on.
+    day_labels: (i64, HashMap<i64, Rc<str>>),
     items: Vec<Item>,
     tops: Vec<f32>,
     total: f32,
@@ -132,56 +142,31 @@ pub struct ChatView {
     flash: Option<(String, Instant)>,
     /// Pictures the last frames drew without (`avatar::arrived`).
     pub waiting: Vec<avatar::Waiting>,
-    /// An older page came: what is drawn stays where it is (the chat is
-    /// anchored at the bottom) unless its top is in view.
-    prepended: bool,
+    /// Pictures came that a frame had no budget to draw: the next one does.
+    pub(super) backlog: bool,
+    /// An older page came (or its "Loading…" row): what is drawn stays
+    /// where it is (the chat is anchored at the bottom) but for what lies
+    /// above this far from the content's bottom (the first message before
+    /// it, its tail, its day).
+    prepended: Option<f32>,
+    /// The pressed message as last drawn (a press redraws its rows only).
+    drawn_pressed: Option<String>,
     /// The header's picture had not come when it was drawn.
     pub header_waiting: Vec<avatar::Waiting>,
-}
-
-/// What a message shows, as a number: its layout is made again when it changes.
-fn hash_message(message: &Message) -> u64 {
-    let mut parts: Vec<u64> = vec![
-        message.ts as u64,
-        u64::from(message.mine),
-        u64::from(message.deleted),
-        u64::from(message.system),
-        u64::from(message.forwarded),
-        message.edited_ts.unwrap_or(0) as u64,
-    ];
-    fn text_hash(parts: &mut Vec<u64>, text: &str) {
-        parts.push(text.bytes().fold(text.len() as u64, |h, b| {
-            h.wrapping_mul(1_099_511_628_211).wrapping_add(u64::from(b))
-        }));
-    }
-    text_hash(&mut parts, &message.text);
-    text_hash(&mut parts, &message.author.name);
-    text_hash(&mut parts, message.status.as_deref().unwrap_or(""));
-    text_hash(&mut parts, message.ext["push_name"].as_str().unwrap_or(""));
-    for media in &message.media {
-        text_hash(&mut parts, &media.reference);
-        text_hash(&mut parts, media.thumb.as_deref().unwrap_or(""));
-    }
-    if let Some(reply) = &message.reply_to {
-        text_hash(&mut parts, &reply.text);
-        text_hash(&mut parts, reply.author.as_deref().unwrap_or(""));
-    }
-    for reaction in &message.reactions {
-        text_hash(&mut parts, &reaction.emoji);
-        parts.push(u64::from(reaction.count) * 2 + u64::from(reaction.mine));
-    }
-    band::key_of(&parts)
 }
 
 impl ChatView {
     pub fn new(id: String, unread: u32) -> Self {
         let mut scroll = Scroll::default();
-        scroll.smooth = true;
+        // X draws each report as it comes (the finger in the newest frame), as
+        // the other social apps and the Exocortex app on X do.
+        scroll.smooth = false;
         Self {
             id,
             messages: Vec::new(),
             more: false,
             loading_older: false,
+            older: Vec::new(),
             requested: false,
             loaded: false,
             scroll,
@@ -189,6 +174,8 @@ impl ChatView {
             unread_marker: None,
             jump_to_unread: unread > 0,
             layouts: HashMap::new(),
+            stale: std::collections::HashSet::new(),
+            day_labels: (0, HashMap::new()),
             items: Vec::new(),
             tops: Vec::new(),
             total: 0.0,
@@ -207,12 +194,17 @@ impl ChatView {
             selected: None,
             flash: None,
             waiting: Vec::new(),
-            prepended: false,
+            prepended: None,
+            drawn_pressed: None,
+            backlog: false,
             header_waiting: Vec::new(),
         }
     }
 
     pub fn chat_changed(&mut self, chat: &Chat) {
+        if self.group != chat.is_group() {
+            self.layouts.clear();
+        }
         self.group = chat.is_group();
         self.members = chat.members;
         self.title = chat.title.clone();
@@ -243,22 +235,23 @@ impl ChatView {
             self.more = more;
             let known: std::collections::HashSet<&str> =
                 self.messages.iter().map(|m| m.id.as_str()).collect();
-            let mut merged: Vec<Message> = page
+            self.older = page
                 .into_iter()
                 .filter(|m| !known.contains(m.id.as_str()))
                 .collect();
-            merged.append(&mut self.messages);
-            self.messages = merged;
-            self.prepended = true;
+            // (Its "Loading…" row may go.)
+            self.prepend();
             self.dirty = true;
             return;
         } else {
             self.loaded = true;
             self.more = more;
+            self.older.clear();
             // Messages that came live meanwhile stay.
             let ids: std::collections::HashSet<String> =
                 page.iter().map(|m| m.id.clone()).collect();
             let newest = page.last().map_or(i64::MIN, |m| m.ts);
+            self.stale.extend(page.iter().map(|m| m.id.clone()));
             let mut extra: Vec<Message> = self
                 .messages
                 .drain(..)
@@ -294,6 +287,7 @@ impl ChatView {
 
     pub fn upsert(&mut self, message: Message, live: bool, _now: Instant) {
         if let Some(known) = self.messages.iter_mut().find(|m| m.id == message.id) {
+            self.stale.insert(message.id.clone());
             *known = message;
             self.changed();
             return;
@@ -375,6 +369,7 @@ impl ChatView {
     pub fn fail_pending(&mut self, client_id: &str) {
         if let Some(message) = self.messages.iter_mut().find(|m| m.id == client_id) {
             message.status = Some("failed".into());
+            self.stale.insert(client_id.to_owned());
             self.changed();
         }
     }
@@ -406,32 +401,40 @@ impl ChatView {
         self.width = width;
         self.dirty = false;
         let mut items = Vec::with_capacity(self.messages.len() + 16);
-        if self.loading_older || (self.more && !self.messages.is_empty()) {
+        if self.loading_older || !self.older.is_empty() || (self.more && !self.messages.is_empty())
+        {
             items.push(Item::Loading);
         }
         let mut last_day = i64::MIN;
         let mut days = time::Days::default();
         let mut previous: Option<&Message> = None;
-        let mut seen = std::collections::HashSet::new();
+        // Day chips say "Today", "Yesterday": made again when the day changes.
+        let today = time::day_of(time::now_secs() * 1000);
+        if self.day_labels.0 != today {
+            self.day_labels = (today, HashMap::new());
+        }
         for (index, message) in self.messages.iter().enumerate() {
-            seen.insert(message.id.clone());
             let day = days.day(message.ts);
             let new_day = day != last_day;
             if new_day {
-                items.push(Item::Day(time::day_chip(message.ts)));
+                let label = self
+                    .day_labels
+                    .1
+                    .entry(day)
+                    .or_insert_with(|| time::day_chip(message.ts).into())
+                    .clone();
+                items.push(Item::Day(label));
                 last_day = day;
             }
             let marker = self.unread_marker.as_deref() == Some(message.id.as_str());
             if marker {
                 items.push(Item::Unread(self.unread));
             }
-            let hash = hash_message(message);
             let bubble = match self.layouts.get(&message.id) {
-                Some((known, bubble)) if *known == hash => bubble.clone(),
+                Some(bubble) if !self.stale.contains(&message.id) => bubble.clone(),
                 _ => {
                     let bubble = Rc::new(layout(message, self.group, width));
-                    self.layouts
-                        .insert(message.id.clone(), (hash, bubble.clone()));
+                    self.layouts.insert(message.id.clone(), bubble.clone());
                     bubble
                 }
             };
@@ -448,7 +451,13 @@ impl ChatView {
             });
             previous = Some(message);
         }
-        self.layouts.retain(|id, _| seen.contains(id));
+        self.stale.clear();
+        // Layouts of messages gone (deleted, replaced by their echo).
+        if self.layouts.len() > self.messages.len() + 64 {
+            let ids: std::collections::HashSet<&str> =
+                self.messages.iter().map(|m| m.id.as_str()).collect();
+            self.layouts.retain(|id, _| ids.contains(id.as_str()));
+        }
         let mut tops = Vec::with_capacity(items.len());
         let mut y = 16.0;
         for (n, item) in items.iter().enumerate() {
@@ -469,6 +478,19 @@ impl ChatView {
         self.items = items;
         self.tops = tops;
         self.total = y + 24.0;
+    }
+
+    /// Something comes above the first message laid out: from the bottom
+    /// of that message up, what is drawn changes.
+    fn prepend(&mut self) {
+        let from = self
+            .items
+            .iter()
+            .position(|item| matches!(item, Item::Message { .. }))
+            .map_or(0.0, |n| {
+                self.total - self.tops[n] - item_height(&self.items[n])
+            });
+        self.prepended = Some(self.prepended.map_or(from, |was: f32| was.min(from)));
     }
 
     fn max_scroll(&self, band_h: f32) -> f32 {
@@ -820,7 +842,7 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
         cx.redraw();
     }
     let moving = view.scroll.step(max, cx.now);
-    if moving {
+    if moving || std::mem::take(&mut view.backlog) {
         cx.animate();
     }
     let moving = moving || view.scroll.dragging();
@@ -828,9 +850,19 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
         view.moving = moving;
         cx.redraw();
     }
+    if !view.older.is_empty() {
+        view.prepend();
+        let at = view.older.len().saturating_sub(OLDER_SHARE);
+        let mut share = view.older.split_off(at);
+        share.append(&mut view.messages);
+        view.messages = share;
+        view.dirty = true;
+        cx.animate();
+    }
     let offset = view.scroll.value(cx.now);
     if view.more
         && !view.loading_older
+        && view.older.is_empty()
         && connected
         && view.loaded
         && offset > max - PREFETCH
@@ -840,8 +872,8 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
         let before = first.id.clone();
         view.loading_older = true;
         // The "Loading…" row comes above what is drawn.
+        view.prepend();
         view.dirty = true;
-        view.prepended = true;
         let request = cx.request(
             "history",
             json!({"chat": chat, "before": before, "limit": 60}),
@@ -966,9 +998,7 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
                 start_y,
                 ..
             } => {
-                if view.pressed.take().is_some() {
-                    view.version += 1;
-                }
+                view.pressed = None;
                 if view.selected.take().is_some() {
                     view.version += 1;
                     app.full = true;
@@ -1008,12 +1038,14 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
         }
     }
     match gesture {
-        Gesture::Down { x, y } => {
+        // Held a moment, a bubble lights (not at once: most touches start a
+        // scroll, and lighting a tall bubble and putting it out again cost
+        // two frames of its height).
+        Gesture::Lift { x, y } => {
             if let Some(Hit::Bubble { id, .. }) = hit(app, x, y, width, height, now)
                 && let Some(view) = app.chat.as_mut()
             {
                 view.pressed = Some(id);
-                view.version += 1;
                 cx.redraw();
             }
         }
@@ -1021,7 +1053,6 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
             if let Some(view) = app.chat.as_mut()
                 && view.pressed.take().is_some()
             {
-                view.version += 1;
                 cx.redraw();
             }
         }
@@ -1034,10 +1065,8 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
             selection_tap(app, cx, x, y);
         }
         Gesture::Tap { x, y } => {
-            if let Some(view) = app.chat.as_mut()
-                && view.pressed.take().is_some()
-            {
-                view.version += 1;
+            if let Some(view) = app.chat.as_mut() {
+                view.pressed = None;
             }
             match hit(app, x, y, width, height, now) {
                 Some(Hit::Back) => app.back(cx),
@@ -1137,9 +1166,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     }
     let offset = view.scroll.value(now).round();
     let max = view.max_scroll(bottom - top);
-    if std::mem::take(&mut view.prepended) && offset > max - 2.0 * (bottom - top) {
-        view.version += 1;
-    }
+    let prepended = view.prepended.take();
     let offset = offset.clamp(-200.0, max + 200.0);
     if full {
         canvas.fill_rect(0, 0, canvas.width, top as i32, theme::CHAT_BAR, 1.0);
@@ -1164,7 +1191,28 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let rounded = &mut app.rounded;
     // Content rows are measured from the bottom (stable as older pages come).
     let translate = bottom + offset;
-    let ready = avatar::arrived(cx.media, &mut view.waiting, now);
+    let arrived = avatar::arrived(cx.media, &mut view.waiting, now);
+    view.backlog = arrived.more;
+    // Drawn again on what the band keeps (rows from the content's bottom):
+    // pictures that came, a press or its end, what an older page changed.
+    let mut again = arrived.rows;
+    if view.drawn_pressed != pressed {
+        for target in [&view.drawn_pressed, &pressed] {
+            let Some(id) = target else {
+                continue;
+            };
+            if let Some(n) = items.iter().position(
+                |item| matches!(item, Item::Message { index, .. } if messages[*index].id == *id),
+            ) {
+                let y = tops[n] - total;
+                again.push((y - 8.0, y + item_height(&items[n]) + 8.0));
+            }
+        }
+        view.drawn_pressed = pressed.clone();
+    }
+    if let Some(from) = prepended {
+        again.push((-total - 1000.0, 8.0 - from));
+    }
     let mut pics = avatar::Pics::new(&mut *cx.media, &mut view.waiting, translate);
     let mut draw_rows = |canvas: &mut Canvas, (y0, y1): (i32, i32)| {
         canvas.fill_rect(0, y0, canvas.width, y1 - y0, theme::BG, 1.0);
@@ -1207,8 +1255,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
         &mut draw_rows,
     );
     if shift.is_some() {
-        // Pictures that came: only their rows again.
-        for (c0, c1) in ready {
+        for (c0, c1) in again {
             let (y0, y1) = (
                 ((c0 + translate) as i32).max(top as i32),
                 ((c1 + translate) as i32).min(bottom as i32),
@@ -1281,7 +1328,9 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
         }
     }
     view.button_shown = show_button;
-    let header_ready = !avatar::arrived(cx.media, &mut view.header_waiting, now).is_empty();
+    let header_ready = !avatar::arrived(cx.media, &mut view.header_waiting, now)
+        .rows
+        .is_empty();
     if full || header_ready {
         app.damage.rows.push((0, top as i32));
         let header = Header {
@@ -1598,7 +1647,7 @@ fn draw_bubble(
                 Some(image) => {
                     let dx = (m.rect.w - image.width as f32) / 2.0;
                     let dy = (m.rect.h - image.height as f32) / 2.0;
-                    canvas.draw_image(&image, (x + dx) as i32, (y + dy) as i32, 1.0);
+                    avatar::blit(canvas, &image, (x + dx) as i32, (y + dy) as i32);
                 }
                 None => canvas.fill_rrect(
                     RectF {
@@ -1664,7 +1713,9 @@ fn draw_bubble(
     }
     let pad = theme::BUBBLE_PAD_X;
     let mut line_y = y + theme::BUBBLE_PAD_Y;
-    if let Some((name, color, push)) = &bubble.name {
+    if let Some((name, color, push)) = &bubble.name
+        && shows(canvas, line_y, line_y + NAME_H)
+    {
         let name_fit = text::fit(name, Weight::SemiBold, theme::T_NAME, bubble.w - 2.0 * pad);
         text::draw(
             canvas,
@@ -1693,9 +1744,11 @@ fn draw_bubble(
                 );
             }
         }
+    }
+    if bubble.name.is_some() {
         line_y += NAME_H;
     }
-    if bubble.forwarded {
+    if bubble.forwarded && shows(canvas, line_y, line_y + FORWARD_H) {
         icons::draw(
             canvas,
             Glyph::Forward,
@@ -1715,9 +1768,13 @@ fn draw_bubble(
             secondary,
             1.0,
         );
+    }
+    if bubble.forwarded {
         line_y += FORWARD_H;
     }
-    if let Some((author, color, quoted, w)) = &bubble.quote {
+    if let Some((author, color, quoted, w)) = &bubble.quote
+        && shows(canvas, line_y, line_y + QUOTE_H)
+    {
         let q = RectF {
             x: x + 10.0,
             y: line_y,
@@ -1762,7 +1819,9 @@ fn draw_bubble(
     if let Some(m) = &bubble.media {
         draw_media(canvas, pics, rounded, m, x, y, now);
     }
-    if let Some((duration, seed)) = &bubble.audio {
+    if let Some((duration, seed)) = &bubble.audio
+        && shows(canvas, y, y + bubble.h)
+    {
         let cy = y + theme::BUBBLE_PAD_Y + 56.0;
         icons::draw(
             canvas,
@@ -1821,53 +1880,55 @@ fn draw_bubble(
             w: bubble.w - 20.0,
             h: 126.0,
         };
-        canvas.fill_rrect(row, 14.0, 0x000000, 0.18);
-        let icon = RectF {
-            x: row.x + 22.0,
-            y: row.y + 18.0,
-            w: 72.0,
-            h: 90.0,
-        };
-        let color = match ext.as_str() {
-            "PDF" => 0xe5534b,
-            "XLSX" | "XLS" | "CSV" => 0x1f9d55,
-            "DOCX" | "DOC" => 0x3b82f6,
-            _ => 0x8696a0,
-        };
-        canvas.fill_rrect(icon, 10.0, color, 1.0);
-        let label = text::fit(ext, Weight::Bold, 22.0, 66.0);
-        text::draw_centered(
-            canvas,
-            &label,
-            icon.x + 36.0,
-            icon.y + 78.0,
-            Weight::Bold,
-            22.0,
-            0xffffff,
-            1.0,
-        );
-        let name = text::fit(name, Weight::Medium, 38.0, row.w - 140.0);
-        text::draw(
-            canvas,
-            &name,
-            row.x + 120.0,
-            row.y + 54.0,
-            Weight::Medium,
-            38.0,
-            theme::TEXT,
-            1.0,
-        );
-        let detail = text::fit(detail, Weight::Regular, 30.0, row.w - 140.0);
-        text::draw(
-            canvas,
-            &detail,
-            row.x + 120.0,
-            row.y + 100.0,
-            Weight::Regular,
-            30.0,
-            secondary,
-            1.0,
-        );
+        if shows(canvas, row.y, row.y + row.h) {
+            canvas.fill_rrect(row, 14.0, 0x000000, 0.18);
+            let icon = RectF {
+                x: row.x + 22.0,
+                y: row.y + 18.0,
+                w: 72.0,
+                h: 90.0,
+            };
+            let color = match ext.as_str() {
+                "PDF" => 0xe5534b,
+                "XLSX" | "XLS" | "CSV" => 0x1f9d55,
+                "DOCX" | "DOC" => 0x3b82f6,
+                _ => 0x8696a0,
+            };
+            canvas.fill_rrect(icon, 10.0, color, 1.0);
+            let label = text::fit(ext, Weight::Bold, 22.0, 66.0);
+            text::draw_centered(
+                canvas,
+                &label,
+                icon.x + 36.0,
+                icon.y + 78.0,
+                Weight::Bold,
+                22.0,
+                0xffffff,
+                1.0,
+            );
+            let name = text::fit(name, Weight::Medium, 38.0, row.w - 140.0);
+            text::draw(
+                canvas,
+                &name,
+                row.x + 120.0,
+                row.y + 54.0,
+                Weight::Medium,
+                38.0,
+                theme::TEXT,
+                1.0,
+            );
+            let detail = text::fit(detail, Weight::Regular, 30.0, row.w - 140.0);
+            text::draw(
+                canvas,
+                &detail,
+                row.x + 120.0,
+                row.y + 100.0,
+                Weight::Regular,
+                30.0,
+                secondary,
+                1.0,
+            );
+        }
     }
     if let Some(laid) = &bubble.text {
         let deleted = bubble.body == Body::Deleted;
@@ -1901,7 +1962,8 @@ fn draw_bubble(
     } else {
         secondary
     };
-    if bubble.meta_on_media {
+    let meta_shows = shows(canvas, y + bubble.meta_y - 40.0, y + bubble.meta_y + 16.0);
+    if bubble.meta_on_media && meta_shows {
         let meta_w = meta_width(&bubble.meta, mine, bubble.status.as_deref());
         let shade = RectF {
             x: x + bubble.meta_x - 16.0,
@@ -1911,13 +1973,15 @@ fn draw_bubble(
         };
         canvas.fill_rrect(shade, 23.0, 0x000000, 0.35);
     }
-    draw_meta(
-        canvas,
-        bubble,
-        x + bubble.meta_x,
-        y + bubble.meta_y,
-        meta_color,
-    );
+    if meta_shows {
+        draw_meta(
+            canvas,
+            bubble,
+            x + bubble.meta_x,
+            y + bubble.meta_y,
+            meta_color,
+        );
+    }
     if pressed {
         canvas.fill_rrect(rect, theme::BUBBLE_RADIUS, 0xffffff, 0.06);
     }
@@ -1941,6 +2005,13 @@ fn draw_meta(canvas: &mut Canvas, bubble: &Bubble, x: f32, baseline: f32, color:
     }
 }
 
+/// Whether rows `y0..y1` reach into what the canvas draws (a strip drawn
+/// again skips the parts of a tall bubble outside it).
+fn shows(canvas: &Canvas, y0: f32, y1: f32) -> bool {
+    let (_, c0, _, c1) = canvas.clip();
+    y1 > c0 as f32 && y0 < c1 as f32
+}
+
 fn draw_reactions(canvas: &mut Canvas, bubble: &Bubble, x: f32, y: f32) {
     let Some((label, w)) = &bubble.reactions else {
         return;
@@ -1956,6 +2027,9 @@ fn draw_reactions(canvas: &mut Canvas, bubble: &Bubble, x: f32, y: f32) {
         w: *w,
         h: REACTION_H,
     };
+    if !shows(canvas, rect.y - 4.0, rect.y + rect.h + 4.0) {
+        return;
+    }
     canvas.fill_rrect(
         RectF {
             x: rect.x - 4.0,
@@ -1995,6 +2069,9 @@ fn draw_media(
         w: m.rect.w,
         h: m.rect.h,
     };
+    if !shows(canvas, r.y, r.y + r.h) {
+        return;
+    }
     let (w, h) = (r.w.round() as u32, r.h.round() as u32);
     // A video shows its poster (the thumbnail); a photo itself, its
     // thumbnail until it has come.
@@ -2013,11 +2090,11 @@ fn draw_media(
             let round = rounded.get(&image, 16.0);
             let dx = (r.w - round.width as f32) / 2.0;
             let dy = (r.h - round.height as f32) / 2.0;
-            canvas.draw_image(
+            avatar::blit(
+                canvas,
                 &round,
                 (r.x + dx).round() as i32,
                 (r.y + dy).round() as i32,
-                1.0,
             );
         }
         None => canvas.fill_rrect(r, 16.0, 0x000000, 0.25),

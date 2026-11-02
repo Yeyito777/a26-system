@@ -63,22 +63,92 @@ impl<'a> Pics<'a> {
     }
 }
 
+/// Rows of pictures that came, to draw again this frame.
+pub struct Arrived {
+    /// Content rows (overlapping ones merged), at most a frame's budget.
+    pub rows: Vec<(f32, f32)>,
+    /// More came than the budget: the next frame draws them.
+    pub more: bool,
+}
+
+/// Pictures a frame draws again at most (a burst of them that came at
+/// once is spread over frames).
+const ARRIVED_BUDGET: usize = 2;
+
 /// The content rows of pictures noted missing that have come since (they
 /// are forgotten: the frame that draws them notes what is still missing).
 /// Those still missing are asked for again: a frame that draws only what
 /// moved into view would not ask for them, and `Media` asks the bridge for
 /// what was wanted since the last frame only.
-pub fn arrived(media: &mut Media, waiting: &mut Vec<Waiting>, now: Instant) -> Vec<(f32, f32)> {
-    let mut rows = Vec::new();
+pub fn arrived(media: &mut Media, waiting: &mut Vec<Waiting>, now: Instant) -> Arrived {
+    let mut rows: Vec<(f32, f32)> = Vec::new();
+    let mut more = false;
     waiting.retain(|waiting| {
         let (reference, w, h, fit) = &waiting.key;
-        let ready = media.get(reference, *w, *h, *fit, now).is_some();
-        if ready {
-            rows.push(waiting.rows);
+        if media.get(reference, *w, *h, *fit, now).is_none() {
+            return true;
         }
-        !ready
+        let (a, b) = waiting.rows;
+        if let Some(row) = rows.iter_mut().find(|(c, d)| a < *d && b > *c) {
+            *row = (row.0.min(a), row.1.max(b));
+            return false;
+        }
+        if rows.len() < ARRIVED_BUDGET {
+            rows.push((a, b));
+            return false;
+        }
+        more = true;
+        true
     });
-    rows
+    Arrived { rows, more }
+}
+
+/// Draws a premultiplied picture at (x, y) within the canvas's clip, as
+/// `Canvas::draw_image` does (the same pixels), but opaque runs are copied
+/// and clear pixels skipped: blending every pixel of a 700 px photo cost
+/// 8 M instructions a frame that drew it.
+pub fn blit(canvas: &mut Canvas, image: &Image, x: i32, y: i32) {
+    let (cx0, cy0, cx1, cy1) = canvas.clip();
+    let (x0, x1) = (
+        x.max(cx0).max(0),
+        (x + image.width).min(cx1).min(canvas.width),
+    );
+    let (y0, y1) = (
+        y.max(cy0).max(0),
+        (y + image.height).min(cy1).min(canvas.height),
+    );
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let width = canvas.width as usize;
+    let span = (x1 - x0) as usize;
+    for ty in y0..y1 {
+        let from = ((ty - y) * image.width + (x0 - x)) as usize;
+        let src = &image.pixels[from..from + span];
+        let at = ty as usize * width + x0 as usize;
+        let dst = &mut canvas.pixels[at..at + span];
+        // A photo's rows are opaque but at its rounded corners: such a row
+        // is copied whole (both loops vectorise).
+        if src.iter().fold(0xff, |all, s| all & (s >> 24)) == 0xff {
+            for (d, &s) in dst.iter_mut().zip(src) {
+                *d = s & 0x00ff_ffff;
+            }
+            continue;
+        }
+        for (d, &s) in dst.iter_mut().zip(src) {
+            let a = s >> 24;
+            if a == 0xff {
+                *d = s & 0x00ff_ffff;
+            } else if a != 0 {
+                let inverse = 256 - (a + (a >> 7));
+                let channel = |shift: u32| {
+                    ((s >> shift & 0xff) + (((*d >> shift & 0xff) * inverse) >> 8)).min(255)
+                        << shift
+                };
+                *d = channel(16) | channel(8) | channel(0);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -169,7 +239,7 @@ pub fn draw(
     match picture {
         Some(image) => {
             let round = rounded.get(&image, size / 2.0);
-            canvas.draw_image(&round, x.round() as i32, y.round() as i32, 1.0);
+            blit(canvas, &round, x.round() as i32, y.round() as i32);
         }
         None => silhouette(canvas, group, x, y, size),
     }
@@ -188,4 +258,54 @@ pub fn silhouette(canvas: &mut Canvas, group: bool, x: f32, y: f32, size: f32) {
         theme::AVATAR_FG,
         1.0,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blit_draws_what_draw_image_draws() {
+        // A rounded photo (opaque rows, soft corners) and a sticker-like
+        // picture (clear, translucent and opaque pixels mixed), clipped and
+        // not, over a busy background.
+        let photo = round(
+            &Image {
+                width: 40,
+                height: 30,
+                pixels: (0..1200u32)
+                    .map(|n| 0xff00_0000 | n.wrapping_mul(2_654_435_761) & 0x00ff_ffff)
+                    .collect(),
+            },
+            9.0,
+        );
+        let sticker = Image {
+            width: 25,
+            height: 20,
+            pixels: (0..500u32)
+                .map(|n| match n % 3 {
+                    0 => 0,
+                    1 => 0x80_40_20_10,
+                    _ => 0xff_10_80_f0,
+                })
+                .collect(),
+        };
+        for image in [&photo, &sticker] {
+            for clip in [None, Some((5, 8, 37, 21)), Some((0, 0, 60, 3))] {
+                let mut want = Canvas::new(60, 50);
+                for (n, pixel) in want.pixels.iter_mut().enumerate() {
+                    *pixel = (n as u32).wrapping_mul(40_503) & 0x00ff_ffff;
+                }
+                let mut got = Canvas::new(60, 50);
+                got.pixels.clone_from(&want.pixels);
+                if let Some((x0, y0, x1, y1)) = clip {
+                    want.set_clip(x0, y0, x1, y1);
+                    got.set_clip(x0, y0, x1, y1);
+                }
+                want.draw_image(image, 3, 4, 1.0);
+                blit(&mut got, image, 3, 4);
+                assert!(want.pixels == got.pixels, "clip {clip:?}");
+            }
+        }
+    }
 }
