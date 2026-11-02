@@ -156,7 +156,10 @@ pub type Line = Vec<Run>;
 
 /// Wraps styled words (`(word, font, colour)`, spaces between them) into
 /// lines at most `width` wide; a word wider than a line is cut with an
-/// ellipsis. `\n` inside a word breaks the line.
+/// ellipsis. `\n` inside a word breaks the line; a word starting with
+/// `GLUE` follows the one before without a space (a comma after a bold name).
+pub const GLUE: char = '\u{2060}';
+
 pub fn wrap_runs(words: &[(String, Font, Rgb)], width: f32, max_lines: usize) -> (Vec<Line>, bool) {
     let mut lines: Vec<Line> = Vec::new();
     let mut line: Line = Vec::new();
@@ -190,10 +193,14 @@ pub fn wrap_runs(words: &[(String, Font, Rgb)], width: f32, max_lines: usize) ->
                     break 'words;
                 }
             }
+            let (part, glued) = match part.strip_prefix(GLUE) {
+                Some(rest) => (rest, index == 0),
+                None => (*part, false),
+            };
             if part.is_empty() {
                 continue;
             }
-            let space = !line.is_empty();
+            let space = !line.is_empty() && !glued;
             let space_w = if space { measure(" ", *font) } else { 0.0 };
             let w = measure(part, *font);
             if used + space_w + w <= width || line.is_empty() {
@@ -213,7 +220,7 @@ pub fn wrap_runs(words: &[(String, Font, Rgb)], width: f32, max_lines: usize) ->
                 let cut = if w > width {
                     fit(part, *font, width)
                 } else {
-                    (*part).to_owned()
+                    part.to_owned()
                 };
                 push_word(&mut line, &mut used, &cut, *font, *color, false);
             }

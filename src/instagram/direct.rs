@@ -1625,3 +1625,59 @@ pub fn spinner(canvas: &mut Canvas, cx: f32, cy: f32) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::social::proto::ChatLast;
+
+    fn chat(unread: u32, mine: bool, seen: bool) -> Chat {
+        Chat {
+            id: "1".into(),
+            kind: "dm".into(),
+            title: "Ana".into(),
+            unread,
+            last: Some(ChatLast {
+                id: "m".into(),
+                ts: 1_800_000_000_000 - 120_000,
+                author: Some("Ana".into()),
+                text: "hi there".into(),
+                mine,
+            }),
+            ext: serde_json::json!({"seen": seen}),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chat_rows_say_what_instagram_says() {
+        let now = 1_800_000_000_000;
+        assert_eq!(
+            preview(&chat(1, false, false), now),
+            ("hi there · 2m".to_owned(), true)
+        );
+        assert_eq!(
+            preview(&chat(3, false, false), now),
+            ("3 new messages · 2m".to_owned(), true)
+        );
+        assert_eq!(
+            preview(&chat(9, false, false), now),
+            ("4+ new messages · 2m".to_owned(), true)
+        );
+        assert_eq!(
+            preview(&chat(0, true, true), now),
+            ("Seen 2m ago".to_owned(), false)
+        );
+        assert_eq!(
+            preview(&chat(0, true, false), now),
+            ("You: hi there · 2m".to_owned(), false)
+        );
+    }
+
+    #[test]
+    fn only_a_few_emoji_are_jumbo() {
+        assert!(is_jumbo("😂😂"));
+        assert!(!is_jumbo("ok 😂"));
+        assert!(!is_jumbo(""));
+    }
+}

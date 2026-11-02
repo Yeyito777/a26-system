@@ -52,6 +52,21 @@ fn section(ts: i64, now: i64) -> &'static str {
     }
 }
 
+/// Plain words; the first sticks to what is before it unless a space separates them.
+fn push_plain(words: &mut Vec<(String, paint::Font, u32)>, segment: &str) {
+    for (n, word) in segment.split(' ').enumerate() {
+        if word.is_empty() {
+            continue;
+        }
+        let word = if n == 0 && !words.is_empty() {
+            format!("{}{word}", paint::GLUE)
+        } else {
+            word.to_owned()
+        };
+        words.push((word, BODY, TEXT));
+    }
+}
+
 fn item_lines(item: &Activity, width: f32) -> Vec<Line> {
     // Bold where the bridge says an account is named.
     let mut words: Vec<(String, paint::Font, u32)> = Vec::new();
@@ -74,15 +89,21 @@ fn item_lines(item: &Activity, width: f32) -> Vec<Line> {
         if start < pos || end <= start {
             continue;
         }
-        for word in text[pos..start].split(' ').filter(|w| !w.is_empty()) {
-            words.push((word.to_owned(), BODY, TEXT));
-        }
-        words.push((text[start..end].to_owned(), BODY_BOLD, TEXT));
+        push_plain(&mut words, &text[pos..start]);
+        let glued = start > 0 && !text[..start].ends_with(' ');
+        let bold = text[start..end].to_owned();
+        words.push((
+            if glued {
+                format!("{}{bold}", paint::GLUE)
+            } else {
+                bold
+            },
+            BODY_BOLD,
+            TEXT,
+        ));
         pos = end;
     }
-    for word in text[pos..].split(' ').filter(|w| !w.is_empty()) {
-        words.push((word.to_owned(), BODY, TEXT));
-    }
+    push_plain(&mut words, &text[pos..]);
     words.push((paint::age_short(item.ts, paint::now_ms()), BODY, SECONDARY));
     paint::wrap_runs(&words, width, 4).0
 }
@@ -439,5 +460,36 @@ impl Screen for ActivityScreen {
 
     fn tick(&mut self, _store: &Store, _area: Area, _now: Instant) -> Action {
         Action::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instagram::model::Bold;
+
+    #[test]
+    fn names_are_bold_and_punctuation_stays_on_them() {
+        let item = Activity {
+            text: "ana, leo and 3 others liked your photo.".into(),
+            bold: vec![
+                Bold {
+                    start: 0,
+                    end: 3,
+                    username: "ana".into(),
+                },
+                Bold {
+                    start: 5,
+                    end: 8,
+                    username: "leo".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let lines = item_lines(&item, 2000.0);
+        let text: String = lines[0].iter().map(|run| run.text.as_str()).collect();
+        assert!(text.starts_with("ana, leo and 3 others"), "{text}");
+        assert_eq!(lines[0][0].font, BODY_BOLD);
+        assert_eq!(lines[0][0].text, "ana");
     }
 }

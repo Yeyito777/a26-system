@@ -1154,3 +1154,17 @@ fn monotonic_ms() -> f64 {
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
     now.tv_sec as f64 * 1000.0 + now.tv_nsec as f64 / 1e6
 }
+
+#[cfg(test)]
+mod tests {
+    use super::merge_rows;
+
+    #[test]
+    fn row_ranges_merge_when_they_touch() {
+        assert_eq!(
+            merge_rows(vec![(10, 20), (0, 5), (18, 30), (30, 31)]),
+            vec![(0, 5), (10, 31)]
+        );
+        assert_eq!(merge_rows(Vec::new()), Vec::<(i32, i32)>::new());
+    }
+}
