@@ -47,6 +47,8 @@ pub struct ListView {
     rows_for: Option<(u64, Filter, String)>,
     /// Pictures the last frames drew without (`avatar::arrived`).
     pub waiting: Vec<avatar::Waiting>,
+    /// The pressed row as last drawn (a press redraws its row only).
+    drawn_pressed: Option<Pressed>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +71,7 @@ impl ListView {
             rows: Vec::new(),
             rows_for: None,
             waiting: Vec::new(),
+            drawn_pressed: None,
         }
     }
 
@@ -240,6 +243,9 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
     match gesture {
         Gesture::Down { x, y } => {
             let hit = hit(app, x, y, height, now);
+            if let Some(Hit::Row(id)) = &hit {
+                app.prefetch(cx, id);
+            }
             let list = view(app);
             list.pressed = match hit {
                 Some(Hit::Row(id)) => Some(Pressed::Row(id)),
@@ -424,7 +430,6 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
         app.chats.version,
         list.filter as u64,
         hash_str(list.search.as_deref().unwrap_or("")),
-        hash_pressed(list.pressed.as_ref()),
         width as u64,
         height as u64,
         crate::control::clock_24h() as u64,
@@ -506,9 +511,35 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
         key,
         &mut draw_rows,
     );
-    // Pictures that came: only their rows again.
+    // A press or its end: the rows it changes.
+    let mut again = ready;
+    if view.drawn_pressed != pressed {
+        if drawn.is_some() {
+            for target in [&view.drawn_pressed, &pressed] {
+                let index = match target {
+                    Some(Pressed::Row(id)) => rows.iter().position(|row| row == id),
+                    _ => None,
+                };
+                let row_y = match (target, index) {
+                    (Some(Pressed::Archived), _) => Some(rows_top - ARCHIVED_ROW),
+                    (_, Some(index)) => Some(rows_top + index as f32 * theme::ROW),
+                    _ => None,
+                };
+                if let Some(row_y) = row_y {
+                    let h = if matches!(target, Some(Pressed::Archived)) {
+                        ARCHIVED_ROW
+                    } else {
+                        theme::ROW
+                    };
+                    again.push((row_y, row_y + h));
+                }
+            }
+        }
+        view.drawn_pressed = pressed.clone();
+    }
+    // Pictures that came, a press: only their rows again.
     if drawn.is_some() {
-        for (c0, c1) in ready {
+        for (c0, c1) in again {
             let (y0, y1) = (
                 ((c0 + translate) as i32).max(top as i32),
                 ((c1 + translate) as i32).min(bottom as i32),
@@ -547,14 +578,6 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
 
 fn hash_str(text_in: &str) -> u64 {
     band::key_of(&text_in.bytes().map(u64::from).collect::<Vec<_>>())
-}
-
-fn hash_pressed(pressed: Option<&Pressed>) -> u64 {
-    match pressed {
-        None => 0,
-        Some(Pressed::Archived) => 1,
-        Some(Pressed::Row(id)) => hash_str(id),
-    }
 }
 
 fn draw_app_bar(

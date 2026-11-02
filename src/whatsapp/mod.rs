@@ -43,6 +43,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 /// How long a notice at the bottom stays.
 const TOAST: Duration = Duration::from_millis(2600);
+/// A first page asked for on a press is used by the open within this long.
+const PREFETCH_FRESH: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -148,6 +150,9 @@ pub struct WhatsApp {
     last_page: Option<Page>,
     /// A chat opened at this time, its messages not drawn yet (profiling).
     opening: Option<Instant>,
+    /// A chat's first page asked for as a finger came down on its row
+    /// (the bridge answers while the finger lifts): which, when, the answer.
+    prefetch: Option<(String, Instant, Option<Value>)>,
     /// What this frame changed (the shell presents only that), unless the
     /// whole canvas was drawn.
     pub damage: shell::Damage,
@@ -184,6 +189,7 @@ impl WhatsApp {
             last_size: (0.0, 0.0),
             last_page: None,
             opening: None,
+            prefetch: None,
             damage: shell::Damage::default(),
             damage_full: false,
         }
@@ -228,6 +234,28 @@ impl WhatsApp {
         if let Some(chat) = self.chats.get(id) {
             view.chat_changed(chat);
         }
+        match self.prefetch.take() {
+            // Asked for as the finger came down: answered, or about to be.
+            Some((chat, at, answer))
+                if chat == id && cx.now.duration_since(at) < PREFETCH_FRESH =>
+            {
+                if let Some(answer) = answer {
+                    view.page_arrived(&answer, false, cx.now);
+                }
+            }
+            _ => self.ask_first_page(cx, id),
+        }
+        view.requested = true;
+        self.chat = Some(view);
+        self.opening = Some(cx.now);
+        self.composer.clear();
+        self.page = Page::Chat;
+        self.full = true;
+        cx.redraw();
+    }
+
+    fn ask_first_page(&mut self, cx: &mut Cx, id: &str) {
+        let unread = self.chats.get(id).map_or(0, |chat| chat.unread);
         let limit = (unread as usize + 30).clamp(50, 100);
         let request = cx.request("history", json!({"chat": id, "limit": limit}));
         self.asked.insert(
@@ -237,13 +265,20 @@ impl WhatsApp {
                 older: false,
             },
         );
-        view.requested = true;
-        self.chat = Some(view);
-        self.opening = Some(cx.now);
-        self.composer.clear();
-        self.page = Page::Chat;
-        self.full = true;
-        cx.redraw();
+    }
+
+    /// A finger came down on a chat's row: its first page is asked for now,
+    /// so it is there (or nearly) when the tap opens the chat.
+    pub fn prefetch(&mut self, cx: &mut Cx, id: &str) {
+        if !cx.connected
+            || self.prefetch.as_ref().is_some_and(|(chat, at, _)| {
+                chat == id && cx.now.duration_since(*at) < PREFETCH_FRESH
+            })
+        {
+            return;
+        }
+        self.prefetch = Some((id.to_owned(), cx.now, None));
+        self.ask_first_page(cx, id);
     }
 
     pub fn go(&mut self, cx: &mut Cx, page: Page) {
@@ -403,6 +438,8 @@ impl App for WhatsApp {
         self.ask(cx, "settings.get", json!({}), Ask::Settings);
         if let Some(chat) = self.chat.as_mut() {
             let id = chat.id.clone();
+            // The page as it is now replaces the one shown.
+            chat.loaded = false;
             let request = cx.request("history", json!({"chat": id, "limit": 60}));
             self.asked.insert(
                 request,
@@ -503,8 +540,16 @@ impl App for WhatsApp {
                 }
             }
             (Ask::History { chat, older }, result) => {
+                if let Some((prefetched, _, answer)) = self.prefetch.as_mut()
+                    && *prefetched == chat
+                    && !older
+                    && let Ok(value) = &result
+                {
+                    *answer = Some(value.clone());
+                }
                 if let Some(view) = self.chat.as_mut()
                     && view.id == chat
+                    && (older || !view.loaded)
                 {
                     match result {
                         Ok(value) => view.page_arrived(&value, older, cx.now),
