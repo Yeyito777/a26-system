@@ -179,8 +179,82 @@ pub fn url_of(link: &str) -> String {
     }
 }
 
+/// Emoji as WhatsApp shows them, in colour: a pictograph standing alone
+/// gets the emoji selector (the shared text drawing gives a lone one the
+/// symbol fonts' outline when they have it: 👍 drew as a line drawing).
+pub fn emojify(text_in: &str) -> std::borrow::Cow<'_, str> {
+    let needs = |c: char, next: Option<char>| {
+        let code = c as u32;
+        ((0x1f300..=0x1faff).contains(&code) && !(0x1f3fb..=0x1f3ff).contains(&code) || emoji_presentation(code))
+            && !next.is_some_and(|n| matches!(n as u32, 0xfe0e | 0xfe0f | 0x200d | 0x1f3fb..=0x1f3ff))
+    };
+    let mut chars = text_in.chars().peekable();
+    let mut any = false;
+    while let Some(c) = chars.next() {
+        if needs(c, chars.peek().copied()) {
+            any = true;
+            break;
+        }
+    }
+    if !any {
+        return std::borrow::Cow::Borrowed(text_in);
+    }
+    let mut out = String::with_capacity(text_in.len() + 8);
+    let mut chars = text_in.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if needs(c, chars.peek().copied()) {
+            out.push('\u{fe0f}');
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// The symbols before U+1F300 that show as emoji by default (Unicode's
+/// Emoji_Presentation), e.g. ☔ ☕ ⚡ ✨ ❌.
+fn emoji_presentation(code: u32) -> bool {
+    matches!(
+        code,
+        0x231a..=0x231b
+            | 0x23e9..=0x23ec
+            | 0x23f0
+            | 0x23f3
+            | 0x25fd..=0x25fe
+            | 0x2614..=0x2615
+            | 0x2648..=0x2653
+            | 0x267f
+            | 0x2693
+            | 0x26a1
+            | 0x26aa..=0x26ab
+            | 0x26bd..=0x26be
+            | 0x26c4..=0x26c5
+            | 0x26ce
+            | 0x26d4
+            | 0x26ea
+            | 0x26f2..=0x26f3
+            | 0x26f5
+            | 0x26fa
+            | 0x26fd
+            | 0x2705
+            | 0x270a..=0x270b
+            | 0x2728
+            | 0x274c
+            | 0x274e
+            | 0x2753..=0x2755
+            | 0x2757
+            | 0x2795..=0x2797
+            | 0x27b0
+            | 0x27bf
+            | 0x2b1b..=0x2b1c
+            | 0x2b50
+            | 0x2b55
+    )
+}
+
 /// Lays `text` out in `width` at `size` (`base` weight for plain text).
 pub fn layout(text_in: &str, width: f32, size: f32, line_height: f32, base: Weight) -> Laid {
+    let emojified = emojify(text_in);
+    let text_in: &str = &emojified;
     let mut lines: Vec<Line> = Vec::new();
     let mut line = Line::default();
     let push_line = |line: &mut Line, lines: &mut Vec<Line>| {
@@ -381,3 +455,4 @@ mod tests {
         assert!(!emoji_only("🔥🔥🔥🔥"));
     }
 }
+

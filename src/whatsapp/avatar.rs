@@ -12,36 +12,63 @@ use crate::gfx::{Canvas, Image};
 use crate::social::media::{Fit, Media};
 use crate::social::proto;
 
-/// The pictures a frame draws: missing ones are noted, and the band
-/// they are in is drawn again once they have come.
-pub struct Pics<'a> {
-    pub media: &'a mut Media,
-    pub waiting: &'a mut Vec<(String, u32, u32, Fit)>,
+/// A picture a frame drew without, and the rows that showed its place
+/// (in the band's content: screen rows less the band's translation).
+#[derive(Clone)]
+pub struct Waiting {
+    key: (String, u32, u32, Fit),
+    rows: (f32, f32),
 }
 
-impl Pics<'_> {
+/// The pictures a frame draws: missing ones are noted with the rows of the
+/// thing drawn (`span`), so only those rows are drawn again when they come.
+pub struct Pics<'a> {
+    pub media: &'a mut Media,
+    pub waiting: &'a mut Vec<Waiting>,
+    /// Screen rows less this are content rows.
+    pub translate: f32,
+    /// The screen rows of what is being drawn now.
+    pub span: (f32, f32),
+}
+
+impl<'a> Pics<'a> {
+    pub fn new(media: &'a mut Media, waiting: &'a mut Vec<Waiting>, translate: f32) -> Self {
+        Self {
+            media,
+            waiting,
+            translate,
+            span: (0.0, 0.0),
+        }
+    }
+
     pub fn get(&mut self, reference: &str, w: u32, h: u32, fit: Fit, now: Instant) -> Option<Rc<Image>> {
         let got = self.media.get(reference, w, h, fit, now);
-        if got.is_none() && !reference.is_empty() && self.waiting.len() < 64 {
+        if got.is_none() && !reference.is_empty() {
             let key = (reference.to_owned(), w.min(4096), h.min(4096), fit);
-            if !self.waiting.contains(&key) {
-                self.waiting.push(key);
+            let rows = (self.span.0 - self.translate, self.span.1 - self.translate);
+            if let Some(waiting) = self.waiting.iter_mut().find(|waiting| waiting.key == key) {
+                waiting.rows = rows;
+            } else if self.waiting.len() < 96 {
+                self.waiting.push(Waiting { key, rows });
             }
         }
         got
     }
 }
 
-/// Whether a picture noted missing has come since (then forgets them all:
-/// the frame that draws it notes what is still missing).
-pub fn arrived(media: &Media, waiting: &mut Vec<(String, u32, u32, Fit)>) -> bool {
-    let any = waiting
-        .iter()
-        .any(|(reference, w, h, fit)| media.peek(reference, *w, *h, *fit).is_some());
-    if any {
-        waiting.clear();
-    }
-    any
+/// The content rows of pictures noted missing that have come since (they
+/// are forgotten: the frame that draws them notes what is still missing).
+pub fn arrived(media: &Media, waiting: &mut Vec<Waiting>) -> Vec<(f32, f32)> {
+    let mut rows = Vec::new();
+    waiting.retain(|waiting| {
+        let (reference, w, h, fit) = &waiting.key;
+        let ready = media.peek(reference, *w, *h, *fit).is_some();
+        if ready {
+            rows.push(waiting.rows);
+        }
+        !ready
+    });
+    rows
 }
 
 #[derive(Default)]

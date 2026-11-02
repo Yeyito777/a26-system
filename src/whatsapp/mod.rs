@@ -147,6 +147,12 @@ pub struct WhatsApp {
     pub full: bool,
     last_size: (f32, f32),
     last_page: Option<Page>,
+    /// A chat opened at this time, its messages not drawn yet (profiling).
+    opening: Option<Instant>,
+    /// What this frame changed (the shell presents only that), unless the
+    /// whole canvas was drawn.
+    pub damage: shell::Damage,
+    pub damage_full: bool,
 }
 
 impl WhatsApp {
@@ -178,6 +184,9 @@ impl WhatsApp {
             full: true,
             last_size: (0.0, 0.0),
             last_page: None,
+            opening: None,
+            damage: shell::Damage::default(),
+            damage_full: false,
         }
     }
 
@@ -231,6 +240,7 @@ impl WhatsApp {
         );
         view.requested = true;
         self.chat = Some(view);
+        self.opening = Some(cx.now);
         self.composer.clear();
         self.page = Page::Chat;
         self.full = true;
@@ -610,8 +620,8 @@ impl App for WhatsApp {
             return;
         }
         match self.page {
-            Page::List => list::tick(&mut self.list, &self.chats, cx),
-            Page::Archived => list::tick(&mut self.archived, &self.chats, cx),
+            Page::List => list::tick(&mut self.list, &mut self.chats, cx),
+            Page::Archived => list::tick(&mut self.archived, &mut self.chats, cx),
             Page::Chat => chat::tick(self, cx),
             Page::Settings => {}
         }
@@ -645,6 +655,8 @@ impl App for WhatsApp {
         }
         self.last_size = size;
         self.full = false;
+        self.damage = shell::Damage::default();
+        self.damage_full = full;
         if let Some(viewer) = self.viewer.as_mut() {
             viewer::draw(viewer, canvas, cx);
             // What is under the viewer is drawn whole when it closes.
@@ -652,19 +664,111 @@ impl App for WhatsApp {
             return;
         }
         if self.signed_out() {
+            self.damage_full = true;
             login::draw(self, canvas, cx);
         } else {
             match self.page {
                 Page::List => list::draw(self, canvas, cx, full, false),
                 Page::Archived => list::draw(self, canvas, cx, full, true),
                 Page::Chat => chat::draw(self, canvas, cx, full),
-                Page::Settings => settings::draw(self, canvas, cx),
+                Page::Settings => {
+                    self.damage_full = true;
+                    settings::draw(self, canvas, cx);
+                }
+            }
+            if !full && verify() {
+                self.verify(canvas, cx);
+            }
+            if self.page == Page::Chat
+                && let Some(at) = self.opening
+                && let Some(chat) = &self.chat
+                && chat.loaded
+            {
+                self.opening = None;
+                if profile() {
+                    eprintln!(
+                        "whatsapp: opened {} in {:.1} ms ({} messages)",
+                        if chat.messages.is_empty() { "empty" } else { "chat" },
+                        cx.now.duration_since(at).as_secs_f64() * 1000.0,
+                        chat.messages.len()
+                    );
+                }
             }
         }
         if self.toast.is_some() {
             self.draw_toast(canvas, cx.now);
             // The toast's rows are drawn over: the next frame draws them whole.
             self.full = true;
+            self.damage_full = true;
+        }
+        cx.damage = (!self.damage_full).then(|| std::mem::take(&mut self.damage));
+    }
+}
+
+/// Measurement (`SOCIAL_APP_PROFILE`, the bench's `EXOCORTEX_APP_PROFILE`).
+fn profile() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("SOCIAL_APP_PROFILE").is_some() || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some()
+    })
+}
+
+/// Development check (`WHATSAPP_APP_VERIFY`): a frame drawn the cheap way
+/// equals the same frame drawn whole.
+fn verify() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("WHATSAPP_APP_VERIFY").is_some())
+}
+
+impl WhatsApp {
+    fn verify(&mut self, canvas: &Canvas, cx: &mut DrawCx) {
+        let mut whole = Canvas::new(canvas.width, canvas.height);
+        // What the real frames still owe (pictures to draw when they come)
+        // stays theirs.
+        let saved = (
+            self.list.waiting.clone(),
+            self.archived.waiting.clone(),
+            self.chat.as_ref().map(|chat| (chat.waiting.clone(), chat.header_waiting.clone())),
+            std::mem::take(&mut self.damage),
+        );
+        match self.page {
+            Page::List => list::draw(self, &mut whole, cx, true, false),
+            Page::Archived => list::draw(self, &mut whole, cx, true, true),
+            Page::Chat => chat::draw(self, &mut whole, cx, true),
+            Page::Settings => return,
+        }
+        self.list.waiting = saved.0;
+        self.archived.waiting = saved.1;
+        if let (Some(chat), Some((waiting, header))) = (self.chat.as_mut(), saved.2) {
+            chat.waiting = waiting;
+            chat.header_waiting = header;
+        }
+        self.damage = saved.3;
+        let width = canvas.width as usize;
+        let mut differ = 0;
+        let mut first = None;
+        for (index, (a, b)) in canvas.pixels.iter().zip(&whole.pixels).enumerate() {
+            if a != b {
+                differ += 1;
+                first.get_or_insert(index / width);
+            }
+        }
+        if differ > 0 && std::env::var_os("WHATSAPP_APP_VERIFY_DUMP").is_some() {
+            for (name, c) in [("real", canvas), ("whole", &whole)] {
+                let mut out = format!("P6\n{} {}\n255\n", c.width, c.height).into_bytes();
+                for p in &c.pixels {
+                    out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
+                }
+                let _ = std::fs::write(format!("/tmp/verify-{name}.ppm"), out);
+            }
+        }
+        if differ > 0 {
+            eprintln!(
+                "whatsapp: verify: {differ} pixels differ from a whole frame, the first in row {}",
+                first.unwrap_or(0)
+            );
         }
     }
 }

@@ -42,7 +42,7 @@ pub struct ListView {
     rows: Vec<String>,
     rows_for: Option<(u64, Filter, String)>,
     /// Pictures the last frames drew without (`avatar::arrived`).
-    waiting: Vec<(String, u32, u32, crate::social::media::Fit)>,
+    pub waiting: Vec<avatar::Waiting>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,7 +162,8 @@ fn max_scroll(list: &ListView, archived: usize, height: f32) -> f32 {
     (list.content_height(archived) - (bottom - top)).max(0.0)
 }
 
-pub fn tick(list: &mut ListView, chats: &super::Chats, cx: &mut Cx) {
+pub fn tick(list: &mut ListView, chats: &mut super::Chats, cx: &mut Cx) {
+    chats.sort();
     let max = max_scroll(list, chats.archived.len(), cx.height);
     if list.scroll.step(max, cx.now) {
         cx.animate();
@@ -180,6 +181,8 @@ fn view<'a>(app: &'a mut WhatsApp) -> &'a mut ListView {
 pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
     let height = cx.height;
     let now = cx.now;
+    // (Sorted first: the archive's size moves the rows.)
+    app.chats.sort();
     let archived_count = app.chats.archived.len();
     let page = app.page;
     {
@@ -293,6 +296,8 @@ enum Hit {
 }
 
 fn hit(app: &mut WhatsApp, x: f32, y: f32, height: f32, now: Instant) -> Option<Hit> {
+    // (Sorted first: the archive's size moves the rows.)
+    app.chats.sort();
     let archived_count = app.chats.archived.len();
     let page = app.page;
     let list = if page == Page::Archived { &mut app.archived } else { &mut app.list };
@@ -370,6 +375,8 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let width = canvas.width as f32;
     let height = canvas.height as f32;
     let now = cx.now;
+    // (Sorted first: the archive's size moves the rows.)
+    app.chats.sort();
     let archived_count = app.chats.archived.len();
     let status = app.status.clone();
     let page = app.page;
@@ -402,68 +409,86 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let rows_top = list.rows_top(archived_count);
     let filter = list.filter;
     let pressed = list.pressed.clone();
-    let rows = list.rows.clone();
     let chats = &app.chats;
     let rounded = &mut app.rounded;
     let view = if archive { &mut app.archived } else { &mut app.list };
-    let arrived = avatar::arrived(cx.media, &mut view.waiting);
-    let mut pics = avatar::Pics { media: &mut *cx.media, waiting: &mut view.waiting };
-    view.band.draw(
+    // Lent to the drawing, given back below.
+    let rows = std::mem::take(&mut view.rows);
+    let ready = avatar::arrived(cx.media, &mut view.waiting);
+    let translate = top - offset;
+    let mut pics = avatar::Pics::new(&mut *cx.media, &mut view.waiting, translate);
+    let mut draw_rows = |canvas: &mut Canvas, (y0, y1): (i32, i32)| {
+        canvas.fill_rect(0, y0, canvas.width, y1 - y0, theme::BG, 1.0);
+        let base = translate;
+        if !archive && !searching {
+            draw_search_pill(canvas, base + SEARCH_TOP, width);
+            draw_chips(canvas, base + CHIPS_TOP, filter, chats);
+            if archived_count > 0 && filter == Filter::All {
+                let y = base + rows_top - ARCHIVED_ROW;
+                if y + ARCHIVED_ROW > y0 as f32 && y < y1 as f32 {
+                    draw_archived_row(canvas, y, chats, pressed == Some(Pressed::Archived), width);
+                }
+            }
+        }
+        let first = (((y0 as f32 - base - rows_top) / theme::ROW).floor().max(0.0)) as usize;
+        for (index, id) in rows.iter().enumerate().skip(first) {
+            let y = base + rows_top + index as f32 * theme::ROW;
+            if y > y1 as f32 {
+                break;
+            }
+            let Some(chat) = chats.get(id) else {
+                continue;
+            };
+            let is_pressed = pressed.as_ref() == Some(&Pressed::Row(id.clone()));
+            pics.span = (y, y + theme::ROW);
+            draw_row(canvas, &mut pics, rounded, chat, y, width, is_pressed, now);
+        }
+        if rows.is_empty() {
+            let note = if searching {
+                "No chats found"
+            } else if filter == Filter::Unread {
+                "No unread chats"
+            } else if filter == Filter::Groups {
+                "No groups"
+            } else if !status.online() && chats.by_id.is_empty() {
+                "Loading your chats…"
+            } else {
+                "No chats yet"
+            };
+            text::draw_centered(
+                canvas,
+                note,
+                width / 2.0,
+                base + rows_top + 160.0,
+                Weight::Regular,
+                theme::T_PREVIEW,
+                theme::SECONDARY,
+                1.0,
+            );
+        }
+    };
+    let drawn = view.band.draw(
         canvas,
-        full || arrived,
+        &mut app.damage,
+        full,
         (top as i32, bottom as i32),
         -(offset as i32),
         key,
-        |canvas, (y0, y1)| {
-            canvas.fill_rect(0, y0, canvas.width, y1 - y0, theme::BG, 1.0);
-            let base = top - offset;
-            if !archive && !searching {
-                draw_search_pill(canvas, base + SEARCH_TOP, width);
-                draw_chips(canvas, base + CHIPS_TOP, filter, chats);
-                if archived_count > 0 && filter == Filter::All {
-                    let y = base + rows_top - ARCHIVED_ROW;
-                    if y + ARCHIVED_ROW > y0 as f32 && y < y1 as f32 {
-                        draw_archived_row(canvas, y, chats, pressed == Some(Pressed::Archived), width);
-                    }
-                }
-            }
-            let first = (((y0 as f32 - base - rows_top) / theme::ROW).floor().max(0.0)) as usize;
-            for (index, id) in rows.iter().enumerate().skip(first) {
-                let y = base + rows_top + index as f32 * theme::ROW;
-                if y > y1 as f32 {
-                    break;
-                }
-                let Some(chat) = chats.get(id) else {
-                    continue;
-                };
-                let is_pressed = pressed.as_ref() == Some(&Pressed::Row(id.clone()));
-                draw_row(canvas, &mut pics, rounded, chat, y, width, is_pressed, now);
-            }
-            if rows.is_empty() {
-                let note = if searching {
-                    "No chats found"
-                } else if filter == Filter::Unread {
-                    "No unread chats"
-                } else if filter == Filter::Groups {
-                    "No groups"
-                } else if !status.online() && chats.by_id.is_empty() {
-                    "Loading your chats…"
-                } else {
-                    "No chats yet"
-                };
-                text::draw_centered(
-                    canvas,
-                    note,
-                    width / 2.0,
-                    base + rows_top + 160.0,
-                    Weight::Regular,
-                    theme::T_PREVIEW,
-                    theme::SECONDARY,
-                    1.0,
-                );
-            }
-        },
+        &mut draw_rows,
     );
+    // Pictures that came: only their rows again.
+    if drawn.is_some() {
+        for (c0, c1) in ready {
+            let (y0, y1) = (((c0 + translate) as i32).max(top as i32), ((c1 + translate) as i32).min(bottom as i32));
+            if y1 > y0 {
+                canvas.set_clip(0, y0, canvas.width, y1);
+                draw_rows(canvas, (y0, y1));
+                canvas.reset_clip();
+                app.damage.rows.push((y0, y1));
+            }
+        }
+    }
+    view.rows = rows;
     // Prefetch the pictures just below and above.
     let list = if archive { &app.archived } else { &app.list };
     let visible_first = ((offset - rows_top) / theme::ROW).floor().max(0.0) as usize;
@@ -699,7 +724,7 @@ fn draw_row(
         if unread { theme::GREEN } else { theme::SECONDARY },
         1.0,
     );
-    let title = text::fit(&chat.title, Weight::Medium, theme::T_TITLE, right - x - when_w - 30.0);
+    let title = text::fit(&super::rich::emojify(&chat.title), Weight::Medium, theme::T_TITLE, right - x - when_w - 30.0);
     text::draw(canvas, &title, x, cy - 16.0, Weight::Medium, theme::T_TITLE, theme::TEXT, 1.0);
 
     // The marks on the right of the preview: unread, muted, pinned.
@@ -756,7 +781,7 @@ fn draw_row(
     } else {
         last.text.clone()
     };
-    let preview = text::fit(&preview.replace('\n', " "), Weight::Regular, theme::T_PREVIEW, marks_right - px - 16.0);
+    let preview = text::fit(&super::rich::emojify(&preview.replace('\n', " ")), Weight::Regular, theme::T_PREVIEW, marks_right - px - 16.0);
     text::draw(canvas, &preview, px, line, Weight::Regular, theme::T_PREVIEW, theme::SECONDARY, 1.0);
 }
 

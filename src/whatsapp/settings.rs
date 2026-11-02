@@ -132,7 +132,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx) {
     let top = theme::TOP + theme::HEADER;
     let account = app.status.account.clone().unwrap_or_default();
     let mut waiting = Vec::new();
-    let mut pics = avatar::Pics { media: &mut *cx.media, waiting: &mut waiting };
+    let mut pics = avatar::Pics::new(&mut *cx.media, &mut waiting, 0.0);
     avatar::draw(canvas, &mut pics, &mut app.rounded, account.avatar.as_ref(), false, theme::MARGIN, top + 50.0, 190.0, cx.now);
     let name = if account.name.is_empty() { "WhatsApp".to_owned() } else { account.name.clone() };
     let name = text::fit(&name, Weight::Medium, 52.0, width - 330.0);

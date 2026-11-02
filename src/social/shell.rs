@@ -159,6 +159,25 @@ pub struct DrawCx<'a> {
     /// The whole canvas must be drawn (the first frame, a resize, a
     /// reopened window); otherwise it holds the last frame.
     pub full: bool,
+    /// What the frame changed, when the app knows (it drew only that): the
+    /// display then gets only that. None (the default): all of it.
+    pub damage: Option<Damage>,
+}
+
+/// What a frame changed: rows moved by a scroll (as `Canvas::move_rows`),
+/// rows drawn anew, and areas drawn anew over moved rows (`x0, y0, x1,
+/// y1`). Nothing at all: the frame is not shown.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Damage {
+    pub moved: Option<(i32, i32, i32)>,
+    pub rows: Vec<(i32, i32)>,
+    pub areas: Vec<(i32, i32, i32, i32)>,
+}
+
+impl Damage {
+    pub fn is_empty(&self) -> bool {
+        self.moved.is_none() && self.rows.is_empty() && self.areas.is_empty()
+    }
 }
 
 /// The app's X window and what shows the canvas in it.
@@ -294,15 +313,47 @@ impl Renderer {
     }
 
     /// Hands the canvas to the display (X compares it with what the server
-    /// has and uploads only what changed).
+    /// has and uploads only what changed; with the app's `damage`, only
+    /// that, a scroll moved server-side).
     fn present(&mut self) -> Result<(), Box<dyn Error>> {
+        self.present_damage(None)
+    }
+
+    fn present_damage(&mut self, damage: Option<&Damage>) -> Result<(), Box<dyn Error>> {
+        let damage = damage.filter(|_| !self.full);
         match &mut self.output {
             Output::X(x) => {
-                x.presenter.present(&x.conn, &self.canvas, 0)?;
+                match damage {
+                    Some(damage) => {
+                        if let Some((y0, y1, dy)) = damage.moved {
+                            x.presenter.scroll(&x.conn, y0, y1, dy)?;
+                        }
+                        x.presenter.present_rows_and_areas(
+                            &x.conn,
+                            &self.canvas,
+                            0,
+                            &damage.rows,
+                            &damage.areas,
+                        )?;
+                    }
+                    None => {
+                        x.presenter.present(&x.conn, &self.canvas, 0)?;
+                    }
+                }
                 x.conn.flush()?;
             }
             Output::Wayland(wayland) => {
-                wayland.present(&self.canvas, None, None)?;
+                let areas = damage.map(|damage| {
+                    let width = self.canvas.width;
+                    let mut areas: Vec<wayland::Area> = damage.areas.clone();
+                    // A move changes every row it spans.
+                    if let Some((y0, y1, _)) = damage.moved {
+                        areas.push((0, y0, width, y1));
+                    }
+                    areas.extend(damage.rows.iter().map(|&(y0, y1)| (0, y0, width, y1)));
+                    areas
+                });
+                wayland.present(&self.canvas, areas.as_deref(), None)?;
             }
         }
         self.full = false;
@@ -560,6 +611,13 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
     let mut wake: Option<Instant> = None;
     let mut next_shell_poll = Instant::now();
     let mut running = true;
+    // Measurement (`SOCIAL_APP_PROFILE`, or the bench's
+    // `EXOCORTEX_APP_PROFILE`): each frame's draw and present times and the
+    // finger row it was drawn for, in the Exocortex app's words, so the
+    // perf bench reads both apps alike.
+    let profile = std::env::var_os("SOCIAL_APP_PROFILE").is_some()
+        || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some();
+    let mut finger: Option<f32> = None;
 
     macro_rules! cx {
         ($now:expr) => {
@@ -595,6 +653,7 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
             media: &mut media,
             now: Instant::now(),
             full,
+            damage: None,
         };
         app.draw(&mut renderer.canvas, &mut dcx);
         if let Err(error) = renderer.present() {
@@ -603,6 +662,7 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
                 media: &mut media,
                 now: Instant::now(),
                 full: true,
+                damage: None,
             };
             app.draw(&mut renderer.canvas, &mut dcx);
             renderer.present()?;
@@ -714,9 +774,18 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
                     app.shown(&mut cx, shown);
                     settle!(cx);
                 }
-                DisplayEvent::Press(x, y, at) => gestures = recognizer.down(x, y, at),
-                DisplayEvent::Motion(x, y, at) => gestures = recognizer.moved(x, y, at),
-                DisplayEvent::Release(x, y, at) => gestures = recognizer.up(x, y, at),
+                DisplayEvent::Press(x, y, at) => {
+                    finger = Some(y);
+                    gestures = recognizer.down(x, y, at);
+                }
+                DisplayEvent::Motion(x, y, at) => {
+                    finger = Some(y);
+                    gestures = recognizer.moved(x, y, at);
+                }
+                DisplayEvent::Release(x, y, at) => {
+                    finger = None;
+                    gestures = recognizer.up(x, y, at);
+                }
                 DisplayEvent::Cancel => gestures = recognizer.cancel(),
                 DisplayEvent::Key(input) => {
                     let mut cx = cx!(now);
@@ -773,13 +842,35 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
                 media: &mut media,
                 now,
                 full,
+                damage: None,
             };
+            let started = Instant::now();
             app.draw(&mut renderer.canvas, &mut dcx);
-            if let Err(error) = renderer.present() {
+            let drawn = started.elapsed();
+            let damage = dcx.damage.take();
+            if damage.as_ref().is_some_and(Damage::is_empty) && !renderer.full {
+                // Nothing on screen changed.
+                redraw = false;
+                continue;
+            }
+            if let Err(error) = renderer.present_damage(damage.as_ref()) {
                 renderer.fall_back(error)?;
                 mapped = false;
                 redraw = true;
                 continue;
+            }
+            if profile {
+                eprintln!(
+                    "{id}: frame drawn in {:.2} ms (layout 0.00), presented in {:.2} ms ({})",
+                    drawn.as_secs_f64() * 1000.0,
+                    (started.elapsed() - drawn).as_secs_f64() * 1000.0,
+                    if full { "full" } else { "partial" }
+                );
+                eprintln!(
+                    "{id}: shown at {:.3} finger {}",
+                    monotonic_ms(),
+                    finger.map_or(-1, |y| (y + wayland::SCREEN_TOP).round() as i32)
+                );
             }
             if std::mem::take(&mut transition) {
                 control::page_drawn(|| match &mut renderer.output {

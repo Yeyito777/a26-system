@@ -117,10 +117,15 @@ pub struct ChatView {
     push_name: Option<String>,
     /// The scroll button and what it covered last frame.
     button_shown: bool,
+    /// Dragged or flung this frame.
+    moving: bool,
     /// Pictures the last frames drew without (`avatar::arrived`).
-    waiting: Vec<(String, u32, u32, Fit)>,
+    pub waiting: Vec<avatar::Waiting>,
+    /// An older page came: what is drawn stays where it is (the chat is
+    /// anchored at the bottom) unless its top is in view.
+    prepended: bool,
     /// The header's picture had not come when it was drawn.
-    header_waiting: Vec<(String, u32, u32, Fit)>,
+    pub header_waiting: Vec<avatar::Waiting>,
 }
 
 /// What a message shows, as a number: its layout is made again when it changes.
@@ -185,7 +190,9 @@ impl ChatView {
             avatar: None,
             push_name: None,
             button_shown: false,
+            moving: false,
             waiting: Vec::new(),
+            prepended: false,
             header_waiting: Vec::new(),
         }
     }
@@ -213,6 +220,9 @@ impl ChatView {
             let mut merged: Vec<Message> = page.into_iter().filter(|m| !known.contains(m.id.as_str())).collect();
             merged.append(&mut self.messages);
             self.messages = merged;
+            self.prepended = true;
+            self.dirty = true;
+            return;
         } else {
             self.loaded = true;
             self.more = more;
@@ -337,11 +347,12 @@ impl ChatView {
             items.push(Item::Loading);
         }
         let mut last_day = i64::MIN;
+        let mut days = time::Days::default();
         let mut previous: Option<&Message> = None;
         let mut seen = std::collections::HashSet::new();
         for (index, message) in self.messages.iter().enumerate() {
             seen.insert(message.id.clone());
-            let day = time::day_of(message.ts);
+            let day = days.day(message.ts);
             let new_day = day != last_day;
             if new_day {
                 items.push(Item::Day(time::day_chip(message.ts)));
@@ -620,7 +631,8 @@ fn add_reactions(bubble: &mut Bubble, message: &Message) {
     }
     let w = text::measure(&label, Weight::Medium, 32.0) + 36.0;
     bubble.reactions = Some((label, w));
-    bubble.below = REACTION_H - 18.0;
+    // The pill overlaps the bubble's bottom by 16 px, its ring 4 more.
+    bubble.below = REACTION_H - 16.0 + 6.0;
 }
 
 /// The band the messages scroll in: under the header, over the composer.
@@ -648,8 +660,14 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
             view.scroll.shift(s.clamp(0.0, max));
         }
     }
-    if view.scroll.step(max, cx.now) {
+    let moving = view.scroll.step(max, cx.now);
+    if moving {
         cx.animate();
+    }
+    let moving = moving || view.scroll.dragging();
+    if view.moving != moving {
+        view.moving = moving;
+        cx.redraw();
     }
     let offset = view.scroll.value(cx.now);
     if view.more && !view.loading_older && connected && view.loaded && offset > max - PREFETCH
@@ -658,7 +676,9 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
         let chat = view.id.clone();
         let before = first.id.clone();
         view.loading_older = true;
-        view.changed();
+        // The "Loading…" row comes above what is drawn.
+        view.dirty = true;
+        view.prepended = true;
         let request = cx.request("history", json!({"chat": chat, "before": before, "limit": 60}));
         app.asked.insert(request, Ask::History { chat, older: true });
     }
@@ -743,7 +763,9 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
         let max = view.max_scroll(bottom - top);
         match gesture {
             Gesture::DragStart { axis: Axis::Vertical, y, start_y, .. } => {
-                view.pressed = None;
+                if view.pressed.take().is_some() {
+                    view.version += 1;
+                }
                 // The chat scrolls from the bottom: dragging down shows older.
                 view.scroll.begin(-start_y, now);
                 view.scroll.moved(-y, max, now);
@@ -868,6 +890,9 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     }
     let offset = view.scroll.value(now).round();
     let max = view.max_scroll(bottom - top);
+    if std::mem::take(&mut view.prepended) && offset > max - 2.0 * (bottom - top) {
+        view.version += 1;
+    }
     let offset = offset.clamp(-200.0, max + 200.0);
     if full {
         canvas.fill_rect(0, 0, canvas.width, top as i32, theme::CHAT_BAR, 1.0);
@@ -886,34 +911,54 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let messages = &view.messages;
     let pressed = view.pressed.clone();
     let rounded = &mut app.rounded;
-    let arrived = avatar::arrived(cx.media, &mut view.waiting);
-    let mut pics = avatar::Pics { media: &mut *cx.media, waiting: &mut view.waiting };
-    let pics = &mut pics;
-    let shift = view.band.draw(canvas, full || arrived, (top as i32, bottom as i32), offset as i32, key, |canvas, (y0, y1)| {
+    // Content rows are measured from the bottom (stable as older pages come).
+    let translate = bottom + offset;
+    let ready = avatar::arrived(cx.media, &mut view.waiting);
+    let mut pics = avatar::Pics::new(&mut *cx.media, &mut view.waiting, translate);
+    let mut draw_rows = |canvas: &mut Canvas, (y0, y1): (i32, i32)| {
         canvas.fill_rect(0, y0, canvas.width, y1 - y0, theme::BG, 1.0);
-        let base = bottom - total + offset;
-        let first = tops.partition_point(|&t| base + t < y0 as f32 - 900.0);
+        let base = translate - total;
+        // From the item the rows start in (items do not overlap).
+        let first = tops.partition_point(|&t| base + t <= y0 as f32).saturating_sub(1);
         for n in first..items.len() {
             let y = base + tops[n];
             if y > y1 as f32 {
                 break;
             }
-            if y + item_height(&items[n]) + 40.0 < y0 as f32 {
+            let h = item_height(&items[n]);
+            if y + h + 40.0 < y0 as f32 {
                 continue;
             }
-            draw_item(canvas, pics, rounded, &items[n], messages, y, width, pressed.as_deref(), now);
+            pics.span = (y, y + h);
+            draw_item(canvas, &mut pics, rounded, &items[n], messages, y, width, pressed.as_deref(), now);
         }
-    });
+    };
+    let shift = view.band.draw(canvas, &mut app.damage, full, (top as i32, bottom as i32), offset as i32, key, &mut draw_rows);
+    if shift.is_some() {
+        // Pictures that came: only their rows again.
+        for (c0, c1) in ready {
+            let (y0, y1) = (((c0 + translate) as i32).max(top as i32), ((c1 + translate) as i32).min(bottom as i32));
+            if y1 > y0 {
+                canvas.set_clip(0, y0, canvas.width, y1);
+                draw_rows(canvas, (y0, y1));
+                canvas.reset_clip();
+                app.damage.rows.push((y0, y1));
+            }
+        }
+    }
     // The scroll button floats over the band: drawn again (with what is
     // under it) every frame it shows, and where the band moved its copy.
-    let show_button = offset > 600.0;
+    // Not while the chat moves: the button floats over what scrolls, and
+    // drawing it again on every frame of a fling cost more than the fling.
+    let show_button = offset > 600.0 && !view.moving;
     let (bx, by) = scroll_button_center(width, bottom);
     let area = |dy: f32| {
         (
-            ((by - SCROLL_BUTTON / 2.0 - 8.0 + dy) as i32).max(top as i32),
-            ((by + SCROLL_BUTTON / 2.0 + 8.0 + dy) as i32).min(bottom as i32),
+            ((by - SCROLL_BUTTON / 2.0 - 30.0 + dy) as i32).max(top as i32),
+            ((by + SCROLL_BUTTON / 2.0 + 30.0 + dy) as i32).min(bottom as i32),
         )
     };
+    let (ax0, ax1) = ((bx - SCROLL_BUTTON / 2.0 - 30.0) as i32, canvas.width);
     if show_button || view.button_shown {
         let mut areas = vec![area(0.0)];
         if let Some(shift) = shift
@@ -926,16 +971,9 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
                 if y1 <= y0 {
                     continue;
                 }
-                canvas.set_clip(0, y0, canvas.width, y1);
-                canvas.fill_rect(0, y0, canvas.width, y1 - y0, theme::BG, 1.0);
-                let base = bottom - total + offset;
-                for n in 0..items.len() {
-                    let y = base + tops[n];
-                    if y > y1 as f32 || y + item_height(&items[n]) + 40.0 < y0 as f32 {
-                        continue;
-                    }
-                    draw_item(canvas, pics, rounded, &items[n], messages, y, width, pressed.as_deref(), now);
-                }
+                app.damage.areas.push((ax0, y0, ax1, y1));
+                canvas.set_clip(ax0, y0, ax1, y1);
+                draw_rows(canvas, (y0, y1));
                 canvas.reset_clip();
             }
         }
@@ -954,7 +992,9 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
         }
     }
     view.button_shown = show_button;
-    if full || avatar::arrived(pics.media, &mut view.header_waiting) {
+    let header_ready = !avatar::arrived(cx.media, &mut view.header_waiting).is_empty();
+    if full || header_ready {
+        app.damage.rows.push((0, top as i32));
         let header = Header {
             title: &view.title,
             avatar: view.avatar.as_ref(),
@@ -962,7 +1002,8 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
             members: view.members,
             push_name: view.push_name.as_deref(),
         };
-        let mut header_pics = avatar::Pics { media: &mut *pics.media, waiting: &mut view.header_waiting };
+        let mut header_pics = avatar::Pics::new(&mut *cx.media, &mut view.header_waiting, 0.0);
+        header_pics.span = (0.0, top);
         draw_header(canvas, &mut header_pics, rounded, &header, width, now);
     }
     if full {
@@ -971,17 +1012,19 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     // Pictures about to scroll in.
     if let Some(view) = app.chat.as_ref() {
         let base = bottom - view.total + offset;
-        for (n, item) in view.items.iter().enumerate() {
+        let first = view.tops.partition_point(|&t| base + t < top - 1600.0);
+        for n in first..view.items.len() {
             let y = base + view.tops[n];
-            if y > bottom + 1600.0 || y + item_height(item) < top - 1600.0 {
-                continue;
+            if y > bottom + 1600.0 {
+                break;
             }
-            if let Item::Message { bubble, .. } = item
+            if let Item::Message { bubble, .. } = &view.items[n]
                 && let Some(m) = &bubble.media
                 && (y > bottom || y + bubble.h < top)
             {
                 let (w, h) = (m.rect.w.round() as u32, m.rect.h.round() as u32);
-                let _ = cx.media.get(&m.reference, w, h, Fit::Cover, now);
+                let reference = if m.kind == "image" { &m.reference } else { m.thumb.as_ref().unwrap_or(&m.reference) };
+                let _ = cx.media.get(reference, w, h, Fit::Cover, now);
             }
         }
     }
@@ -1009,7 +1052,7 @@ fn draw_header(
     let size = 104.0;
     avatar::draw(canvas, pics, rounded, view.avatar, view.group, 104.0, cy - size / 2.0, size, now);
     let x = 104.0 + size + 30.0;
-    let title = text::fit(view.title, Weight::Medium, 48.0, width - x - 50.0);
+    let title = text::fit(&rich::emojify(view.title), Weight::Medium, 48.0, width - x - 50.0);
     let subtitle = if view.group {
         view.members.map(|n| format!("{n} members")).or_else(|| Some("tap here for group info".into()))
     } else {
@@ -1152,7 +1195,7 @@ fn draw_bubble(
         canvas.fill_rrect(RectF { x: q.x, y: q.y, w: 9.0, h: q.h }, 4.0, *color, 1.0);
         let author = text::fit(author, Weight::SemiBold, 34.0, q.w - 50.0);
         text::draw(canvas, &author, q.x + 30.0, q.y + 46.0, Weight::SemiBold, 34.0, *color, 1.0);
-        let quoted = text::fit(quoted, Weight::Regular, 36.0, q.w - 50.0);
+        let quoted = text::fit(&rich::emojify(quoted), Weight::Regular, 36.0, q.w - 50.0);
         text::draw(canvas, &quoted, q.x + 30.0, q.y + 98.0, Weight::Regular, 36.0, secondary, 1.0);
     }
     if let Some(m) = &bubble.media {

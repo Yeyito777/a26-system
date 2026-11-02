@@ -5,6 +5,7 @@
 //! pressed row, a resize) draws the whole band.
 
 use crate::gfx::Canvas;
+use crate::social::shell::Damage;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Band {
@@ -20,10 +21,13 @@ impl Band {
 
     /// Draws rows `y0..y1` at `translate` (the content's y offset; rounded)
     /// for content `key`. `draw` draws the content clipped to a row range.
-    /// Returns the rows drawn again (for overlays to restore beneath them).
+    /// What changed goes into `damage`. Returns how far the band moved (0:
+    /// not at all), or None when it was drawn whole.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         canvas: &mut Canvas,
+        damage: &mut Damage,
         full: bool,
         (y0, y1): (i32, i32),
         translate: i32,
@@ -44,11 +48,14 @@ impl Band {
             canvas.set_clip(0, strip.0, canvas.width, strip.1);
             draw(canvas, strip);
             canvas.reset_clip();
+            damage.moved = Some((y0, y1, shift));
+            damage.rows.push(strip);
             return Some(shift);
         }
         canvas.set_clip(0, y0, canvas.width, y1);
         draw(canvas, (y0, y1));
         canvas.reset_clip();
+        damage.rows.push((y0, y1));
         None
     }
 }

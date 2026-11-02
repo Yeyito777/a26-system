@@ -31,6 +31,33 @@ pub fn day_of(t_ms: i64) -> i64 {
     days_from_civil(i64::from(tm.tm_year) + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32)
 }
 
+/// Local days of many times in order (a chat's messages): one look at the
+/// zone per day, not per time.
+#[derive(Default)]
+pub struct Days {
+    /// The last day seen: its first and last millisecond, and its number.
+    span: Option<(i64, i64, i64)>,
+}
+
+impl Days {
+    pub fn day(&mut self, t_ms: i64) -> i64 {
+        if let Some((start, end, day)) = self.span
+            && (start..end).contains(&t_ms)
+        {
+            return day;
+        }
+        let tm = local(t_ms.div_euclid(1000));
+        let day = days_from_civil(i64::from(tm.tm_year) + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32);
+        let into = (i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec)) * 1000
+            + t_ms.rem_euclid(1000);
+        let start = t_ms - into;
+        // A day with a clock change is an hour shorter or longer: the span
+        // stops short of the next midnight rather than past it.
+        self.span = Some((start, start + 23 * 3_600_000, day));
+        day
+    }
+}
+
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
