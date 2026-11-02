@@ -338,7 +338,10 @@ media come from `media.fetch` like a message's.
 
 **Commands.** `whatsapp.chat_info` (`chat`): `title`, `phone` (a person's
 number, as shown), `push_name`, `members`, `group`, `muted`, `messages` (how
-many the bridge keeps). With `--fixtures`: `whatsapp.fixtures.poke`
+many the bridge keeps). `whatsapp.chat_media` (`chat`, optional `before`,
+`limit`): the chat's photos and videos the bridge keeps, newest first,
+`{"messages": [Message], "more"}`. `media.fetch` of an `avatar` with `max`
+over 200 gets the whole profile picture (the list's are previews). With `--fixtures`: `whatsapp.fixtures.poke`
 (`chat`, `text`: someone writes now) and `whatsapp.fixtures.scan` (the
 made-up QR is scanned), and `RECORD_WA_FIXTURES_SIGNED_OUT=1` starts signed
 out, `RECORD_WA_FIXTURES_ANCHOR=ms` pins the made-up times.
