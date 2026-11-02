@@ -2077,3 +2077,93 @@ pub fn hit(layout: &MessageLayout, x: f32, y: f32) -> Option<Hit> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::social::proto::{Message, Reaction};
+
+    #[test]
+    fn a_message_lays_out_text_pictures_embeds_and_reactions() {
+        let mut ext = MessageExt::default();
+        ext.users.insert("7".into(), "Ana".into());
+        ext.embeds.push(Embed {
+            title: Some("A title".into()),
+            description: Some("Some **bold** words".into()),
+            color: Some(0x5865f2),
+            ..Embed::default()
+        });
+        let entry = Entry {
+            message: Message {
+                id: "1".into(),
+                text: "hello <@7>, see `code` and https://example.com".into(),
+                media: vec![proto::Media {
+                    reference: "p:1".into(),
+                    kind: "image".into(),
+                    w: Some(1600),
+                    h: Some(1200),
+                    ..proto::Media::default()
+                }],
+                reactions: vec![Reaction {
+                    emoji: "👍".into(),
+                    count: 3,
+                    mine: true,
+                }],
+                ..Message::default()
+            },
+            ext,
+            revision: 1,
+        };
+        let layout = message(&entry, 800.0, true, &|_| None);
+        assert!(layout.header);
+        assert!(layout.height > layout.body.height);
+        let texts: Vec<String> = layout
+            .body
+            .lines
+            .iter()
+            .flat_map(|line| line.items.iter())
+            .filter_map(|item| match item {
+                Item::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "@Ana"));
+        assert!(texts.iter().any(|t| t == "code"));
+        assert!(
+            layout
+                .pieces
+                .iter()
+                .any(|p| matches!(p, Piece::Picture { .. }))
+        );
+        assert!(layout.pieces.iter().any(|p| matches!(p, Piece::Embed(_))));
+        assert!(layout.pieces.iter().any(|p| matches!(
+            p,
+            Piece::Reaction {
+                count: 3,
+                mine: true,
+                ..
+            }
+        )));
+        // A link is tappable where it is drawn.
+        let link = layout.body.lines.iter().find_map(|line| {
+            line.items.iter().find_map(|item| match item {
+                Item::Text {
+                    x, link: Some(url), ..
+                } => Some((*x + 4.0, line.y + line.height / 2.0, url.to_string())),
+                _ => None,
+            })
+        });
+        let (x, y, url) = link.expect("a link");
+        assert_eq!(hit(&layout, x, layout.body_y + y), Some(Hit::Link(url)));
+    }
+
+    #[test]
+    fn pictures_fit_their_box_at_most_at_their_own_size() {
+        assert_eq!(
+            fit_box(Some(4000), Some(2000), 900.0, 900.0),
+            (900.0, 450.0)
+        );
+        assert_eq!(fit_box(Some(100), Some(50), 900.0, 900.0), (275.0, 138.0));
+        assert_eq!(fit_box(None, None, 900.0, 900.0).1, dp(200.0));
+    }
+}

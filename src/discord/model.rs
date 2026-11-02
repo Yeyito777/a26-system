@@ -435,3 +435,71 @@ impl Model {
             .unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(id: &str, ts: i64, mine: bool) -> Message {
+        Message {
+            id: id.into(),
+            chat: "c".into(),
+            ts,
+            mine,
+            text: format!("m{id}"),
+            format: "discord".into(),
+            ..Message::default()
+        }
+    }
+
+    #[test]
+    fn pages_merge_and_echoes_replace_pending_bubbles() {
+        let mut model = Model::default();
+        model.page(
+            "c",
+            vec![message("3", 30, false), message("4", 40, false)],
+            true,
+            false,
+        );
+        model.page(
+            "c",
+            vec![message("1", 10, false), message("2", 20, false)],
+            false,
+            true,
+        );
+        let ids: Vec<&str> = model.histories["c"]
+            .entries
+            .iter()
+            .map(|e| e.message.id.as_str())
+            .collect();
+        assert_eq!(ids, ["1", "2", "3", "4"]);
+        assert!(!model.histories["c"].more);
+        // The newest page again keeps what is older than it.
+        model.page(
+            "c",
+            vec![message("4", 40, false), message("5", 50, false)],
+            true,
+            false,
+        );
+        assert_eq!(model.histories["c"].entries.len(), 5);
+
+        let mut pending = message("local-1", 60, true);
+        pending.status = Some("pending".into());
+        pending.client_id = Some("k".into());
+        assert!(model.upsert_message(pending));
+        let mut echo = message("6", 60, true);
+        echo.client_id = Some("k".into());
+        echo.status = Some("sent".into());
+        assert!(model.upsert_message(echo));
+        let last = model.histories["c"].entries.last().unwrap();
+        assert_eq!(
+            (last.message.id.as_str(), model.histories["c"].entries.len()),
+            ("6", 6)
+        );
+        assert!(model.remove_message("c", "6"));
+        assert!(!model.upsert_message(Message {
+            chat: "elsewhere".into(),
+            ..message("9", 1, false)
+        }));
+    }
+}
