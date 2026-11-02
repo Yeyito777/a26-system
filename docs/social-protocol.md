@@ -251,7 +251,107 @@ service's section is written by its bridge's provider.
 
 ### Discord
 
-(to come: servers, channels, threads, members)
+The provider is record's Discord code (its REST client and its gateway's
+wire protocol), so the bridge looks to Discord like record does.
+
+**Chats.** One per DM (`dm`), group DM (`group`), server channel the user
+can view (`channel`: text and announcement channels; `forum`: forum and
+media channels; `voice`: voice and stage channels, for their text chat) and
+active thread the user joined (`thread`). Chat ids are Discord's channel
+ids; categories are not chats.
+
+| Field | Discord |
+| --- | --- |
+| `parent` | a channel's category id (or null); a thread's channel id |
+| `unread` | DMs: unread messages; server channels and threads: 1 when unread |
+| `mentions` | unread mentions (every unread DM message is one, as Discord counts) |
+| `muted` | the channel, its category, the thread or the whole server is muted (the user's settings) |
+| `ts` | last activity; a server channel's moves only when its unread state changes (apps order those by `ext.position`) |
+| `last` | DMs only, from what the bridge saw (null until a message comes or the chat opens) |
+| `ext` | server channels and threads: `guild` (server id), `category`, `position`, `type` (Discord's channel type), `topic`, `nsfw`, `locked`, `channel_muted` (muted itself, not only by its server), `messages` (a thread's); DMs: `type`, `recipients` (`[{id,name,username,bot}]`), `bot` |
+
+**Servers.** `discord.guilds` answers `{"guilds":[Guild]}` in the user's
+rail order (their folders kept together):
+
+```json
+{"id":"…","name":"Record Lounge","icon":Media|null,"unread":true,"mentions":2,
+ "muted":false,"position":0,"folder":{"id":"…","name":"Dev","color":5793266}|null,
+ "categories":[{"id":"…","name":"Text Channels","position":4}],"owner":false,"members":47}
+```
+
+`unread`: an unmuted channel the user can see has something unread.
+Events: `discord.guilds` (the whole list: a new session, a folder change),
+`discord.guild` (`guild`: one changed), `discord.guild_removed` (`id`).
+
+**Threads.** `discord.threads` (`chat`, optional `archived`, `offset`)
+answers `{"threads":[Chat],"more":false}`: a forum's posts or a channel's
+threads, joined or not (the chat list holds only joined ones).
+
+**Members.** `discord.member_list` (`chat`) answers the member list of the
+channel an app views, as Discord sends it for the channel shown:
+`{"chat":…,"groups":[{"id","count","name"}],"items":[{"group","count"} or
+{"id","name","avatar","color","status","bot"}],"members":N,"online":N}`
+(empty until Discord sent one; a DM's people). The `discord.member_list`
+event carries the same when it changes. `discord.members` (`guild`,
+`members: [{id,name,color}]`): server nicknames and role colours learnt for
+message authors (the bridge also sends the viewed chat's messages by them
+again).
+
+**Messages.** `format` is `discord`: the text is Discord's markdown with its
+tokens: `<@id>` (a user), `<@&id>` (a role), `<#id>` (a channel),
+`<:name:id>` and `<a:name:id>` (custom emoji), `<t:UNIX:STYLE>`
+(timestamps), `</name:id>` (a command). `author.name` is the server
+nickname when known. A `system` message's words are in `text` (joins, pins,
+calls, threads started). A `forwarded` message's text and media are the
+forwarded one's (`ext.comment`: the forwarder's own words). `ext`:
+
+| Field | |
+| --- | --- |
+| `type` | Discord's message type |
+| `color`, `bot` | the author's role colour, a bot or app |
+| `mentioned` | it mentions the user (drawn highlighted) |
+| `users`, `roles`, `channels` | names for the text's tokens: `{id: name}`, roles `{id: {name, color}}` |
+| `emoji` | `{id: Media}`: the custom emoji in the text and the reactions |
+| `embeds` | `[{type,color,title,url,description,provider,author:{name,icon},footer:{text,icon},fields:[{name,value,inline}],image,thumbnail,video,timestamp}]` (descriptions and field values are markdown; a video is a Media with its poster as `thumb`) |
+| `stickers` | names of stickers nothing draws (Lottie) |
+| `urls` | each `media`'s original URL (to open a file or a video), or null |
+| `thread` | `{id,name}`: the thread started from it |
+| `reply_color`, `reply_mine` | the replied-to author's role colour; it is the user |
+
+`media`: attachments as `image`, `gif`, `video` (`thumb`: its first frame),
+`audio` (voice messages), `file`; stickers as `sticker`. A reaction's
+`emoji` is the emoji itself or a custom emoji's token.
+
+**What comes live.** `message` events come for the chats an app views
+(`view`); for the others the `chat` event says their unread state changed
+and `history` fetches them. `typing` comes for viewed chats.
+
+**Notifications** as Discord's mobile app: DMs and group DMs, messages that
+mention the user (by name; `@everyone`, `@here` and their roles unless the
+server is set to suppress them), and channels the user set (or their server
+defaults) to all messages; never a muted chat or server. Titles: the DM's
+name, `#channel (Server)`, `thread (#channel, Server)`; the body in plain
+words (names for mentions). The badge: unread DM messages plus mentions.
+
+**Writes** (only with writes on): `send` (`text`, `reply_to`; files not
+yet), `react` (`emoji`: an emoji or a custom emoji's token), `edit`,
+`delete`, `mark_read` (Discord's ack). No `typing`.
+
+**Presence.** While writes are off the bridge's gateway session is invisible
+and away: the bridge never shows the user online. With writes on it carries
+the status the user set and follows their changes elsewhere.
+
+**Signing in.** `login.start` with `method: "token"` and `token`: checked
+with Discord, then kept in the state directory (`session.json`, `0600`).
+
+**Capabilities:** `discord`, `edit`, `delete`, `react`, `reply`.
+
+**Fixtures.** `--fixtures` runs on record's made-up Discord (src/demo:
+fifteen servers, DMs, long histories with pictures, embeds and reactions;
+its clock fixed at 2026-10-24 21:00 UTC, or `DISCORD_FIXTURES_NOW`), in the
+bridge's process, with no network. `discord.fixtures.emit` (`chat`, `text`,
+`mention`) makes someone write there; `DISCORD_FIXTURES_INCOMING_SECONDS=N`
+one message every N seconds.
 
 ### Instagram
 
