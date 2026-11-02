@@ -300,7 +300,7 @@ marks chats); `ext.marked_unread` a chat marked unread there (`unread` 1).
 Photo`, `🎤 Voice message (0:42)`, a notice's sentence); `ext.status` is the
 last message's receipt when it is the account's, `ext.deleted` when it was
 deleted, `ext.notice` when it is a notice. Archived chats are in the
-`archived` folder. Status updates and channels are not chats.
+`archived` folder. Status updates (below) and channels are not chats.
 
 **Messages.** `format` is `whatsapp` (`*bold*`, `_italic_`, `~strike~`,
 ```` ```mono``` ````). Media: `image`, `video`, `gif` (a looping silent
@@ -326,6 +326,15 @@ asks again.
 fetched through the session one at a time when the app first draws it and
 kept a week; a chat found to have none gets `avatar: null` (asked again in
 three days).
+
+**Status updates.** `whatsapp.status.list`: `{"updates": [{"user": User,
+"ts", "seen", "items": [Message]}]}`, the last 24 hours' updates by who
+posted them (the account's own first, as `"me"`, then those with one not
+seen yet, newest first); an item's `ext.seen`, and `ext.background`
+(`#rrggbb`) for a text update. `whatsapp.status.seen` (`ids`) notes items as
+seen on this phone only: WhatsApp is told nothing, whatever §4's switch
+says. A `whatsapp.status` event (`user`) says someone posted one now. Their
+media come from `media.fetch` like a message's.
 
 **Commands.** `whatsapp.chat_info` (`chat`): `title`, `phone` (a person's
 number, as shown), `push_name`, `members`, `group`, `muted`, `messages` (how
