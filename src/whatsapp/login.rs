@@ -101,8 +101,18 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
     if !cx.connected {
         return;
     }
-    if app.login.state == State::Idle {
+    // Asked and never answered (the bridge restarted meanwhile): again.
+    let stale = app.login.state == State::Starting
+        && app
+            .login
+            .started
+            .is_some_and(|at| cx.now.duration_since(at) > Duration::from_secs(10));
+    if app.login.state == State::Idle || stale {
         start(app, cx);
+    }
+    if app.login.state == State::Starting {
+        // The spinner turns.
+        cx.animate();
     }
     // The countdown under the QR.
     if app.login.state == State::Qr {
