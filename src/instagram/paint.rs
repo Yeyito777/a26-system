@@ -459,12 +459,17 @@ impl Paint<'_> {
 /// whether a picture is opaque.
 #[derive(Default)]
 pub struct Cache {
-    rounds: RefCell<HashMap<(usize, i32), (Rc<Image>, Rc<Image>)>>,
-    circles: RefCell<HashMap<(i32, i32), Rc<Vec<u32>>>>,
+    rounds: RefCell<HashMap<(usize, i32), Rounded>>,
+    circles: RefCell<HashMap<(i32, i32), Coverage>>,
     rings: RefCell<HashMap<(i32, i32, u8), Rc<Image>>>,
     icons: RefCell<HashMap<(Icon, i32, bool), Rc<Mask>>>,
     opaque: RefCell<HashMap<usize, (Rc<Image>, bool)>>,
 }
+
+/// A picture and its round cut.
+type Rounded = (Rc<Image>, Rc<Image>);
+/// A circle's coverage per pixel, 0..=256.
+type Coverage = Rc<Vec<u32>>;
 
 pub struct Mask {
     pub x: i32,
@@ -863,6 +868,7 @@ pub enum Icon {
 }
 
 /// Draws an icon `size` px square with its top-left at (x, y).
+#[allow(clippy::too_many_arguments)]
 pub fn icon(
     canvas: &mut Canvas,
     cache: &Cache,

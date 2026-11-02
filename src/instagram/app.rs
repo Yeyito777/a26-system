@@ -1080,10 +1080,11 @@ impl App for Instagram {
                         "band"
                     };
                     done = true;
-                    if self.verify && !bands.is_empty() {
-                        if !self.check_band(canvas, cx.media, now, area) {
-                            eprintln!("instagram: ({kind} frame, dy {dy}, bands {bands:?})");
-                        }
+                    if self.verify
+                        && !bands.is_empty()
+                        && !self.check_band(canvas, cx.media, now, area)
+                    {
+                        eprintln!("instagram: ({kind} frame, dy {dy}, bands {bands:?})");
                     }
                 }
             }
@@ -1103,21 +1104,21 @@ impl App for Instagram {
         self.frames += 1;
         // Profiling (the perf bench): when an opened chat first shows its
         // messages (the shell logs each frame after this).
-        if self.profile && kind != "none" {
-            if let Some((chat, at)) = &self.opening
-                && self.stacks[Tab::Messages as usize]
-                    .last()
-                    .and_then(|s| s.chat())
-                    == Some(chat.as_str())
-                && self.store.threads.get(chat).is_some_and(|t| t.loaded)
-            {
-                eprintln!(
-                    "instagram: opened {chat} in {:.1} ms ({} entries)",
-                    at.elapsed().as_secs_f64() * 1000.0,
-                    self.store.threads[chat].messages.len()
-                );
-                self.opening = None;
-            }
+        if self.profile
+            && kind != "none"
+            && let Some((chat, at)) = &self.opening
+            && self.stacks[Tab::Messages as usize]
+                .last()
+                .and_then(|s| s.chat())
+                == Some(chat.as_str())
+            && self.store.threads.get(chat).is_some_and(|t| t.loaded)
+        {
+            eprintln!(
+                "instagram: opened {chat} in {:.1} ms ({} entries)",
+                at.elapsed().as_secs_f64() * 1000.0,
+                self.store.threads[chat].messages.len()
+            );
+            self.opening = None;
         }
     }
 }

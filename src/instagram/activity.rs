@@ -39,11 +39,9 @@ pub struct ActivityScreen {
     viewed: bool,
 }
 
-fn section(ts: i64, now: i64, first_seen: bool) -> &'static str {
+fn section(ts: i64, now: i64) -> &'static str {
     let age = now - ts;
-    if first_seen {
-        "New"
-    } else if age < 86_400_000 {
+    if age < 86_400_000 {
         "Today"
     } else if age < 7 * 86_400_000 {
         "This week"
@@ -130,13 +128,8 @@ impl Screen for ActivityScreen {
         match &activity.items {
             Some(items) => {
                 let mut current = "";
-                let fresh = activity.badge.total as usize;
                 for (index, item) in items.iter().enumerate() {
-                    let name = section(
-                        item.ts,
-                        now,
-                        index < fresh.min(4) && activity.badge.total > 0 && false,
-                    );
+                    let name = section(item.ts, now);
                     if name != current {
                         current = name;
                         self.rows.push((y, Row::Section(name)));

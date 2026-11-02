@@ -803,7 +803,7 @@ impl ThreadScreen {
             };
             let name = (group && !message.mine && first && !message.system)
                 .then(|| message.author.name.clone());
-            let seen = (Some(index) == newest_mine && index == last_index).then(|| {
+            let seen = (Some(index) == newest_mine && index == last_index).then_some({
                 match message.status.as_deref() {
                     Some("read") => "Seen",
                     Some("pending") => "Sending…",

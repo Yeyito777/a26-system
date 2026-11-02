@@ -522,7 +522,7 @@ impl FeedScreen {
         }
     }
 
-    fn tray<'a>(store: &'a Store) -> Vec<&'a ReelSummary> {
+    fn tray(store: &Store) -> Vec<&ReelSummary> {
         store.tray.iter().filter(|reel| !reel.muted).collect()
     }
 
