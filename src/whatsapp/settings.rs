@@ -183,7 +183,12 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx) {
     } else {
         account.name.clone()
     };
-    let name = text::fit(&name, Weight::Medium, 52.0, width - 330.0);
+    let name = text::fit(
+        &super::rich::emojify(&name),
+        Weight::Medium,
+        52.0,
+        width - 330.0,
+    );
     text::draw(
         canvas,
         &name,

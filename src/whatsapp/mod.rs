@@ -522,7 +522,8 @@ impl App for WhatsApp {
                 }
                 self.full = true;
             }
-            Event::Chat(chat) => {
+            Event::Chat(mut chat) => {
+                rich::colour_chat(&mut chat);
                 if let Some(view) = self.chat.as_mut()
                     && view.id == chat.id
                 {
@@ -531,7 +532,8 @@ impl App for WhatsApp {
                 self.chats.upsert(*chat);
             }
             Event::ChatRemoved(id) => self.chats.remove(&id),
-            Event::Message { message, live } => {
+            Event::Message { mut message, live } => {
+                rich::colour_message(&mut message);
                 if let Some(view) = self.chat.as_mut()
                     && view.id == message.chat
                 {
@@ -579,7 +581,8 @@ impl App for WhatsApp {
                     for id in stale {
                         self.chats.remove(&id);
                     }
-                    for chat in chats {
+                    for mut chat in chats {
+                        rich::colour_chat(&mut chat);
                         self.chats.upsert(chat);
                     }
                 }
@@ -617,7 +620,10 @@ impl App for WhatsApp {
                 {
                     match result {
                         Ok(value) => {
-                            if let Ok(message) = serde_json::from_value(value["message"].clone()) {
+                            if let Ok(mut message) =
+                                serde_json::from_value(value["message"].clone())
+                            {
+                                rich::colour_message(&mut message);
                                 view.upsert(message, false, cx.now);
                             }
                         }

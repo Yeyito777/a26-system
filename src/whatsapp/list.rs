@@ -931,7 +931,7 @@ fn draw_row(
         1.0,
     );
     let title = text::fit(
-        &super::rich::emojify(&chat.title),
+        &chat.title,
         Weight::Medium,
         theme::T_TITLE,
         right - x - when_w - 30.0,
@@ -1043,7 +1043,7 @@ fn draw_row(
         last.text.clone()
     };
     let preview = text::fit(
-        &super::rich::emojify(&preview.replace('\n', " ")),
+        &preview.replace('\n', " "),
         Weight::Regular,
         theme::T_PREVIEW,
         marks_right - px - 16.0,
