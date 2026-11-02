@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::comms::Scroll;
 use crate::exocortex::gesture::{Axis, Gesture};
@@ -55,7 +55,9 @@ pub struct Sheet {
 #[derive(Debug, Clone, PartialEq)]
 struct Frame {
     offset: i32,
-    key: (i32, i32, i32, i32),
+    key: (i32, i32, i32),
+    /// Where what scrolls ended (above the bar when it showed).
+    scrolls: i32,
     /// The bar's words, if it showed.
     bar: Option<String>,
     /// An older page was loading (the header says so).
@@ -69,8 +71,10 @@ const BAR_H: f32 = dp(34.0);
 /// where older messages are); further up, rows carry an estimate until
 /// they come near (a page of fifty costs a frame no longer).
 const REACH_SCREENS: f32 = 1.0;
-/// Rows laid out ahead of the view per pass of the loop.
+/// Rows laid out ahead of the view per pass of the loop, at most, and
+/// for how long (one long message alone can take a millisecond).
 const LAYOUTS_PER_TICK: usize = 4;
+const LAYOUT_TICK_US: u64 = 600;
 /// What a missed picture in the header (a DM's avatar) redraws: the frame.
 const HEADER_TAG: u64 = 6;
 
@@ -341,7 +345,8 @@ impl ChatView {
     }
 
     /// Lays out estimated rows from the bottom up as far as `reach` above
-    /// the view's bottom, at most `budget` of them. A row in view that
+    /// the view's bottom; with a budget, at most so many and (after the
+    /// first) until then. A row in view that
     /// changes height makes the frame whole; one above the view moves only
     /// rows above it, unseen.
     fn lay_out_ahead(
@@ -351,7 +356,7 @@ impl ChatView {
         height: f32,
         offset: f32,
         reach: f32,
-        budget: usize,
+        budget: Option<(usize, Instant)>,
     ) {
         if !self.estimated.iter().any(|e| *e) {
             return;
@@ -360,7 +365,11 @@ impl ChatView {
         let mut changed = false;
         let mut done = 0;
         for i in (0..self.rows.len()).rev() {
-            if self.bottoms[i] > offset + reach || done >= budget {
+            if self.bottoms[i] > offset + reach
+                || budget.is_some_and(|(most, until)| {
+                    done >= most || (done > 0 && Instant::now() >= until)
+                })
+            {
                 break;
             }
             if !self.estimated[i] {
@@ -996,7 +1005,10 @@ impl ChatView {
             height,
             self.scroll.value(now),
             visible * (1.0 + 2.0 * REACH_SCREENS),
-            LAYOUTS_PER_TICK,
+            Some((
+                LAYOUTS_PER_TICK,
+                Instant::now() + Duration::from_micros(LAYOUT_TICK_US),
+            )),
         );
         if self.scroll.value(now) <= 1.0 {
             self.new_below = 0;
@@ -1083,14 +1095,14 @@ impl ChatView {
             bottom
         };
         let (top_i, bottom_i, scrolls_i) = (top as i32, bottom as i32, scrolls as i32);
-        let key = (canvas.width, canvas.height, bottom_i, scrolls_i);
+        let key = (canvas.width, canvas.height, bottom_i);
         let loading = model
             .histories
             .get(&self.chat)
             .is_some_and(|h| h.loading_older);
         // Whatever comes into view is laid out exactly before it is drawn.
         let visible = self.visible(width, height);
-        self.lay_out_ahead(model, width, height, offset, visible, usize::MAX);
+        self.lay_out_ahead(model, width, height, offset, visible, None);
         let ready = ui::take_ready(media);
         if ready.contains(&0) || ready.contains(&HEADER_TAG) {
             self.dirty = true;
@@ -1104,6 +1116,9 @@ impl ChatView {
             let dy = offset as i32 - last.offset;
             let header = last.loading != loading;
             let bar_changed = last.bar != bar;
+            // What moves: what scrolled both then and now (the bar came or
+            // went over the rest, which is drawn below).
+            let region = last.scrolls.min(scrolls_i);
             // Rows whose pictures came are drawn again where they are now.
             let pictures: Vec<(i32, i32)> = if ready.is_empty() {
                 Vec::new()
@@ -1113,15 +1128,19 @@ impl ChatView {
             if dy == 0 && pictures.is_empty() && !header && !bar_changed {
                 return Some(Damage::default());
             }
-            if dy.abs() < (scrolls_i - top_i) / 2 {
+            if dy.abs() < (region - top_i) / 2 {
                 let mut bands: Vec<(i32, i32)> = pictures;
                 if dy != 0 {
-                    canvas.move_rows(top_i, scrolls_i, dy);
+                    canvas.move_rows(top_i, region, dy);
                     bands.push(if dy > 0 {
                         (top_i, top_i + dy)
                     } else {
-                        (scrolls_i + dy, scrolls_i)
+                        (region + dy, region)
                     });
+                }
+                // Where the bar was and is no more.
+                if scrolls_i > region {
+                    bands.push((region, scrolls_i));
                 }
                 bands.retain(|band| band.1 > band.0);
                 bands.sort();
@@ -1157,11 +1176,12 @@ impl ChatView {
                 self.last_frame = Some(Frame {
                     offset: offset as i32,
                     key,
+                    scrolls: scrolls_i,
                     bar,
                     loading,
                 });
                 return Some(Damage {
-                    moved: (dy != 0).then_some((top_i, scrolls_i, dy)),
+                    moved: (dy != 0).then_some((top_i, region, dy)),
                     rows: merged,
                 });
             }
@@ -1187,6 +1207,7 @@ impl ChatView {
         self.last_frame = Some(Frame {
             offset: offset as i32,
             key,
+            scrolls: scrolls_i,
             bar,
             loading,
         });
