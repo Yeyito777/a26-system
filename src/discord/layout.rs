@@ -324,12 +324,13 @@ impl Flower<'_> {
             match &span.kind {
                 Kind::Break => self.break_line(line_h),
                 Kind::Text => {
+                    let text = ui::emoji_presentation(&span.text);
                     if self.jumbo {
                         // Unicode emoji draw big too.
                         paint.size = dp(40.0);
-                        self.push_text(&span.text, paint, Fill::None, None, span.spoiler, dp(54.0));
+                        self.push_text(&text, paint, Fill::None, None, span.spoiler, dp(54.0));
                     } else {
-                        self.push_text(&span.text, paint, Fill::None, None, span.spoiler, line_h);
+                        self.push_text(&text, paint, Fill::None, None, span.spoiler, line_h);
                     }
                 }
                 Kind::Code => {
@@ -1058,7 +1059,11 @@ pub fn message(
             let emoji_w = if custom {
                 dp(18.0)
             } else {
-                text::measure(&reaction.emoji, Weight::Regular, dp(16.0))
+                text::measure(
+                    &ui::emoji_presentation(&reaction.emoji),
+                    Weight::Regular,
+                    dp(16.0),
+                )
             };
             let w = dp(8.0)
                 + emoji_w
@@ -1728,7 +1733,7 @@ pub fn draw_pieces(
                     let size = dp(16.0);
                     let w = text::draw(
                         canvas,
-                        emoji,
+                        &ui::emoji_presentation(emoji),
                         ex,
                         text::centered_baseline(cy, Weight::Regular, size),
                         Weight::Regular,

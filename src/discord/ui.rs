@@ -774,3 +774,51 @@ pub fn scroll_rows(
         rows: vec![band],
     }
 }
+
+/// Discord draws every emoji in colour; the fonts here draw a lone
+/// pictograph (👍 with no variation selector) from a black-and-white symbol
+/// font. A selector after each lone one asks for the colour emoji.
+pub fn emoji_presentation(text: &str) -> std::borrow::Cow<'_, str> {
+    let pictograph =
+        |c: char| matches!(c as u32, 0x1f004..=0x1f1e5 | 0x1f200..=0x1f3fa | 0x1f400..=0x1faff);
+    let joins = |c: Option<char>| {
+        matches!(
+            c.map(|c| c as u32),
+            Some(0xfe0e | 0xfe0f | 0x200d | 0x20e3 | 0x1f3fb..=0x1f3ff)
+        )
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let lone = |i: usize| {
+        pictograph(chars[i])
+            && !joins(chars.get(i + 1).copied())
+            && (i == 0 || chars[i - 1] != '\u{200d}')
+    };
+    if !(0..chars.len()).any(lone) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, c) in chars.iter().enumerate() {
+        out.push(*c);
+        if lone(i) {
+            out.push('\u{fe0f}');
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::emoji_presentation;
+
+    #[test]
+    fn lone_pictographs_ask_for_colour() {
+        assert_eq!(emoji_presentation("ok 👍 go"), "ok 👍\u{fe0f} go");
+        assert_eq!(emoji_presentation("❤️ 👍\u{fe0f} 👍🏽"), "❤️ 👍\u{fe0f} 👍🏽");
+        assert_eq!(
+            emoji_presentation("👨\u{200d}👩\u{200d}👧"),
+            "👨\u{200d}👩\u{200d}👧"
+        );
+        assert_eq!(emoji_presentation("plain"), "plain");
+        assert_eq!(emoji_presentation("🇨🇦"), "🇨🇦");
+    }
+}
