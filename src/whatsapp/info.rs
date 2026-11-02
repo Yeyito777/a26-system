@@ -29,12 +29,16 @@ pub struct InfoView {
     band: Band,
     waiting: Vec<avatar::Waiting>,
     version: u64,
+    /// Pictures came that a frame had no budget to draw: the next one does.
+    backlog: bool,
 }
 
 impl InfoView {
     pub fn new(chat: String) -> Self {
         let mut scroll = Scroll::default();
-        scroll.smooth = true;
+        // X draws each report as it comes (the finger in the newest frame), as
+        // the other social apps and the Exocortex app on X do.
+        scroll.smooth = false;
         Self {
             chat,
             info: None,
@@ -45,6 +49,7 @@ impl InfoView {
             band: Band::default(),
             waiting: Vec::new(),
             version: 0,
+            backlog: false,
         }
     }
 
@@ -110,7 +115,7 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
         return;
     };
     let max = (view.content_height() - (bottom - top)).max(0.0);
-    if view.scroll.step(max, cx.now) {
+    if view.scroll.step(max, cx.now) || std::mem::take(&mut view.backlog) {
         cx.animate();
     }
     let offset = view.scroll.value(cx.now);
@@ -227,7 +232,9 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let info = view.info.clone().unwrap_or(Value::Null);
     let media = &view.media;
     let rounded = &mut app.rounded;
-    let ready = avatar::arrived(cx.media, &mut view.waiting, now);
+    let arrived = avatar::arrived(cx.media, &mut view.waiting, now);
+    view.backlog = arrived.more;
+    let ready = arrived.rows;
     let mut pics = avatar::Pics::new(&mut *cx.media, &mut view.waiting, translate);
     let cell = InfoView::cell();
     let mut draw_rows = |canvas: &mut Canvas, (y0, y1): (i32, i32)| {
@@ -244,7 +251,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
             {
                 Some(image) => {
                     let round = rounded.get(&image, PICTURE / 2.0);
-                    canvas.draw_image(&round, x as i32, (base + 40.0) as i32, 1.0);
+                    avatar::blit(canvas, &round, x as i32, (base + 40.0) as i32);
                 }
                 None => avatar::silhouette(canvas, group, x, base + 40.0, PICTURE),
             }
@@ -363,7 +370,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
                             .and_then(|t| pics.get(t, px, px, Fit::Cover, now))
                     });
                 match picture {
-                    Some(image) => canvas.draw_image(&image, x as i32, y as i32, 1.0),
+                    Some(image) => avatar::blit(canvas, &image, x as i32, y as i32),
                     None => canvas.fill_rect(
                         x as i32,
                         y as i32,

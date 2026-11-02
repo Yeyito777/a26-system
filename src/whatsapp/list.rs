@@ -47,6 +47,8 @@ pub struct ListView {
     rows_for: Option<(u64, Filter, String)>,
     /// Pictures the last frames drew without (`avatar::arrived`).
     pub waiting: Vec<avatar::Waiting>,
+    /// Pictures came that a frame had no budget to draw: the next one does.
+    pub(super) backlog: bool,
     /// The pressed row as last drawn (a press redraws its row only).
     drawn_pressed: Option<Pressed>,
 }
@@ -60,7 +62,9 @@ enum Pressed {
 impl ListView {
     pub fn new(folder: &'static str) -> Self {
         let mut scroll = Scroll::default();
-        scroll.smooth = true;
+        // X draws each report as it comes (the finger in the newest frame), as
+        // the other social apps and the Exocortex app on X do.
+        scroll.smooth = false;
         Self {
             folder,
             scroll,
@@ -72,6 +76,7 @@ impl ListView {
             rows_for: None,
             waiting: Vec::new(),
             drawn_pressed: None,
+            backlog: false,
         }
     }
 
@@ -176,7 +181,7 @@ fn max_scroll(list: &ListView, archived: usize, height: f32) -> f32 {
 pub fn tick(list: &mut ListView, chats: &mut super::Chats, cx: &mut Cx) {
     chats.sort();
     let max = max_scroll(list, chats.archived.len(), cx.height);
-    if list.scroll.step(max, cx.now) {
+    if list.scroll.step(max, cx.now) || std::mem::take(&mut list.backlog) {
         cx.animate();
     }
 }
@@ -444,7 +449,9 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     };
     // Lent to the drawing, given back below.
     let rows = std::mem::take(&mut view.rows);
-    let ready = avatar::arrived(cx.media, &mut view.waiting, now);
+    let arrived = avatar::arrived(cx.media, &mut view.waiting, now);
+    view.backlog = arrived.more;
+    let ready = arrived.rows;
     let translate = top - offset;
     let mut pics = avatar::Pics::new(&mut *cx.media, &mut view.waiting, translate);
     let mut draw_rows = |canvas: &mut Canvas, (y0, y1): (i32, i32)| {

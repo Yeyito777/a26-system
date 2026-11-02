@@ -315,8 +315,10 @@ impl Canvas {
         let hh = rect.h / 2.0;
         let r = radius.clamp(0.0, hw.min(hh));
         let (cx, cy) = rect.center();
-        let y0 = (rect.y.floor() as i32).max(0);
-        let y1 = ((rect.y + rect.h).ceil() as i32).min(self.height);
+        // Only the clip's rows (a tall shape in a strip drawn again costs
+        // the strip's rows).
+        let y0 = (rect.y.floor() as i32).max(self.clip.1);
+        let y1 = ((rect.y + rect.h).ceil() as i32).min(self.clip.3);
         let x0 = (rect.x.floor() as i32).max(0);
         let x1 = ((rect.x + rect.w).ceil() as i32).min(self.width);
         // Pixels whose centers are at least one pixel inside the straight
@@ -363,8 +365,8 @@ impl Canvas {
         let r = radius.clamp(0.0, hw.min(hh));
         let ir = (r - width).max(0.0);
         let (cx, cy) = rect.center();
-        let y0 = (rect.y.floor() as i32).max(0);
-        let y1 = ((rect.y + rect.h).ceil() as i32).min(self.height);
+        let y0 = (rect.y.floor() as i32).max(self.clip.1);
+        let y1 = ((rect.y + rect.h).ceil() as i32).min(self.clip.3);
         let x0 = (rect.x.floor() as i32).max(0);
         let x1 = ((rect.x + rect.w).ceil() as i32).min(self.width);
         for y in y0..y1 {
@@ -415,8 +417,8 @@ impl Canvas {
         let hh = rect.h / 2.0;
         let r = radius.clamp(0.0, hw.min(hh));
         let (cx, cy) = rect.center();
-        let y0 = ((rect.y - blur).floor() as i32).max(0);
-        let y1 = ((rect.y + rect.h + blur).ceil() as i32).min(self.height);
+        let y0 = ((rect.y - blur).floor() as i32).max(self.clip.1);
+        let y1 = ((rect.y + rect.h + blur).ceil() as i32).min(self.clip.3);
         let x0 = ((rect.x - blur).floor() as i32).max(0);
         let x1 = ((rect.x + rect.w + blur).ceil() as i32).min(self.width);
         for y in y0..y1 {
@@ -962,6 +964,62 @@ mod tests {
         assert_eq!(canvas.pixels[50 * 100 + 9], 0x000000);
         let corner = canvas.pixels[15 * 100 + 16] & 0xff;
         assert!(corner > 0 && corner < 255, "corner pixel {corner}");
+    }
+
+    #[test]
+    fn clipped_rounded_shapes_draw_what_the_clip_shows_of_the_whole_shape() {
+        // Each shape drawn clipped gives the unclipped shape's pixels inside
+        // the clip and leaves the rest as it was: the row loops start and
+        // end at the clip, as `put` and `span` cut there anyway.
+        fn backdrop() -> Canvas {
+            let mut canvas = Canvas::new(120, 140);
+            for (n, pixel) in canvas.pixels.iter_mut().enumerate() {
+                *pixel = (n as u32).wrapping_mul(2_654_435_761) & 0x00ff_ffff;
+            }
+            canvas
+        }
+        let rect = RectF::new(12.3, 17.6, 81.5, 96.2);
+        let shapes: [&dyn Fn(&mut Canvas); 4] = [
+            &|c| c.fill_rrect(rect, 22.0, 0x3366cc, 0.8),
+            &|c| c.stroke_rrect(rect, 22.0, 3.5, 0xffffff, 1.0),
+            &|c| c.shadow_rrect(rect, 22.0, 9.0, 0x000000, 0.4),
+            &|c| c.fill_circle(60.4, 70.7, 31.3, 0x00ff88, 1.0),
+        ];
+        let clips = [
+            (0, 40, 120, 90),   // inside the shape's straight rows
+            (0, 5, 120, 30),    // across its top corners
+            (0, 100, 120, 140), // across its bottom corners
+            (20, 60, 70, 64),   // a few rows, some columns
+            (0, 120, 120, 125), // below it (the shadow's edge)
+            (0, 130, 120, 140), // nothing of it
+        ];
+        for (n, shape) in shapes.iter().enumerate() {
+            let mut whole = backdrop();
+            shape(&mut whole);
+            for &(x0, y0, x1, y1) in &clips {
+                let before = backdrop();
+                let mut clipped = backdrop();
+                clipped.set_clip(x0, y0, x1, y1);
+                shape(&mut clipped);
+                for y in 0..clipped.height {
+                    for x in 0..clipped.width {
+                        let i = (y * clipped.width + x) as usize;
+                        let inside = x >= x0 && x < x1 && y >= y0 && y < y1;
+                        let want = if inside {
+                            whole.pixels[i]
+                        } else {
+                            before.pixels[i]
+                        };
+                        assert_eq!(
+                            clipped.pixels[i],
+                            want,
+                            "shape {n}, clip {:?}, pixel ({x}, {y})",
+                            (x0, y0, x1, y1)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

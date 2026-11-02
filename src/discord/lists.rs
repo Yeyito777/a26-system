@@ -88,8 +88,30 @@ const DM_HEADER: f32 = dp(64.0);
 pub struct MessagesView {
     pub list: ListScroll,
     pub partial: ui::Partial,
+    /// Each row's chat and what it showed, as last drawn.
+    drawn: Vec<(String, u64)>,
+    sigs: Vec<u64>,
     rows: Vec<String>,
     key: u64,
+}
+
+/// What a DM's row shows, as one number: it changed when this did.
+fn row_signature(chat: &Chat) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    chat.title.hash(&mut hasher);
+    chat.unread.hash(&mut hasher);
+    chat.muted.hash(&mut hasher);
+    chat.ts.hash(&mut hasher);
+    chat.members.hash(&mut hasher);
+    chat.avatar
+        .as_ref()
+        .map(|a| a.reference.as_str())
+        .hash(&mut hasher);
+    if let Some(last) = &chat.last {
+        (&last.id, &last.text, last.mine, &last.author, last.ts).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn tab_bottom(height: f32) -> f32 {
@@ -101,6 +123,8 @@ impl MessagesView {
         Self {
             list: ListScroll::new(),
             partial: ui::Partial::default(),
+            drawn: Vec::new(),
+            sigs: Vec::new(),
             rows: Vec::new(),
             key: u64::MAX,
         }
@@ -122,7 +146,38 @@ impl MessagesView {
                 .then(b.ts.cmp(&a.ts))
                 .then(a.id.cmp(&b.id))
         });
+        self.sigs = dms.iter().map(|chat| row_signature(chat)).collect();
         self.rows = dms.into_iter().map(|chat| chat.id.clone()).collect();
+    }
+
+    /// The rows in view at `offset` that changed since they were drawn
+    /// (what they show), or None when other rows are there now.
+    fn changed_in_view(&self, offset: f32, span: f32) -> Option<Vec<usize>> {
+        let first = ((offset - DM_HEADER) / DM_ROW).floor().max(0.0) as usize;
+        let last = (((offset + span - DM_HEADER) / DM_ROW).ceil().max(0.0) as usize + 1)
+            .min(self.rows.len().max(self.drawn.len()));
+        let mut changed = Vec::new();
+        for i in first..last {
+            match (self.drawn.get(i), self.rows.get(i)) {
+                (Some((id, sig)), Some(now)) if id == now => {
+                    if *sig != self.sigs[i] {
+                        changed.push(i);
+                    }
+                }
+                (None, None) => {}
+                _ => return None,
+            }
+        }
+        Some(changed)
+    }
+
+    fn row_band(&self, index: usize, offset: f32, y0: i32, y1: i32) -> Option<(i32, i32)> {
+        let top = theme::TOP + DM_HEADER + index as f32 * DM_ROW - offset;
+        let (a, b) = (
+            (top.floor() as i32).max(y0),
+            ((top + DM_ROW).ceil() as i32).min(y1),
+        );
+        (b > a).then_some((a, b))
     }
 
     fn max(&self, height: f32) -> f32 {
@@ -178,14 +233,63 @@ impl MessagesView {
         let height = canvas.height as f32;
         let (y0, y1) = (theme::TOP as i32, tab_bottom(height) as i32);
         let offset = self.list.scroll.value(now).round();
-        let key = model.chats_revision ^ (canvas.height as u64) << 48;
-        if let Some(dy) = self.partial.plan(offset as i32, key, full, media, y1 - y0) {
-            let damage = ui::scroll_rows(canvas, y0, y1, dy, theme::RAIL, |canvas| {
-                self.draw_rows(canvas, model, media, now, offset)
-            });
+        let key = canvas.height as u64;
+        let ready = ui::take_ready(media);
+        // In part: the rows move, and what came into view, rows whose
+        // chat changed and rows whose picture came are drawn.
+        if let Some(dy) = self.partial.plan(offset as i32, key, full, y1 - y0)
+            && !ready.contains(&0)
+            && let Some(changed) = self.changed_in_view(offset, (y1 - y0) as f32)
+        {
+            let mut bands: Vec<(i32, i32)> = changed
+                .iter()
+                .filter_map(|i| self.row_band(*i, offset, y0, y1))
+                .collect();
+            if !ready.is_empty() {
+                for (i, id) in self.rows.iter().enumerate() {
+                    if ready.contains(&ui::tag_of(id))
+                        && let Some(band) = self.row_band(i, offset, y0, y1)
+                    {
+                        bands.push(band);
+                    }
+                }
+            }
+            if dy != 0 {
+                canvas.move_rows(y0, y1, dy);
+                bands.push(if dy > 0 { (y0, y0 + dy) } else { (y1 + dy, y1) });
+            }
+            bands.sort();
+            let mut merged: Vec<(i32, i32)> = Vec::new();
+            for band in bands {
+                match merged.last_mut() {
+                    Some(last) if band.0 <= last.1 => last.1 = last.1.max(band.1),
+                    _ => merged.push(band),
+                }
+            }
+            for &(a, b) in &merged {
+                canvas.set_clip(0, a, canvas.width, b);
+                canvas.fill_rect(0, a, canvas.width, b - a, theme::RAIL, 1.0);
+                self.draw_rows(canvas, model, media, now, offset);
+            }
+            canvas.reset_clip();
+            self.drawn = self
+                .rows
+                .iter()
+                .cloned()
+                .zip(self.sigs.iter().copied())
+                .collect();
             self.partial.drawn(offset as i32, key, false);
-            return Some(damage);
+            return Some(Damage {
+                moved: (dy != 0).then_some((y0, y1, dy)),
+                rows: merged,
+            });
         }
+        self.drawn = self
+            .rows
+            .iter()
+            .cloned()
+            .zip(self.sigs.iter().copied())
+            .collect();
         ui::clear_misses();
         canvas.fill_rect(0, 0, canvas.width, canvas.height, theme::RAIL, 1.0);
         canvas.set_clip(0, y0, canvas.width, y1);
@@ -227,6 +331,7 @@ impl MessagesView {
             let Some(chat) = model.chats.get(id) else {
                 continue;
             };
+            ui::set_tag(ui::tag_of(id));
             let cy = y + DM_ROW / 2.0;
             let size = dp(44.0);
             if chat.kind == "group" && chat.avatar.is_none() {
@@ -334,6 +439,7 @@ impl MessagesView {
                 ui::badge(canvas, chat.unread, right - dp(12.0), cy + dp(12.0), None);
             }
         }
+        ui::set_tag(0);
         if self.rows.is_empty() {
             let note = if model.status.state == "online" {
                 "No direct messages yet"

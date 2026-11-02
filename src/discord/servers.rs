@@ -20,6 +20,7 @@ use super::chat::channel_icon;
 use super::model::{Guild, Model};
 use super::theme::{self, dp};
 use super::ui;
+use crate::social::shell::Damage;
 
 #[derive(Debug, Clone)]
 enum RailItem {
@@ -76,6 +77,20 @@ type RailKey = (u64, i32, Option<String>, usize, i32);
 type ListKey = (u64, u64, usize, i32, Option<String>, Option<String>, i32);
 
 const ITEM: f32 = theme::SERVER_ICON + theme::SERVER_GAP;
+/// What a missed picture redraws (`ui::set_tag`): the rail, the channel list.
+const RAIL_TAG: u64 = 2;
+const LIST_TAG: u64 = 4;
+
+/// How a frame of the tab was drawn.
+pub enum ServersFrame {
+    /// Everything (the tab bar too).
+    Whole,
+    /// The channel list (and maybe the rail): the shell compares the frame.
+    Compared,
+    /// Only the rail's column: its damage, within the rail's columns.
+    Rail(Damage),
+    Unchanged,
+}
 const ROW_H: f32 = dp(38.0);
 const CATEGORY_H: f32 = dp(40.0);
 const LIST_HEADER: f32 = dp(64.0);
@@ -428,7 +443,7 @@ impl ServersView {
         media: &mut Media,
         now: Instant,
         full: bool,
-    ) -> bool {
+    ) -> ServersFrame {
         self.sync(model);
         let (width, height) = (canvas.width as f32, canvas.height as f32);
         let bottom = bottom(height);
@@ -454,24 +469,88 @@ impl ServersView {
             channel,
             canvas.height,
         );
-        let whole = full || self.dirty || self.last_rail.is_none() || ui::misses_ready(media);
+        let ready = ui::take_ready(media);
+        let whole = full || self.dirty || self.last_rail.is_none() || ready.contains(&0);
+        let rail_x = theme::RAIL_W as i32;
+        let (top_i, bottom_i) = (theme::TOP as i32, bottom as i32);
         if whole {
             ui::clear_misses();
             self.dirty = false;
-        }
-        let draw_rail = whole || self.last_rail.as_ref() != Some(&rail_key);
-        let draw_list = whole || self.last_list.as_ref() != Some(&list_key);
-        self.last_rail = Some(rail_key);
-        self.last_list = Some(list_key);
-        if draw_rail {
-            self.draw_rail(canvas, model, media, now, rail_offset, bottom);
-        }
-        if draw_list {
+            self.last_rail = Some(rail_key);
+            self.last_list = Some(list_key);
+            self.draw_rail(
+                canvas,
+                model,
+                media,
+                now,
+                rail_offset,
+                bottom,
+                (0, bottom_i),
+            );
             self.draw_list(canvas, model, now, list_offset, width, height, bottom);
+            return ServersFrame::Whole;
         }
-        whole
+        let rail_changed = self.last_rail.as_ref() != Some(&rail_key) || ready.contains(&RAIL_TAG);
+        let list_changed = self.last_list.as_ref() != Some(&list_key) || ready.contains(&LIST_TAG);
+        let last_rail = self.last_rail.replace(rail_key.clone());
+        self.last_list = Some(list_key);
+        if list_changed {
+            // The list (taps, its own scroll): drawn again, compared on the way out.
+            if rail_changed {
+                self.draw_rail(
+                    canvas,
+                    model,
+                    media,
+                    now,
+                    rail_offset,
+                    bottom,
+                    (0, bottom_i),
+                );
+            }
+            self.draw_list(canvas, model, now, list_offset, width, height, bottom);
+            return ServersFrame::Compared;
+        }
+        if !rail_changed {
+            return ServersFrame::Unchanged;
+        }
+        // Only the rail changed: it moves within its own column, and only
+        // what came into view (or the whole column, for a picture) is drawn.
+        let scrolled_only = last_rail.as_ref().is_some_and(|last| {
+            (last.0, &last.2, last.3, last.4) == (rail_key.0, &rail_key.2, rail_key.3, rail_key.4)
+        }) && !ready.contains(&RAIL_TAG);
+        let dy = last_rail.as_ref().map_or(0, |last| last.1 - rail_key.1);
+        if scrolled_only && dy.abs() < (bottom_i - top_i) / 2 {
+            if dy == 0 {
+                return ServersFrame::Unchanged;
+            }
+            ui::move_columns(canvas, 0, rail_x, top_i, bottom_i, dy);
+            let band = if dy > 0 {
+                (top_i, top_i + dy)
+            } else {
+                (bottom_i + dy, bottom_i)
+            };
+            self.draw_rail(canvas, model, media, now, rail_offset, bottom, band);
+            return ServersFrame::Rail(Damage {
+                moved: Some((top_i, bottom_i, dy)),
+                rows: vec![band],
+            });
+        }
+        self.draw_rail(
+            canvas,
+            model,
+            media,
+            now,
+            rail_offset,
+            bottom,
+            (0, bottom_i),
+        );
+        ServersFrame::Rail(Damage {
+            moved: None,
+            rows: vec![(0, bottom_i)],
+        })
     }
 
+    /// Draws the rail's rows `band` (its column only).
     #[allow(clippy::too_many_arguments)]
     fn draw_rail(
         &self,
@@ -481,11 +560,15 @@ impl ServersView {
         now: Instant,
         offset: f32,
         bottom: f32,
+        band: (i32, i32),
     ) {
-        let height = canvas.height as f32;
-        let _ = height;
-        canvas.fill_rect(0, 0, theme::RAIL_W as i32, bottom as i32, theme::RAIL, 1.0);
-        canvas.set_clip(0, theme::TOP as i32, theme::RAIL_W as i32, bottom as i32);
+        let (y0, y1) = (band.0.max(0), band.1.min(bottom as i32));
+        if y1 <= y0 {
+            return;
+        }
+        canvas.fill_rect(0, y0, theme::RAIL_W as i32, y1 - y0, theme::RAIL, 1.0);
+        canvas.set_clip(0, y0.max(theme::TOP as i32), theme::RAIL_W as i32, y1);
+        ui::set_tag(RAIL_TAG);
         let selected = self.guild(model).map(|g| g.id.clone());
         let cx = theme::RAIL_W / 2.0;
         for (i, item) in self.rail.iter().enumerate() {
@@ -640,6 +723,7 @@ impl ServersView {
             }
         }
         canvas.reset_clip();
+        ui::set_tag(0);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -654,6 +738,7 @@ impl ServersView {
         bottom: f32,
     ) {
         let _ = now;
+        ui::set_tag(LIST_TAG);
         // Behind the panel's rounded corner.
         canvas.fill_rect(
             theme::RAIL_W as i32,
@@ -895,6 +980,7 @@ impl ServersView {
             y += h;
         }
         canvas.reset_clip();
+        ui::set_tag(0);
     }
 }
 
