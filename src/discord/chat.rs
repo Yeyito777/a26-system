@@ -1812,7 +1812,7 @@ impl ChatView {
             let size = dp(24.0);
             text::draw_centered(
                 canvas,
-                emoji,
+                &ui::emoji_presentation(emoji),
                 cx,
                 text::centered_baseline(cy, Weight::Regular, size),
                 Weight::Regular,
@@ -1860,5 +1860,163 @@ impl ChatView {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::social::proto::{Author, Message};
+
+    fn chat_with_messages(writes: bool) -> (Model, ChatView) {
+        let mut model = Model::default();
+        model.settings.writes = writes;
+        let messages = (0..12)
+            .map(|n| Message {
+                id: format!("m{n}"),
+                chat: "c".into(),
+                ts: 1_792_000_000_000 + n * 600_000,
+                author: Author {
+                    id: format!("u{}", n % 2),
+                    name: format!("Person {}", n % 2),
+                    avatar: None,
+                },
+                text: format!("message number {n}"),
+                format: "discord".into(),
+                ..Message::default()
+            })
+            .collect();
+        model.page("c", messages, false, false);
+        let mut view = ChatView::new("c".into());
+        view.sync(&model, 1080.0, 2216.0);
+        (model, view)
+    }
+
+    #[test]
+    fn a_long_press_opens_the_sheet_and_its_reactions_react() {
+        let (model, mut view) = chat_with_messages(true);
+        let now = Instant::now();
+        // The newest message sits just above the composer.
+        let y = view.content_bottom(1080.0, 2216.0) - dp(20.0);
+        let actions = view.gesture(
+            Gesture::LongPress { x: 400.0, y },
+            &model,
+            1080.0,
+            2216.0,
+            now,
+        );
+        assert!(matches!(actions.as_slice(), [Action::Haptic]));
+        assert_eq!(view.sheet.as_ref().map(|s| s.message.as_str()), Some("m11"));
+        // The quick reactions row: the first is 👍.
+        let entry = model.histories["c"].entries[11].clone();
+        let (rect, _) =
+            ChatView::sheet_geometry(ChatView::sheet_rows(&entry, true).len(), 1080.0, 2216.0);
+        let tap = Gesture::Tap {
+            x: theme::MARGIN + dp(20.0),
+            y: rect.y + dp(24.0) + dp(28.0),
+        };
+        let actions = view.gesture(tap, &model, 1080.0, 2216.0, now);
+        assert!(actions.iter().any(|a| matches!(a, Action::React { message, emoji, remove: false, .. } if message == "m11" && emoji == "👍")));
+        assert!(view.sheet.is_none());
+    }
+
+    #[test]
+    fn with_writes_off_the_sheet_only_copies() {
+        let (model, mut view) = chat_with_messages(false);
+        let now = Instant::now();
+        let y = view.content_bottom(1080.0, 2216.0) - dp(20.0);
+        view.gesture(
+            Gesture::LongPress { x: 400.0, y },
+            &model,
+            1080.0,
+            2216.0,
+            now,
+        );
+        let entry = model.histories["c"].entries[11].clone();
+        let rows = ChatView::sheet_rows(&entry, false);
+        assert!(
+            rows.iter()
+                .any(|(label, _, enabled, _)| *label == "Copy Text" && *enabled)
+        );
+        assert!(
+            rows.iter()
+                .any(|(label, _, enabled, _)| *label == "Reply" && !*enabled)
+        );
+        let (rect, row_h) = ChatView::sheet_geometry(rows.len(), 1080.0, 2216.0);
+        let list_y = rect.y + dp(24.0) + dp(56.0) + dp(12.0);
+        // Reply: refused with the reason, the sheet stays.
+        let actions = view.gesture(
+            Gesture::Tap {
+                x: 400.0,
+                y: list_y + row_h / 2.0,
+            },
+            &model,
+            1080.0,
+            2216.0,
+            now,
+        );
+        assert!(actions.iter().any(|a| matches!(a, Action::Toast(_))));
+        assert!(view.sheet.is_some());
+        // Copy Text copies and closes.
+        let actions = view.gesture(
+            Gesture::Tap {
+                x: 400.0,
+                y: list_y + row_h * 1.5,
+            },
+            &model,
+            1080.0,
+            2216.0,
+            now,
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Copy(text) if text == "message number 11"))
+        );
+        assert!(view.sheet.is_none());
+    }
+
+    #[test]
+    fn messages_group_by_author_within_seven_minutes() {
+        let mut model = Model::default();
+        let at = |minutes: i64| 1_792_000_000_000 + minutes * 60_000;
+        let message = |id: &str, author: &str, ts: i64| Message {
+            id: id.into(),
+            chat: "c".into(),
+            ts,
+            author: Author {
+                id: author.into(),
+                name: author.into(),
+                avatar: None,
+            },
+            text: "hi".into(),
+            format: "discord".into(),
+            ..Message::default()
+        };
+        // a, a (2 min later), a (12 min later: a new group), b.
+        model.page(
+            "c",
+            vec![
+                message("1", "a", at(0)),
+                message("2", "a", at(2)),
+                message("3", "a", at(14)),
+                message("4", "b", at(15)),
+            ],
+            false,
+            false,
+        );
+        let mut view = ChatView::new("c".into());
+        view.sync(&model, 1080.0, 2216.0);
+        let headers: Vec<bool> = view
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Message { header, .. } => Some(*header),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, [true, false, true, true]);
+        assert!(matches!(view.rows[0], Row::Start));
+        assert!(matches!(view.rows[1], Row::Day(_)));
     }
 }
