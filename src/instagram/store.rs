@@ -167,6 +167,8 @@ pub struct Store {
     pub tray: Vec<ReelSummary>,
     pub own_reel: Option<ReelSummary>,
     pub tray_loaded: bool,
+    /// When the tray was last read from Instagram (not the bridge's cache).
+    pub tray_at: Option<std::time::Instant>,
     pub reels: HashMap<String, Reel>,
     pub profiles: HashMap<String, Profile>,
     /// username → user id.
@@ -441,6 +443,7 @@ impl Store {
                     .and_then(|own| serde_json::from_value(own.clone()).ok());
                 if !cached {
                     self.tray_loaded = true;
+                    self.tray_at = Some(std::time::Instant::now());
                 }
             }
             Ask::Reels => {

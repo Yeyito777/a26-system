@@ -26,6 +26,7 @@ use crate::social::media::Fit;
 use crate::text::Weight;
 
 pub const TRAY_H: f32 = 112.0 * DP;
+const TRAY_FRESH: std::time::Duration = std::time::Duration::from_secs(300);
 const TRAY_RING: f32 = 184.0;
 const TRAY_SLOT: f32 = 220.0;
 const HEADER_H: f32 = 56.0 * DP;
@@ -503,6 +504,28 @@ pub struct FeedScreen {
     swipe: Option<(String, f32, f32)>,
     tray_drag: bool,
     refreshing: bool,
+    /// Posts as last laid out (id, top, layout), the tail, the tray's key.
+    drawn_ids: Vec<(String, f32, u64)>,
+    tail: f32,
+    tray_key: u64,
+    /// What the last layout changed: from where (content y), and the tray.
+    changed: Option<(f32, bool)>,
+    pill: bool,
+}
+
+/// What the tray shows, in a number.
+fn tray_key(store: &Store) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for reel in &store.tray {
+        reel.id.hash(&mut h);
+        reel.unseen.hash(&mut h);
+        reel.close_friends.hash(&mut h);
+        reel.user.avatar_ref().hash(&mut h);
+    }
+    store.own_reel.as_ref().map(|reel| reel.unseen).hash(&mut h);
+    store.account().and_then(|a| a.avatar.as_ref()).map(|m| m.reference.clone()).hash(&mut h);
+    h.finish()
 }
 
 impl FeedScreen {
@@ -519,6 +542,11 @@ impl FeedScreen {
             swipe: None,
             tray_drag: false,
             refreshing: false,
+            drawn_ids: Vec::new(),
+            tail: 0.0,
+            tray_key: 0,
+            changed: None,
+            pill: false,
         }
     }
 
@@ -553,6 +581,14 @@ impl Screen for FeedScreen {
             return self.height;
         }
         self.generation = store.generation;
+        let before: Vec<(String, f32)> = store
+            .feed
+            .posts
+            .iter()
+            .zip(&self.tops)
+            .map(|(post, top)| (post.id.clone(), *top))
+            .collect();
+        let old = (self.drawn_ids.clone(), self.height, self.tail, self.tray_key);
         self.tops.clear();
         let mut y = TRAY_H + 1.0;
         for post in &store.feed.posts {
@@ -568,7 +604,46 @@ impl Screen for FeedScreen {
             220.0
         };
         self.height = y + tail;
+        // Only posts added after the ones drawn (a next page) and the tray
+        // as it was: the rows from the old end down changed, and the tray's.
+        let ids: Vec<(String, f32, u64)> = store
+            .feed
+            .posts
+            .iter()
+            .zip(&self.tops)
+            .map(|(post, top)| (post.id.clone(), *top, self.layouts.get(post, width, self.expanded.contains(&post.id)).signature))
+            .collect();
+        let appended = !old.0.is_empty() && ids.len() >= old.0.len() && ids[..old.0.len()] == old.0[..];
+        let tray_key = tray_key(store);
+        self.changed = Some(match (appended, tray_key == old.3) {
+            (true, tray_same) => (old.1 - old.2, !tray_same),
+            _ => (f32::NAN, true),
+        });
+        let _ = before;
+        self.drawn_ids = ids;
+        self.tail = tail;
+        self.tray_key = tray_key;
+        self.pill = store.feed.pending.is_some();
         self.height
+    }
+
+    fn changed_rows(&mut self, area: Area) -> Option<Vec<(i32, i32)>> {
+        let Some((from, tray)) = self.changed.take() else {
+            return Some(Vec::new());
+        };
+        if from.is_nan() {
+            return None;
+        }
+        let base = area.top - area.offset;
+        let mut rows = Vec::new();
+        if tray {
+            rows.push((base.floor() as i32, (base + TRAY_H + 2.0).ceil() as i32));
+        }
+        let start = (base + from).floor() as i32;
+        if start < area.bottom as i32 {
+            rows.push((start, area.bottom as i32));
+        }
+        Some(rows)
     }
 
     fn draw(&mut self, canvas: &mut Canvas, p: &mut Paint, store: &Store, area: Area) {
@@ -1026,14 +1101,16 @@ impl Screen for FeedScreen {
     }
 
     fn shown(&mut self, store: &Store) -> Action {
-        let mut actions = vec![Action::request(
-            "instagram.tray",
-            json!({"cached": !store.tray_loaded}),
-            Ask::Tray {
-                cached: !store.tray_loaded,
-            },
-        )];
+        let mut actions = Vec::new();
         if !store.tray_loaded {
+            actions.push(Action::request(
+                "instagram.tray",
+                json!({"cached": true}),
+                Ask::Tray { cached: true },
+            ));
+        }
+        // The tray read again when Home's copy is over five minutes old.
+        if store.tray_at.is_none_or(|at| at.elapsed() > TRAY_FRESH) {
             actions.push(Action::request(
                 "instagram.tray",
                 json!({}),
@@ -1064,7 +1141,7 @@ impl Screen for FeedScreen {
     }
 
     fn blit_ok(&self) -> bool {
-        self.swipe.is_none() && !self.tray_drag
+        self.swipe.is_none() && !self.tray_drag && !self.pill
     }
 
     fn to_top(&mut self) -> bool {

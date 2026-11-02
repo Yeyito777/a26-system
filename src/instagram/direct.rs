@@ -502,13 +502,10 @@ pub struct ThreadScreen {
     composer: String,
     focused: bool,
     composer_lines: Vec<Line>,
-}
-
-fn hash(s: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
+    /// Laid out again since the last frame, and whether everything already
+    /// laid out stayed (then: the content's old height).
+    relaid: bool,
+    stable_from: Option<f32>,
 }
 
 fn is_jumbo(text: &str) -> bool {
@@ -531,6 +528,8 @@ impl ThreadScreen {
             composer: String::new(),
             focused: false,
             composer_lines: Vec::new(),
+            relaid: false,
+            stable_from: None,
         }
     }
 
@@ -538,17 +537,35 @@ impl ThreadScreen {
         COMPOSER_H.max(self.composer_lines.len().min(5) as f32 * 52.0 + 40.0) + 24.0
     }
 
+    /// What a message's layout depends on: laid out again only when it changes.
+    fn signature(message: &Message, group: bool) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        message.text.hash(&mut h);
+        message.deleted.hash(&mut h);
+        message.forwarded.hash(&mut h);
+        message.status.hash(&mut h);
+        group.hash(&mut h);
+        for media in &message.media {
+            media.reference.hash(&mut h);
+            media.thumb.hash(&mut h);
+        }
+        for reaction in &message.reactions {
+            reaction.emoji.hash(&mut h);
+            reaction.count.hash(&mut h);
+        }
+        if let Some(reply) = &message.reply_to {
+            reply.text.hash(&mut h);
+            reply.author.hash(&mut h);
+        }
+        if !message.ext.is_null() && message.ext.as_object().is_none_or(|ext| !ext.is_empty()) {
+            message.ext.to_string().hash(&mut h);
+        }
+        h.finish()
+    }
+
     fn lay_message(message: &Message, group: bool) -> Laid {
-        let signature = hash(&format!(
-            "{}|{}|{}|{:?}|{:?}|{}|{}",
-            message.text,
-            message.media.len(),
-            message.deleted,
-            message.reactions,
-            message.status,
-            message.ext,
-            group
-        ));
+        let signature = Self::signature(message, group);
         let ext = &message.ext;
         let max_text = BUBBLE_MAX - 2.0 * PAD_X;
         let text_lines = |s: &str| paint::wrap_plain(s, MESSAGE, TEXT, max_text, 200).0;
@@ -758,6 +775,43 @@ impl ThreadScreen {
     }
 
     fn relayout(&mut self, store: &Store) {
+        // What was drawn before: if all of it stays where it was, only what
+        // came above it (older messages) changed on screen.
+        let before: Vec<(usize, f32, f32, u64)> = self
+            .placed
+            .iter()
+            .map(|p| (p.index, p.from_bottom, p.height, self.laid_signature(store, p.index)))
+            .collect();
+        let old_height = self.height;
+        self.relayout_all(store);
+        let thread = store.threads.get(&self.chat);
+        let stable = !before.is_empty()
+            && thread.is_some_and(|thread| {
+                let shift = thread.messages.len() - self.placed.len().min(thread.messages.len());
+                let _ = shift;
+                before.iter().all(|&(index, from_bottom, height, signature)| {
+                    let added = self.placed.len().saturating_sub(before.len());
+                    self.placed.iter().any(|p| {
+                        p.index == index + added && p.from_bottom == from_bottom && p.height == height
+                            && self.laid_signature(store, p.index) == signature
+                    })
+                })
+            });
+        self.stable_from = stable.then_some(old_height);
+        self.relaid = true;
+    }
+
+    /// The signature of the message at `index` as laid out now (0: none).
+    fn laid_signature(&self, store: &Store, index: usize) -> u64 {
+        store
+            .threads
+            .get(&self.chat)
+            .and_then(|thread| thread.messages.get(index))
+            .and_then(|message| self.laid.get(&message.id))
+            .map_or(0, |laid| laid.signature)
+    }
+
+    fn relayout_all(&mut self, store: &Store) {
         let Some(thread) = store.threads.get(&self.chat) else {
             self.placed.clear();
             self.height = 0.0;
@@ -768,10 +822,10 @@ impl ThreadScreen {
         let mut laid = std::mem::take(&mut self.laid);
         let mut next: HashMap<String, Laid> = HashMap::with_capacity(messages.len());
         for message in messages {
-            let fresh = Self::lay_message(message, group);
+            let signature = Self::signature(message, group);
             let entry = match laid.remove(&message.id) {
-                Some(old) if old.signature == fresh.signature => old,
-                _ => fresh,
+                Some(old) if old.signature == signature => old,
+                _ => Self::lay_message(message, group),
             };
             next.insert(message.id.clone(), entry);
         }
@@ -790,7 +844,7 @@ impl ThreadScreen {
                 a.author.id == b.author.id
                     && !a.system
                     && !b.system
-                    && (a.ts - b.ts).abs() < 120_000
+                    && (a.ts - b.ts).abs() <= 3_600_000
             };
             let first = prev.is_none_or(|prev| !same(prev, message));
             let last = next.is_none_or(|next| !same(message, next));
@@ -1605,6 +1659,18 @@ impl Screen for ThreadScreen {
 
     fn blit_ok(&self) -> bool {
         true
+    }
+
+    fn changed_rows(&mut self, area: Area) -> Option<Vec<(i32, i32)>> {
+        if !std::mem::take(&mut self.relaid) {
+            return Some(Vec::new());
+        }
+        // Older messages came in above what was drawn: the rows from the
+        // top to just under where the old content began (its spinner).
+        let old = self.stable_from.take()?;
+        let old_top = area.bottom + area.offset - old;
+        let end = (old_top + 200.0).ceil() as i32;
+        Some(if end > area.top as i32 { vec![(area.top as i32, end)] } else { Vec::new() })
     }
 
     fn tab_bar(&self) -> bool {

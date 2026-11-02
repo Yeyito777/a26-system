@@ -146,6 +146,12 @@ pub trait Screen {
     fn tab_bar(&self) -> bool {
         true
     }
+    /// What the bridge just changed moved nothing on screen but these rows
+    /// (a page of older messages above, posts below): Some(rows), or None
+    /// for a whole frame. Called after `layout`.
+    fn changed_rows(&mut self, _area: Area) -> Option<Vec<(i32, i32)>> {
+        None
+    }
     /// The keyboard went away.
     fn keyboard_hidden(&mut self) {}
     /// Scroll to the top (the tab tapped again).
@@ -179,6 +185,9 @@ pub struct Instagram {
     missing: Vec<Want>,
     last: Option<LastFrame>,
     dirty: bool,
+    /// The store changed since the last frame (what it changed is the
+    /// screen's to say: `Screen::changed_rows`).
+    changed: bool,
     toast: Option<(String, Instant)>,
     keyboard: bool,
     shown: bool,
@@ -219,6 +228,7 @@ impl Instagram {
             missing: Vec::new(),
             last: None,
             dirty: true,
+            changed: false,
             toast: None,
             keyboard: false,
             shown: false,
@@ -487,6 +497,29 @@ impl Instagram {
         true
     }
 
+    /// The bars and what floats over them, drawn again over a frame that
+    /// otherwise kept its rows.
+    fn draw_bars(&mut self, canvas: &mut Canvas, media: &mut crate::social::media::Media, now: Instant, area: Area) {
+        let height = canvas.height as f32;
+        let tab_bar = self.top().tab_bar();
+        let store = &self.store;
+        let screen = self.stacks[self.tab as usize].last_mut().expect("root");
+        let mut p = Paint {
+            media,
+            now,
+            missing: &mut self.missing,
+            cache: &self.cache,
+        };
+        let content = p.missing.len();
+        screen.chrome(canvas, &mut p, store, area);
+        if tab_bar {
+            draw_tab_bar(canvas, &mut p, store, self.tab, height);
+        }
+        for want in &mut p.missing[content..] {
+            want.rows = (i32::MIN, i32::MIN);
+        }
+    }
+
     fn full_frame(
         &mut self,
         canvas: &mut Canvas,
@@ -670,12 +703,10 @@ impl App for Instagram {
         let requests_changed =
             matches!(&event, Event::Chat(chat) if chat.folder.as_deref() == Some("requests"));
         if self.store.event(event) {
-            self.dirty = true;
+            self.changed = true;
             cx.redraw();
         }
-        if requests_changed {
-            let _ = requests_changed;
-        }
+        let _ = requests_changed;
     }
 
     fn answer(&mut self, cx: &mut Cx, id: u64, result: Result<Value, BridgeError>) {
@@ -703,8 +734,9 @@ impl App for Instagram {
                     }
                 }
             }
+            self.changed = true;
         } else if self.store.answer(ask, result) {
-            self.dirty = true;
+            self.changed = true;
         }
         if let Some(notice) = self.store.notice.take() {
             self.perform(cx, Action::Toast(notice));
@@ -960,6 +992,7 @@ impl App for Instagram {
             let viewer = self.stories.as_mut().expect("open");
             let partial = !cx.full
                 && !self.dirty
+                && !self.changed
                 && !arrived
                 && self.last.as_ref().is_some_and(|last| last.stories);
             if partial {
@@ -1018,7 +1051,13 @@ impl App for Instagram {
             let rows_ok = arrived_rows
                 .as_ref()
                 .is_none_or(|rows| rows.iter().all(|&(a, _)| a != i32::MIN));
-            if same && !cx.full && !self.dirty && rows_ok && blit_ok {
+            // What the store changed, when the screen can say (else whole).
+            let changed_rows = if self.changed && same && !cx.full && !self.dirty {
+                self.stacks[self.tab as usize].last_mut().expect("root").changed_rows(area)
+            } else {
+                Some(Vec::new())
+            };
+            if same && !cx.full && !self.dirty && rows_ok && blit_ok && changed_rows.is_some() {
                 let last_offset = self.last.as_ref().map_or(0.0, |last| last.offset);
                 let delta = (area.offset - last_offset) as i32;
                 // Content moves up as the offset grows (down, inverted).
@@ -1043,6 +1082,15 @@ impl App for Instagram {
                     }
                     for (a, b) in arrived_rows.unwrap_or_default() {
                         let (a, b) = ((a + dy).max(top), (b + dy).min(bottom));
+                        if a < b {
+                            bands.push((a, b));
+                        }
+                    }
+                    // The store's changes: rows the screen named (already
+                    // where they are now), and the bars, which may show it.
+                    let chrome = self.changed;
+                    for (a, b) in changed_rows.unwrap_or_default() {
+                        let (a, b) = (a.max(top), b.min(bottom));
                         if a < b {
                             bands.push((a, b));
                         }
@@ -1080,6 +1128,14 @@ impl App for Instagram {
                         );
                     }
                     canvas.reset_clip();
+                    if chrome {
+                        let height = canvas.height;
+                        self.draw_bars(canvas, cx.media, now, area);
+                        if let Some(damage) = &mut cx.damage {
+                            damage.rows.push((0, top));
+                            damage.rows.push((bottom, height));
+                        }
+                    }
                     kind = if bands.is_empty() {
                         "none"
                     } else if dy == 0 {
@@ -1109,6 +1165,7 @@ impl App for Instagram {
             });
         }
         self.dirty = false;
+        self.changed = false;
         self.frames += 1;
         // Profiling (the perf bench): when an opened chat first shows its
         // messages (the shell logs each frame after this).
