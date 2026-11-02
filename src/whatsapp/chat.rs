@@ -971,7 +971,9 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
                 if y1 <= y0 {
                     continue;
                 }
-                app.damage.areas.push((ax0, y0, ax1, y1));
+                // (Whole rows: this happens when the button comes or goes,
+                // not while the chat moves.)
+                app.damage.rows.push((y0, y1));
                 canvas.set_clip(ax0, y0, ax1, y1);
                 draw_rows(canvas, (y0, y1));
                 canvas.reset_clip();

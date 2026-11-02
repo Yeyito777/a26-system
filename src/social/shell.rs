@@ -159,25 +159,18 @@ pub struct DrawCx<'a> {
     /// The whole canvas must be drawn (the first frame, a resize, a
     /// reopened window); otherwise it holds the last frame.
     pub full: bool,
-    /// What the frame changed, when the app knows (it drew only that): the
-    /// display then gets only that. None (the default): all of it.
+    /// What the frame changed, when the app knows (it leaves None
+    /// otherwise): the display is then told to move the rows itself and
+    /// sent only the rows drawn anew.
     pub damage: Option<Damage>,
 }
 
-/// What a frame changed: rows moved by a scroll (as `Canvas::move_rows`),
-/// rows drawn anew, and areas drawn anew over moved rows (`x0, y0, x1,
-/// y1`). Nothing at all: the frame is not shown.
+/// A frame's changes: rows `y0..y1` moved by `dy` (as `Canvas::move_rows`
+/// moved them), and the rows drawn anew. Nothing else may have changed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Damage {
     pub moved: Option<(i32, i32, i32)>,
     pub rows: Vec<(i32, i32)>,
-    pub areas: Vec<(i32, i32, i32, i32)>,
-}
-
-impl Damage {
-    pub fn is_empty(&self) -> bool {
-        self.moved.is_none() && self.rows.is_empty() && self.areas.is_empty()
-    }
 }
 
 /// The app's X window and what shows the canvas in it.
@@ -313,14 +306,8 @@ impl Renderer {
     }
 
     /// Hands the canvas to the display (X compares it with what the server
-    /// has and uploads only what changed; with the app's `damage`, only
-    /// that, a scroll moved server-side).
-    fn present(&mut self) -> Result<(), Box<dyn Error>> {
-        self.present_damage(None)
-    }
-
-    fn present_damage(&mut self, damage: Option<&Damage>) -> Result<(), Box<dyn Error>> {
-        let damage = damage.filter(|_| !self.full);
+    /// has and uploads only what changed).
+    fn present(&mut self, damage: Option<Damage>) -> Result<(), Box<dyn Error>> {
         match &mut self.output {
             Output::X(x) => {
                 match damage {
@@ -328,13 +315,8 @@ impl Renderer {
                         if let Some((y0, y1, dy)) = damage.moved {
                             x.presenter.scroll(&x.conn, y0, y1, dy)?;
                         }
-                        x.presenter.present_rows_and_areas(
-                            &x.conn,
-                            &self.canvas,
-                            0,
-                            &damage.rows,
-                            &damage.areas,
-                        )?;
+                        x.presenter
+                            .present_rows(&x.conn, &self.canvas, 0, &damage.rows)?;
                     }
                     None => {
                         x.presenter.present(&x.conn, &self.canvas, 0)?;
@@ -343,14 +325,16 @@ impl Renderer {
                 x.conn.flush()?;
             }
             Output::Wayland(wayland) => {
-                let areas = damage.map(|damage| {
-                    let width = self.canvas.width;
-                    let mut areas: Vec<wayland::Area> = damage.areas.clone();
-                    // A move changes every row it spans.
+                let width = self.canvas.width;
+                let areas: Option<Vec<wayland::Area>> = damage.map(|damage| {
+                    let mut areas: Vec<wayland::Area> = damage
+                        .rows
+                        .iter()
+                        .map(|&(y0, y1)| (0, y0, width, y1))
+                        .collect();
                     if let Some((y0, y1, _)) = damage.moved {
                         areas.push((0, y0, width, y1));
                     }
-                    areas.extend(damage.rows.iter().map(|&(y0, y1)| (0, y0, width, y1)));
                     areas
                 });
                 wayland.present(&self.canvas, areas.as_deref(), None)?;
@@ -656,7 +640,7 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
             damage: None,
         };
         app.draw(&mut renderer.canvas, &mut dcx);
-        if let Err(error) = renderer.present() {
+        if let Err(error) = renderer.present(None) {
             renderer.fall_back(error)?;
             let mut dcx = DrawCx {
                 media: &mut media,
@@ -665,7 +649,7 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
                 damage: None,
             };
             app.draw(&mut renderer.canvas, &mut dcx);
-            renderer.present()?;
+            renderer.present(None)?;
         }
         redraw = false;
     }
@@ -847,13 +831,17 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
             let started = Instant::now();
             app.draw(&mut renderer.canvas, &mut dcx);
             let drawn = started.elapsed();
-            let damage = dcx.damage.take();
-            if damage.as_ref().is_some_and(Damage::is_empty) && !renderer.full {
-                // Nothing on screen changed.
+            // A frame drawn whole (a resize, a reopened window) is sent whole.
+            let damage = if full { None } else { dcx.damage.take() };
+            if damage
+                .as_ref()
+                .is_some_and(|damage| damage.moved.is_none() && damage.rows.is_empty())
+            {
+                // Nothing on screen changed: no frame.
                 redraw = false;
                 continue;
             }
-            if let Err(error) = renderer.present_damage(damage.as_ref()) {
+            if let Err(error) = renderer.present(damage) {
                 renderer.fall_back(error)?;
                 mapped = false;
                 redraw = true;
