@@ -833,21 +833,17 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
             let drawn = started.elapsed();
             // A frame drawn whole (a resize, a reopened window) is sent whole.
             let damage = if full { None } else { dcx.damage.take() };
-            if damage
+            // Nothing on screen changed: no frame (the loop sleeps as usual).
+            let unchanged = damage
                 .as_ref()
-                .is_some_and(|damage| damage.moved.is_none() && damage.rows.is_empty())
-            {
-                // Nothing on screen changed: no frame.
-                redraw = false;
-                continue;
-            }
-            if let Err(error) = renderer.present(damage) {
+                .is_some_and(|damage| damage.moved.is_none() && damage.rows.is_empty());
+            if !unchanged && let Err(error) = renderer.present(damage) {
                 renderer.fall_back(error)?;
                 mapped = false;
                 redraw = true;
                 continue;
             }
-            if profile {
+            if profile && !unchanged {
                 eprintln!(
                     "{id}: frame drawn in {:.2} ms (layout 0.00), presented in {:.2} ms ({})",
                     drawn.as_secs_f64() * 1000.0,

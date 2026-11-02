@@ -701,6 +701,15 @@ impl App for WhatsApp {
             self.full = true;
             self.damage_full = true;
         }
+        if profile() {
+            let rows: i32 = self.damage.rows.iter().map(|(a, b)| b - a).sum();
+            eprintln!(
+                "whatsapp: damage {} moved {} rows {}",
+                if self.damage_full { "full" } else { "part" },
+                self.damage.moved.map_or(0, |m| m.2),
+                rows
+            );
+        }
         cx.damage = (!self.damage_full).then(|| std::mem::take(&mut self.damage));
     }
 }
