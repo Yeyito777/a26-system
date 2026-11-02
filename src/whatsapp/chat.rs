@@ -35,6 +35,8 @@ const NAME_H: f32 = 48.0;
 const FORWARD_H: f32 = 44.0;
 const META_SIZE: f32 = 29.0;
 const REACTION_H: f32 = 62.0;
+/// How long a message jumped to stays lit.
+const FLASH: std::time::Duration = std::time::Duration::from_millis(1200);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Body {
@@ -68,6 +70,8 @@ pub struct Bubble {
     pub name: Option<(String, Rgb, Option<String>)>,
     pub forwarded: bool,
     pub quote: Option<(String, Rgb, String, f32)>,
+    /// Where the quote box starts (a tap there goes to the message quoted).
+    pub quote_y: f32,
     pub media: Option<MediaBox>,
     pub text: Option<Laid>,
     pub text_y: f32,
@@ -124,6 +128,8 @@ pub struct ChatView {
     moving: bool,
     /// A message held down: the action bar over the header, the reactions.
     pub selected: Option<String>,
+    /// A message just jumped to, lit until then.
+    flash: Option<(String, Instant)>,
     /// Pictures the last frames drew without (`avatar::arrived`).
     pub waiting: Vec<avatar::Waiting>,
     /// An older page came: what is drawn stays where it is (the chat is
@@ -199,6 +205,7 @@ impl ChatView {
             button_shown: false,
             moving: false,
             selected: None,
+            flash: None,
             waiting: Vec::new(),
             prepended: false,
             header_waiting: Vec::new(),
@@ -339,6 +346,23 @@ impl ChatView {
         self.changed();
     }
 
+    /// Scrolls `id` into view (lit a moment); false when it is not loaded.
+    pub fn show(&mut self, id: &str, top: f32, bottom: f32, now: Instant) -> bool {
+        self.relayout_if_needed();
+        let Some(n) = self.items.iter().position(
+            |item| matches!(item, Item::Message { index, .. } if self.messages[*index].id == id),
+        ) else {
+            return false;
+        };
+        let max = self.max_scroll(bottom - top);
+        let s = top + (bottom - top) * 0.3 - bottom + self.total - self.tops[n];
+        self.scroll.reset();
+        self.scroll.shift(s.clamp(0.0, max));
+        self.flash = Some((id.to_owned(), now + FLASH));
+        self.version += 1;
+        true
+    }
+
     pub fn fail_pending(&mut self, client_id: &str) {
         if let Some(message) = self.messages.iter_mut().find(|m| m.id == client_id) {
             message.status = Some("failed".into());
@@ -471,6 +495,7 @@ pub fn layout(message: &Message, group: bool, width: f32) -> Bubble {
         name: None,
         forwarded: message.forwarded && !message.deleted,
         quote: None,
+        quote_y: 0.0,
         media: None,
         text: None,
         text_y: 0.0,
@@ -577,6 +602,7 @@ pub fn layout(message: &Message, group: bool, width: f32) -> Bubble {
         )) + 60.0;
         inner_w = inner_w.max(w.clamp(420.0, inner_max));
         bubble.quote = Some((author, color, text_line, 0.0));
+        bubble.quote_y = y;
         y += QUOTE_H + 8.0;
     }
     match bubble.body {
@@ -763,6 +789,15 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
             view.scroll.shift(s.clamp(0.0, max));
         }
     }
+    if view
+        .flash
+        .as_ref()
+        .is_some_and(|(_, until)| cx.now >= *until)
+    {
+        view.flash = None;
+        view.version += 1;
+        cx.redraw();
+    }
     let moving = view.scroll.step(max, cx.now);
     if moving {
         cx.animate();
@@ -799,6 +834,7 @@ pub fn tick(app: &mut WhatsApp, cx: &mut Cx) {
 enum Hit {
     Back,
     Header,
+    Quote(String),
     Bubble {
         id: String,
         media: bool,
@@ -854,6 +890,12 @@ fn hit(app: &mut WhatsApp, x: f32, y: f32, width: f32, height: f32, now: Instant
     let media = bubble.media.as_ref().is_some_and(|m| {
         lx >= m.rect.x && lx < m.rect.x + m.rect.w && ly >= m.rect.y && ly < m.rect.y + m.rect.h
     });
+    if bubble.quote.is_some()
+        && (bubble.quote_y..bubble.quote_y + QUOTE_H).contains(&ly)
+        && let Some(reply) = &message.reply_to
+    {
+        return Some(Hit::Quote(reply.id.clone()));
+    }
     let mut link = None;
     if let Some(laid) = &bubble.text {
         let line = ((ly - (bubble.text_y - laid.size * 0.98)) / laid.line_height).floor();
@@ -994,6 +1036,18 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
                 Some(Hit::Bubble {
                     body: Body::File, ..
                 }) => app.toast(cx, "Documents can't open on this phone yet"),
+                Some(Hit::Quote(target)) => {
+                    let (top, bottom) = band_of(app, height);
+                    let found = app
+                        .chat
+                        .as_mut()
+                        .is_some_and(|view| view.show(&target, top, bottom, now));
+                    if found {
+                        cx.wake_at(now + FLASH);
+                    } else {
+                        app.toast(cx, "The message is further back");
+                    }
+                }
                 Some(Hit::ScrollButton) => {
                     if let Some(view) = app.chat.as_mut() {
                         view.scroll.reset();
@@ -1081,7 +1135,10 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let tops = &view.tops;
     let messages = &view.messages;
     let pressed = view.pressed.clone();
-    let selected = view.selected.clone();
+    let selected = view
+        .selected
+        .clone()
+        .or_else(|| view.flash.as_ref().map(|(id, _)| id.clone()));
     let rounded = &mut app.rounded;
     // Content rows are measured from the bottom (stable as older pages come).
     let translate = bottom + offset;
