@@ -226,8 +226,16 @@ impl ChatView {
     }
 
     pub fn page_arrived(&mut self, value: &Value, older: bool, now: Instant) {
+        let started = Instant::now();
         let page: Vec<Message> =
-            serde_json::from_value(value["messages"].clone()).unwrap_or_default();
+            serde::Deserialize::deserialize(&value["messages"]).unwrap_or_default();
+        if super::profile() {
+            eprintln!(
+                "whatsapp: page of {} parsed in {:.2} ms",
+                page.len(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         let more = value["more"].as_bool().unwrap_or(false);
         if older {
             self.loading_older = false;
@@ -379,6 +387,18 @@ impl ChatView {
     /// Lays the items out for `width` (each message's layout kept while it
     /// does not change).
     fn build(&mut self, width: f32) {
+        let started = Instant::now();
+        self.build_items(width);
+        if super::profile() {
+            eprintln!(
+                "whatsapp: {} items laid out in {:.2} ms",
+                self.items.len(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    fn build_items(&mut self, width: f32) {
         if self.width != width {
             self.layouts.clear();
         }

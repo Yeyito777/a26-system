@@ -818,7 +818,7 @@ impl App for WhatsApp {
 }
 
 /// Measurement (`SOCIAL_APP_PROFILE`, the bench's `EXOCORTEX_APP_PROFILE`).
-fn profile() -> bool {
+pub(crate) fn profile() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
