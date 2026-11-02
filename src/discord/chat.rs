@@ -37,6 +37,8 @@ enum Row {
     /// The channel's first message is loaded: "Welcome to #name!".
     Start,
     Day(String),
+    /// Where the unread messages begin (Discord's red "NEW" line).
+    New,
     Message {
         index: usize,
         header: bool,
@@ -59,6 +61,9 @@ struct Frame {
 
 pub struct ChatView {
     pub chat: String,
+    /// Unread messages (a DM's count) when the chat opened, until the NEW line is placed.
+    pub unread_at_open: u32,
+    new_marker: Option<String>,
     last_frame: Option<Frame>,
     /// Something besides the scroll offset changed: the next frame is drawn whole.
     pub dirty: bool,
@@ -126,6 +131,8 @@ impl ChatView {
     pub fn new(chat: String) -> Self {
         Self {
             chat,
+            unread_at_open: 0,
+            new_marker: None,
             last_frame: None,
             dirty: true,
             scroll: Scroll::default(),
@@ -240,12 +247,36 @@ impl ChatView {
         if history.loaded && !history.more {
             rows.push(Row::Start);
         }
+        // The unread messages counted when the chat opened: the line goes above the first.
+        if self.new_marker.is_none()
+            && self.unread_at_open > 0
+            && history.loaded
+            && !entries.is_empty()
+        {
+            let mut left = self.unread_at_open;
+            let mut marker = None;
+            for entry in entries.iter().rev() {
+                if entry.message.mine {
+                    continue;
+                }
+                marker = Some(entry.message.id.clone());
+                left -= 1;
+                if left == 0 {
+                    break;
+                }
+            }
+            self.new_marker = marker;
+            self.unread_at_open = 0;
+        }
         let mut previous: Option<&Rc<Entry>> = None;
         for (index, entry) in entries.iter().enumerate() {
             let message = &entry.message;
             let new_day = previous.is_none_or(|p| !ui::same_day(p.message.ts, message.ts));
             if new_day {
                 rows.push(Row::Day(ui::day_label(message.ts)));
+            }
+            if self.new_marker.as_deref() == Some(message.id.as_str()) {
+                rows.push(Row::New);
             }
             let header = new_day
                 || message.system
@@ -263,6 +294,7 @@ impl ChatView {
             let h = match row {
                 Row::Start => dp(150.0),
                 Row::Day(_) => dp(36.0),
+                Row::New => dp(20.0),
                 Row::Message { index, header } => {
                     let layout = self.layout_for(&entries[*index], *header, width, model);
                     Self::row_height(&layout)
@@ -966,6 +998,35 @@ impl ChatView {
             }
             match &self.rows[i] {
                 Row::Start => self.draw_start(canvas, model, row_top, width),
+                Row::New => {
+                    let cy = row_top + self.heights[i] / 2.0;
+                    let tag_w = dp(34.0);
+                    canvas.fill_rect(
+                        theme::MARGIN as i32,
+                        cy as i32,
+                        (width - 2.0 * theme::MARGIN - tag_w) as i32,
+                        2,
+                        theme::RED,
+                        1.0,
+                    );
+                    let tag = RectF {
+                        x: width - theme::MARGIN - tag_w,
+                        y: cy - dp(7.0),
+                        w: tag_w,
+                        h: dp(14.0),
+                    };
+                    canvas.fill_rrect(tag, dp(3.0), theme::RED, 1.0);
+                    text::draw_centered(
+                        canvas,
+                        "NEW",
+                        tag.x + tag.w / 2.0,
+                        text::centered_baseline(cy, Weight::Bold, dp(10.0)),
+                        Weight::Bold,
+                        dp(10.0),
+                        theme::WHITE,
+                        1.0,
+                    );
+                }
                 Row::Day(label) => {
                     let cy = row_top + self.heights[i] / 2.0;
                     let w = text::measure(label, Weight::SemiBold, theme::T_TINY);

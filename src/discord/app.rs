@@ -178,8 +178,15 @@ impl DiscordApp {
         if replace {
             self.stack.clear();
         }
-        self.stack
-            .push(Page::Chat(Box::new(ChatView::new(chat.clone()))));
+        let mut view = ChatView::new(chat.clone());
+        // A DM's unread count says where its NEW line goes (a channel's says only that it is unread).
+        view.unread_at_open = self
+            .model
+            .chats
+            .get(&chat)
+            .filter(|c| c.kind == "dm" || c.kind == "group")
+            .map_or(0, |c| c.unread);
+        self.stack.push(Page::Chat(Box::new(view)));
         let fresh = self.model.histories.get(&chat).is_none_or(|h| !h.loaded)
             || self.model.stale.remove(&chat);
         // Opened before: shown at once, and the newest page asked for again.

@@ -701,7 +701,7 @@ pub fn plain(text: &str, names: &dyn Fn(&Kind) -> Option<String>) -> String {
                 Kind::Break => out.push(' '),
                 Kind::Text | Kind::Code | Kind::Link(_) | Kind::Everyone | Kind::Command => {
                     if span.spoiler > 0 {
-                        out.push_str("▇▇▇");
+                        out.push_str("(spoiler)");
                     } else {
                         out.push_str(&span.text);
                     }
