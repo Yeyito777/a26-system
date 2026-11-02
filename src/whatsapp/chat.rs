@@ -1040,6 +1040,7 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
             }
             match hit(app, x, y, width, height, now) {
                 Some(Hit::Back) => app.back(cx),
+                Some(Hit::Header) => super::info::open(app, cx),
                 Some(Hit::Bubble {
                     link: Some(url), ..
                 }) => {
@@ -1162,7 +1163,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let rounded = &mut app.rounded;
     // Content rows are measured from the bottom (stable as older pages come).
     let translate = bottom + offset;
-    let ready = avatar::arrived(cx.media, &mut view.waiting);
+    let ready = avatar::arrived(cx.media, &mut view.waiting, now);
     let mut pics = avatar::Pics::new(&mut *cx.media, &mut view.waiting, translate);
     let mut draw_rows = |canvas: &mut Canvas, (y0, y1): (i32, i32)| {
         canvas.fill_rect(0, y0, canvas.width, y1 - y0, theme::BG, 1.0);
@@ -1279,7 +1280,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
         }
     }
     view.button_shown = show_button;
-    let header_ready = !avatar::arrived(cx.media, &mut view.header_waiting).is_empty();
+    let header_ready = !avatar::arrived(cx.media, &mut view.header_waiting, now).is_empty();
     if full || header_ready {
         app.damage.rows.push((0, top as i32));
         let header = Header {

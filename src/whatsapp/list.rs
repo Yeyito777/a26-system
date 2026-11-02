@@ -444,7 +444,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     };
     // Lent to the drawing, given back below.
     let rows = std::mem::take(&mut view.rows);
-    let ready = avatar::arrived(cx.media, &mut view.waiting);
+    let ready = avatar::arrived(cx.media, &mut view.waiting, now);
     let translate = top - offset;
     let mut pics = avatar::Pics::new(&mut *cx.media, &mut view.waiting, translate);
     let mut draw_rows = |canvas: &mut Canvas, (y0, y1): (i32, i32)| {

@@ -65,11 +65,14 @@ impl<'a> Pics<'a> {
 
 /// The content rows of pictures noted missing that have come since (they
 /// are forgotten: the frame that draws them notes what is still missing).
-pub fn arrived(media: &Media, waiting: &mut Vec<Waiting>) -> Vec<(f32, f32)> {
+/// Those still missing are asked for again: a frame that draws only what
+/// moved into view would not ask for them, and `Media` asks the bridge for
+/// what was wanted since the last frame only.
+pub fn arrived(media: &mut Media, waiting: &mut Vec<Waiting>, now: Instant) -> Vec<(f32, f32)> {
     let mut rows = Vec::new();
     waiting.retain(|waiting| {
         let (reference, w, h, fit) = &waiting.key;
-        let ready = media.peek(reference, *w, *h, *fit).is_some();
+        let ready = media.get(reference, *w, *h, *fit, now).is_some();
         if ready {
             rows.push(waiting.rows);
         }

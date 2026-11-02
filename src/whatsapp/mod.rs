@@ -15,6 +15,7 @@ mod band;
 mod chat;
 mod composer;
 mod icons;
+mod info;
 mod list;
 mod login;
 mod rich;
@@ -54,6 +55,7 @@ pub enum Page {
     Chat,
     Settings,
     Updates,
+    Info,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -71,6 +73,8 @@ enum Ask {
     Send { chat: String, client_id: String },
     Login,
     Updates,
+    Info,
+    InfoMedia,
     Other(&'static str),
 }
 
@@ -143,6 +147,7 @@ pub struct WhatsApp {
     pub login: login::LoginView,
     pub viewer: Option<viewer::Viewer>,
     pub updates: updates::UpdatesView,
+    pub info: Option<info::InfoView>,
     pub status_viewer: Option<updates::StatusViewer>,
     pub rounded: Rounded,
     asked: HashMap<u64, Ask>,
@@ -187,6 +192,7 @@ impl WhatsApp {
             login: login::LoginView::default(),
             viewer: None,
             updates: updates::UpdatesView::default(),
+            info: None,
             status_viewer: None,
             rounded: Rounded::default(),
             asked: HashMap::new(),
@@ -351,6 +357,13 @@ impl WhatsApp {
                 self.go(cx, to);
             }
             Page::Archived | Page::Settings | Page::Updates => self.go(cx, Page::List),
+            Page::Info => {
+                cx.transition(false);
+                self.info = None;
+                self.page = Page::Chat;
+                self.full = true;
+                cx.redraw();
+            }
             Page::List => {
                 if self.list.searching() {
                     self.list.end_search();
@@ -621,6 +634,16 @@ impl App for WhatsApp {
                 }
             }
             (Ask::Login, Err(error)) => login::failed(self, cx, &error),
+            (Ask::Info, Ok(value)) => {
+                if let Some(view) = self.info.as_mut() {
+                    view.info_arrived(value);
+                }
+            }
+            (Ask::InfoMedia, Ok(value)) => {
+                if let Some(view) = self.info.as_mut() {
+                    view.media_arrived(&value);
+                }
+            }
             (Ask::Updates, Ok(value)) => {
                 self.updates.updates = updates::parse(&value);
                 self.updates.loaded = true;
@@ -667,6 +690,7 @@ impl App for WhatsApp {
             Page::List | Page::Archived => list::gesture(self, cx, gesture),
             Page::Chat => chat::gesture(self, cx, gesture),
             Page::Updates => updates::gesture(self, cx, gesture),
+            Page::Info => info::gesture(self, cx, gesture),
             Page::Settings => {}
         }
     }
@@ -708,6 +732,7 @@ impl App for WhatsApp {
             Page::List => list::tick(&mut self.list, &mut self.chats, cx),
             Page::Archived => list::tick(&mut self.archived, &mut self.chats, cx),
             Page::Chat => chat::tick(self, cx),
+            Page::Info => info::tick(self, cx),
             Page::Settings | Page::Updates => {}
         }
         if let Some(viewer) = self.viewer.as_mut() {
@@ -774,6 +799,7 @@ impl App for WhatsApp {
                     self.damage_full = true;
                     updates::draw(self, canvas, cx, full);
                 }
+                Page::Info => info::draw(self, canvas, cx, full),
             }
             if !full && verify() {
                 self.verify(canvas, cx);
@@ -837,6 +863,9 @@ fn verify() -> bool {
 
 impl WhatsApp {
     fn verify(&mut self, canvas: &Canvas, cx: &mut DrawCx) {
+        if !matches!(self.page, Page::List | Page::Archived | Page::Chat) {
+            return;
+        }
         let mut whole = Canvas::new(canvas.width, canvas.height);
         // What the real frames still owe (pictures to draw when they come)
         // stays theirs.
@@ -852,7 +881,7 @@ impl WhatsApp {
             Page::List => list::draw(self, &mut whole, cx, true, false),
             Page::Archived => list::draw(self, &mut whole, cx, true, true),
             Page::Chat => chat::draw(self, &mut whole, cx, true),
-            Page::Settings | Page::Updates => return,
+            Page::Settings | Page::Updates | Page::Info => {}
         }
         self.list.waiting = saved.0;
         self.archived.waiting = saved.1;
