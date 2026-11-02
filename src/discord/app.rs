@@ -17,14 +17,14 @@ use crate::gfx::{Canvas, RectF};
 use crate::keys::KeyInput;
 use crate::social::media::{Fit, Media};
 use crate::social::proto::{Author, BridgeError, Chat, Event, Hello, Message};
-use crate::social::shell::{App, Cx, DrawCx};
+use crate::social::shell::{App, Cx, Damage, DrawCx};
 use crate::text::{self, Weight};
 
 use super::Action;
 use super::chat::ChatView;
 use super::lists::{ForumView, MembersView, MessagesView};
 use super::model::{Model, Settings, Typing, now_ms};
-use super::servers::ServersView;
+use super::servers::{ServersFrame, ServersView};
 use super::theme::{self, dp};
 use super::ui;
 use super::you::YouView;
@@ -428,6 +428,15 @@ impl DiscordApp {
         self.servers.dirty = true;
     }
 
+    /// The chat in front shows `chat` (its title, its header): drawn whole next.
+    fn dirty_chat(&mut self, chat: &str) {
+        if let Some(Page::Chat(view)) = self.stack.last_mut()
+            && view.chat == chat
+        {
+            view.dirty = true;
+        }
+    }
+
     fn chat_view(&mut self) -> Option<&mut ChatView> {
         match self.stack.last_mut() {
             Some(Page::Chat(view)) => Some(view),
@@ -788,11 +797,21 @@ impl App for DiscordApp {
     }
 
     fn event(&mut self, cx: &mut Cx, event: Event) {
-        self.dirty();
+        // What changes in a chat's messages, the views find themselves
+        // (and draw only that); what else shows is drawn whole.
         match event {
-            Event::Status(status) => self.model.status = status,
-            Event::Chat(chat) => self.model.put_chat(*chat),
-            Event::ChatRemoved(id) => self.model.remove_chat(&id),
+            Event::Status(status) => {
+                self.dirty();
+                self.model.status = status;
+            }
+            Event::Chat(chat) => {
+                self.dirty_chat(&chat.id);
+                self.model.put_chat(*chat);
+            }
+            Event::ChatRemoved(id) => {
+                self.dirty_chat(&id);
+                self.model.remove_chat(&id);
+            }
             Event::Message { message, .. } => {
                 if !self.model.upsert_message(*message) {
                     return;
@@ -859,7 +878,9 @@ impl App for DiscordApp {
         let Some(ask) = self.asked.remove(&id) else {
             return;
         };
-        self.dirty();
+        if matches!(ask, Ask::Settings | Ask::Chats | Ask::Login) {
+            self.dirty();
+        }
         match (ask, result) {
             (Ask::Chats, Ok(value)) => {
                 let chats: Vec<Chat> =
@@ -1075,7 +1096,7 @@ impl App for DiscordApp {
         let moving = match self.stack.last_mut() {
             Some(Page::Chat(view)) => {
                 view.sync(&self.model, width, height);
-                let moving = view.tick(width, height, now);
+                let moving = view.tick(&self.model, width, height, now);
                 if let Some(before) = view.wants_older(&self.model, width, height, now) {
                     let chat = view.chat.clone();
                     if let Some(history) = self.model.histories.get_mut(&chat) {
@@ -1139,14 +1160,32 @@ impl App for DiscordApp {
             }
             None => {
                 let mut whole = true;
+                // What is drawn over the page (a toast, the viewer, the
+                // status line) needs whole frames.
+                let overlays = self.toast.is_some()
+                    || self.viewer.is_some()
+                    || (self.model.status.state != "online"
+                        && self.model.status.state != "signed_out");
                 let name = match self.tab {
                     Tab::Servers => {
-                        let full = cx.full || self.toast.is_some() || self.viewer.is_some();
-                        whole = self.servers.draw(canvas, &self.model, cx.media, now, full);
+                        let full = cx.full || overlays;
+                        match self.servers.draw(canvas, &self.model, cx.media, now, full) {
+                            ServersFrame::Whole => {}
+                            ServersFrame::Compared => whole = false,
+                            ServersFrame::Rail(damage) => {
+                                whole = false;
+                                cx.damage = Some(damage);
+                                cx.columns = Some((0, theme::RAIL_W as i32));
+                            }
+                            ServersFrame::Unchanged => {
+                                whole = false;
+                                cx.damage = Some(Damage::default());
+                            }
+                        }
                         "servers"
                     }
                     Tab::Messages => {
-                        let full = cx.full || self.toast.is_some() || self.viewer.is_some();
+                        let full = cx.full || overlays;
                         cx.damage = self.messages.draw(canvas, &self.model, cx.media, now, full);
                         whole = cx.damage.is_none();
                         "messages"
@@ -1165,6 +1204,11 @@ impl App for DiscordApp {
                 if whole || self.last_tab_bar != Some(key) {
                     self.last_tab_bar = Some(key);
                     self.tab_bar(canvas, cx.media, now);
+                    if !whole {
+                        // Drawn over a frame in part: the shell compares it all.
+                        cx.damage = None;
+                        cx.columns = None;
+                    }
                 }
                 name
             }

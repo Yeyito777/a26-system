@@ -258,6 +258,47 @@ impl Presenter {
         Ok(())
     }
 
+    /// `scroll` within columns `x0..x1` only (a side column scrolled on its
+    /// own, the rest of its rows unchanged). An added fast path, not in
+    /// Moon's copy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scroll_columns<C: Connection>(
+        &mut self,
+        conn: &C,
+        x0: i32,
+        x1: i32,
+        y0: i32,
+        y1: i32,
+        dy: i32,
+    ) -> Result<(), Box<dyn Error>> {
+        let (x0, x1) = (x0.max(0), x1.min(self.width));
+        let (y0, y1) = (y0.max(0), y1.min(self.height));
+        let rows = y1 - y0 - dy.abs();
+        if !self.valid || dy == 0 || rows <= 0 || x1 <= x0 {
+            return Ok(());
+        }
+        let (src, dst) = if dy > 0 { (y0, y0 + dy) } else { (y0 - dy, y0) };
+        conn.copy_area(
+            self.pixmap,
+            self.pixmap,
+            self.gc,
+            x0 as i16,
+            src as i16,
+            x0 as i16,
+            dst as i16,
+            (x1 - x0) as u16,
+            rows as u16,
+        )?;
+        self.stale[dst as usize..(dst + rows) as usize].fill(true);
+        self.moved.push(Damage {
+            x0,
+            y0: dst,
+            x1,
+            y1: dst + rows,
+        });
+        Ok(())
+    }
+
     /// Uploads `canvas` and copies the damaged areas to the window, whose
     /// origin corresponds to canvas row `window_y`. Returns the bounding box
     /// of the damage.

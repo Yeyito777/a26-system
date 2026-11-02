@@ -38,15 +38,44 @@ struct Shaped {
 
 thread_local! {
     /// Pictures asked for and not ready, since the last full frame.
-    static MISSES: RefCell<Vec<(String, u32, u32, Fit)>> = const { RefCell::new(Vec::new()) };
+    static MISSES: RefCell<Vec<Miss>> = const { RefCell::new(Vec::new()) };
+    /// A miss found the list full (pictures that never come stay in it):
+    /// the next frame is drawn whole, which starts the list again.
+    static OVERFLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// What is being drawn now (a row, the rail): misses carry it.
+    static TAG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static SHAPED: RefCell<HashMap<ShapeKey, Shaped>> = RefCell::new(HashMap::new());
     static CORNERS: RefCell<HashMap<u32, Rc<[Vec<u8>; 4]>>> = RefCell::new(HashMap::new());
     static ITALIC: RefCell<HashMap<(String, u8, u32), Rc<SlantedRun>>> = RefCell::new(HashMap::new());
     static MASKS: RefCell<HashMap<(u8, u32), Rc<GlyphMask>>> = RefCell::new(HashMap::new());
 }
 
-/// `Media::get`, remembering what was not ready (a frame drawn in part
-/// must be drawn whole once one of those comes).
+/// A picture asked for and not ready: its key, and what drew it (`set_tag`).
+struct Miss {
+    reference: String,
+    width: u32,
+    height: u32,
+    fit: Fit,
+    tag: u64,
+}
+
+/// What is drawn from here on (a message's row, the server rail), so a
+/// picture that comes later says what to draw again. 0: nothing in
+/// particular (the whole frame is drawn again).
+pub fn set_tag(tag: u64) {
+    TAG.with(|cell| cell.set(tag));
+}
+
+/// A tag for a key (a message id, a chat id): never 0.
+pub fn tag_of(key: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish() | 1
+}
+
+/// `Media::get`, remembering what was not ready (what drew it must be
+/// drawn again once one of those comes).
 pub fn get(
     media: &mut Media,
     reference: &str,
@@ -57,27 +86,55 @@ pub fn get(
 ) -> Option<Rc<Image>> {
     let got = media.get(reference, width, height, fit, now);
     if got.is_none() && !reference.is_empty() && width > 0 && height > 0 {
+        let tag = TAG.with(|cell| cell.get());
         MISSES.with(|cell| {
             let mut misses = cell.borrow_mut();
-            if misses.len() < 512 {
-                misses.push((reference.to_owned(), width.min(4096), height.min(4096), fit));
+            let (width, height) = (width.min(4096), height.min(4096));
+            let known = misses.iter().any(|m| {
+                m.tag == tag
+                    && m.reference == reference
+                    && m.width == width
+                    && m.height == height
+                    && m.fit == fit
+            });
+            if !known && misses.len() >= 512 {
+                OVERFLOW.with(|cell| cell.set(true));
+            } else if !known {
+                misses.push(Miss {
+                    reference: reference.to_owned(),
+                    width,
+                    height,
+                    fit,
+                    tag,
+                });
             }
         });
     }
     got
 }
 
-/// Has a picture missed since `clear_misses` come?
-pub fn misses_ready(media: &Media) -> bool {
+/// The tags of the pictures that came since they were missed (taken off
+/// the list: whoever draws them again asks again).
+pub fn take_ready(media: &Media) -> std::collections::HashSet<u64> {
     MISSES.with(|cell| {
-        cell.borrow()
-            .iter()
-            .any(|(reference, w, h, fit)| media.peek(reference, *w, *h, *fit).is_some())
+        let mut ready = std::collections::HashSet::new();
+        if OVERFLOW.with(|cell| cell.replace(false)) {
+            ready.insert(0);
+        }
+        cell.borrow_mut().retain(|m| {
+            let come = media.peek(&m.reference, m.width, m.height, m.fit).is_some();
+            if come {
+                ready.insert(m.tag);
+            }
+            !come
+        });
+        ready
     })
 }
 
 pub fn clear_misses() {
     MISSES.with(|cell| cell.borrow_mut().clear());
+    OVERFLOW.with(|cell| cell.set(false));
 }
 
 /// A picture `size` px square, cut to a rounded square of `radius` (half
@@ -726,16 +783,9 @@ pub struct Partial {
 impl Partial {
     /// How far to move the rows `y0..y1` for a list now at `offset`
     /// (Some(0): nothing changed), or None to draw the frame whole.
-    pub fn plan(
-        &mut self,
-        offset: i32,
-        key: u64,
-        full: bool,
-        media: &Media,
-        span: i32,
-    ) -> Option<i32> {
+    pub fn plan(&mut self, offset: i32, key: u64, full: bool, span: i32) -> Option<i32> {
         let (last, last_key) = self.last?;
-        if full || self.dirty || last_key != key || misses_ready(media) {
+        if full || self.dirty || last_key != key {
             return None;
         }
         let dy = last - offset;
@@ -804,6 +854,31 @@ pub fn emoji_presentation(text: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// Moves rows `y0..y1` of columns `x0..x1` by `dy` (what was at y lands
+/// at y + dy): a side column that scrolls on its own.
+pub fn move_columns(canvas: &mut Canvas, x0: i32, x1: i32, y0: i32, y1: i32, dy: i32) {
+    let (x0, x1) = (x0.max(0) as usize, x1.min(canvas.width) as usize);
+    let (y0, y1) = (y0.max(0), y1.min(canvas.height));
+    if dy == 0 || x1 <= x0 || y1 - y0 <= dy.abs() {
+        return;
+    }
+    let width = canvas.width as usize;
+    let mut copy = |src: i32| {
+        let from = src as usize * width;
+        let dst = (src + dy) as usize * width;
+        canvas.pixels.copy_within(from + x0..from + x1, dst + x0);
+    };
+    if dy > 0 {
+        for src in (y0..y1 - dy).rev() {
+            copy(src);
+        }
+    } else {
+        for src in y0 - dy..y1 {
+            copy(src);
+        }
+    }
 }
 
 #[cfg(test)]

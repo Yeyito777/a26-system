@@ -163,6 +163,11 @@ pub struct DrawCx<'a> {
     /// otherwise): the display is then told to move the rows itself and
     /// sent only the rows drawn anew.
     pub damage: Option<Damage>,
+    /// The damage holds only for columns `x0..x1` (a side column, such as
+    /// Discord's server rail, scrolled or redrawn on its own): its rows
+    /// moved and drew anew there, and the rest of every row is as the last
+    /// frame left it. None: whole rows.
+    pub columns: Option<(i32, i32)>,
 }
 
 /// A frame's changes: rows `y0..y1` moved by `dy` (as `Canvas::move_rows`
@@ -307,33 +312,54 @@ impl Renderer {
 
     /// Hands the canvas to the display (X compares it with what the server
     /// has and uploads only what changed).
-    fn present(&mut self, damage: Option<Damage>) -> Result<(), Box<dyn Error>> {
+    fn present(
+        &mut self,
+        damage: Option<Damage>,
+        columns: Option<(i32, i32)>,
+    ) -> Result<(), Box<dyn Error>> {
         match &mut self.output {
             Output::X(x) => {
-                match damage {
-                    Some(damage) => {
+                match (damage, columns) {
+                    (Some(damage), Some((x0, x1))) => {
+                        if let Some((y0, y1, dy)) = damage.moved {
+                            x.presenter.scroll_columns(&x.conn, x0, x1, y0, y1, dy)?;
+                        }
+                        let areas: Vec<(i32, i32, i32, i32)> = damage
+                            .rows
+                            .iter()
+                            .map(|&(y0, y1)| (x0, y0, x1, y1))
+                            .collect();
+                        x.presenter.present_rows_and_areas(
+                            &x.conn,
+                            &self.canvas,
+                            0,
+                            &[],
+                            &areas,
+                        )?;
+                    }
+                    (Some(damage), None) => {
                         if let Some((y0, y1, dy)) = damage.moved {
                             x.presenter.scroll(&x.conn, y0, y1, dy)?;
                         }
                         x.presenter
                             .present_rows(&x.conn, &self.canvas, 0, &damage.rows)?;
                     }
-                    None => {
+                    (None, _) => {
                         x.presenter.present(&x.conn, &self.canvas, 0)?;
                     }
                 }
                 x.conn.flush()?;
             }
             Output::Wayland(wayland) => {
-                let width = self.canvas.width;
+                let (x0, x1) = columns.unwrap_or((0, self.canvas.width));
                 let areas: Option<Vec<wayland::Area>> = damage.map(|damage| {
                     let mut areas: Vec<wayland::Area> = damage
                         .rows
                         .iter()
-                        .map(|&(y0, y1)| (0, y0, width, y1))
+                        .map(|&(y0, y1)| (x0, y0, x1, y1))
                         .collect();
                     if let Some((y0, y1, _)) = damage.moved {
-                        areas.push((0, y0, width, y1));
+                        areas.push((x0, y0, x1, y1));
                     }
                     areas
                 });
@@ -638,18 +664,20 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
             now: Instant::now(),
             full,
             damage: None,
+            columns: None,
         };
         app.draw(&mut renderer.canvas, &mut dcx);
-        if let Err(error) = renderer.present(None) {
+        if let Err(error) = renderer.present(None, None) {
             renderer.fall_back(error)?;
             let mut dcx = DrawCx {
                 media: &mut media,
                 now: Instant::now(),
                 full: true,
                 damage: None,
+                columns: None,
             };
             app.draw(&mut renderer.canvas, &mut dcx);
-            renderer.present(None)?;
+            renderer.present(None, None)?;
         }
         redraw = false;
     }
@@ -827,17 +855,19 @@ pub fn run<A: App>(mut app: A) -> Result<(), Box<dyn Error>> {
                 now,
                 full,
                 damage: None,
+                columns: None,
             };
             let started = Instant::now();
             app.draw(&mut renderer.canvas, &mut dcx);
             let drawn = started.elapsed();
             // A frame drawn whole (a resize, a reopened window) is sent whole.
             let damage = if full { None } else { dcx.damage.take() };
+            let columns = dcx.columns;
             // Nothing on screen changed: no frame (the loop sleeps as usual).
             let unchanged = damage
                 .as_ref()
                 .is_some_and(|damage| damage.moved.is_none() && damage.rows.is_empty());
-            if !unchanged && let Err(error) = renderer.present(damage) {
+            if !unchanged && let Err(error) = renderer.present(damage, columns) {
                 renderer.fall_back(error)?;
                 mapped = false;
                 redraw = true;
