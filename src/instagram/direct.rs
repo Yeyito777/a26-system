@@ -490,6 +490,8 @@ struct Placed {
     last: bool,
     avatar: bool,
     seen: Option<&'static str>,
+    /// Its message's layout signature (what it draws).
+    signature: u64,
 }
 
 pub struct ThreadScreen {
@@ -780,35 +782,26 @@ impl ThreadScreen {
         let before: Vec<(usize, f32, f32, u64)> = self
             .placed
             .iter()
-            .map(|p| (p.index, p.from_bottom, p.height, self.laid_signature(store, p.index)))
+            .map(|p| (p.index, p.from_bottom, p.height, p.signature))
             .collect();
         let old_height = self.height;
         self.relayout_all(store);
-        let thread = store.threads.get(&self.chat);
+        // Placed newest first, one per message: the message at `index`
+        // (shifted by what came before it) is at `len - 1 - index`.
+        let added = self.placed.len().saturating_sub(before.len());
+        let len = self.placed.len();
         let stable = !before.is_empty()
-            && thread.is_some_and(|thread| {
-                let shift = thread.messages.len() - self.placed.len().min(thread.messages.len());
-                let _ = shift;
-                before.iter().all(|&(index, from_bottom, height, signature)| {
-                    let added = self.placed.len().saturating_sub(before.len());
-                    self.placed.iter().any(|p| {
-                        p.index == index + added && p.from_bottom == from_bottom && p.height == height
-                            && self.laid_signature(store, p.index) == signature
+            && before.iter().all(|&(index, from_bottom, height, signature)| {
+                (index + added < len)
+                    && self.placed.get(len - 1 - (index + added)).is_some_and(|p| {
+                        p.index == index + added
+                            && p.from_bottom == from_bottom
+                            && p.height == height
+                            && p.signature == signature
                     })
-                })
             });
         self.stable_from = stable.then_some(old_height);
         self.relaid = true;
-    }
-
-    /// The signature of the message at `index` as laid out now (0: none).
-    fn laid_signature(&self, store: &Store, index: usize) -> u64 {
-        store
-            .threads
-            .get(&self.chat)
-            .and_then(|thread| thread.messages.get(index))
-            .and_then(|message| self.laid.get(&message.id))
-            .map_or(0, |laid| laid.signature)
     }
 
     fn relayout_all(&mut self, store: &Store) {
@@ -898,6 +891,7 @@ impl ThreadScreen {
                 last,
                 avatar: !message.mine && last && !message.system,
                 seen,
+                signature: laid.signature,
             });
             from_bottom += h + gap;
         }
