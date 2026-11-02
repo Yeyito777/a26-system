@@ -233,6 +233,8 @@ impl ChatView {
         let old_newest = self.last_newest.clone();
         self.built = key;
         self.dirty = true;
+        let started = Instant::now();
+        let laid_before = self.layouts.len();
         let entries = history.entries.clone();
         let mut rows = Vec::with_capacity(entries.len() + 8);
         if history.loaded && !history.more {
@@ -298,6 +300,14 @@ impl ChatView {
             self.new_below = 0;
         }
         self.last_newest = newest;
+        if profile() {
+            eprintln!(
+                "discord: chat rows {} laid out {} in {} us",
+                self.rows.len(),
+                self.layouts.len().saturating_sub(laid_before),
+                started.elapsed().as_micros()
+            );
+        }
         // Old layouts of messages no longer here go.
         if self.layouts.len() > entries.len() + 200 {
             let ids: HashSet<&str> = entries
@@ -1065,7 +1075,8 @@ impl ChatView {
             );
         }
         if let Some((label, rect)) = self.pill(width, height, offset) {
-            canvas.shadow_rrect(rect, dp(17.0), dp(10.0), 0x000000, 0.35);
+            // A crisp rim, not a blurred shadow: it is drawn every scroll frame.
+            canvas.fill_rrect(rect.inset(-dp(1.5)), dp(18.5), 0x000000, 0.3);
             canvas.fill_rrect(rect, dp(17.0), theme::BLURPLE, 1.0);
             text::draw_centered(
                 canvas,

@@ -1218,7 +1218,7 @@ impl App for DiscordApp {
                 w,
                 h: dp(40.0),
             };
-            canvas.shadow_rrect(rect, dp(10.0), dp(12.0), 0x000000, 0.4);
+            canvas.fill_rrect(rect.inset(-dp(1.5)), dp(11.5), 0x000000, 0.35);
             canvas.fill_rrect(rect, dp(10.0), 0x111214, 1.0);
             let label = ui::fit(message, Weight::Medium, theme::T_SMALL, w - dp(24.0));
             text::draw_centered(
