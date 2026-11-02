@@ -21,6 +21,7 @@ mod rich;
 mod settings;
 mod theme;
 mod time;
+mod updates;
 mod viewer;
 
 use std::collections::HashMap;
@@ -52,6 +53,7 @@ pub enum Page {
     Archived,
     Chat,
     Settings,
+    Updates,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,6 +70,7 @@ enum Ask {
     Settings,
     Send { chat: String, client_id: String },
     Login,
+    Updates,
     Other(&'static str),
 }
 
@@ -139,6 +142,8 @@ pub struct WhatsApp {
     pub settings_view: settings::SettingsView,
     pub login: login::LoginView,
     pub viewer: Option<viewer::Viewer>,
+    pub updates: updates::UpdatesView,
+    pub status_viewer: Option<updates::StatusViewer>,
     pub rounded: Rounded,
     asked: HashMap<u64, Ask>,
     toast: Option<(String, Instant)>,
@@ -181,6 +186,8 @@ impl WhatsApp {
             settings_view: settings::SettingsView::default(),
             login: login::LoginView::default(),
             viewer: None,
+            updates: updates::UpdatesView::default(),
+            status_viewer: None,
             rounded: Rounded::default(),
             asked: HashMap::new(),
             toast: None,
@@ -286,13 +293,25 @@ impl WhatsApp {
             return;
         }
         cx.hide_keyboard();
-        let push = matches!(
+        // Tabs change in place; pages slide.
+        let tabs = matches!(
             (self.page, page),
-            (Page::List, _) | (Page::Archived, Page::Chat) | (_, Page::Settings)
-        ) && page != Page::List;
-        cx.transition(push);
+            (Page::List | Page::Updates, Page::List | Page::Updates)
+        );
+        if !tabs {
+            let push = matches!(
+                (self.page, page),
+                (Page::List | Page::Updates, _)
+                    | (Page::Archived, Page::Chat)
+                    | (_, Page::Settings)
+            ) && page != Page::List;
+            cx.transition(push);
+        }
         if page != Page::Chat {
             self.chat = None;
+        }
+        if page == Page::Updates {
+            updates::refresh(self, cx);
         }
         self.page = page;
         self.full = true;
@@ -301,7 +320,7 @@ impl WhatsApp {
 
     /// Back: the viewer, the search, then the page under this one.
     pub fn back(&mut self, cx: &mut Cx) {
-        if self.viewer.take().is_some() {
+        if self.viewer.take().is_some() || self.status_viewer.take().is_some() {
             self.full = true;
             cx.redraw();
             return;
@@ -331,7 +350,7 @@ impl WhatsApp {
                 };
                 self.go(cx, to);
             }
-            Page::Archived | Page::Settings => self.go(cx, Page::List),
+            Page::Archived | Page::Settings | Page::Updates => self.go(cx, Page::List),
             Page::List => {
                 if self.list.searching() {
                     self.list.end_search();
@@ -426,7 +445,7 @@ impl App for WhatsApp {
     }
 
     fn status_bar(&self) -> (String, &'static str) {
-        let color = if self.viewer.is_some() {
+        let color = if self.viewer.is_some() || self.status_viewer.is_some() {
             0x000000
         } else if self.page == Page::Chat {
             theme::CHAT_BAR
@@ -514,6 +533,12 @@ impl App for WhatsApp {
                 }
             }
             Event::Login(value) => login::event(self, cx, &value),
+            Event::Other(name, _) if name == "whatsapp.status" => {
+                if self.page == Page::Updates && self.status_viewer.is_none() {
+                    updates::refresh(self, cx);
+                }
+                return;
+            }
             _ => return,
         }
         cx.redraw();
@@ -596,6 +621,10 @@ impl App for WhatsApp {
                 }
             }
             (Ask::Login, Err(error)) => login::failed(self, cx, &error),
+            (Ask::Updates, Ok(value)) => {
+                self.updates.updates = updates::parse(&value);
+                self.updates.loaded = true;
+            }
             (Ask::Other(what), Err(error)) => {
                 let text = match error.code.as_str() {
                     "read_only" => "Writes are off: turn them on in Settings".to_owned(),
@@ -618,6 +647,10 @@ impl App for WhatsApp {
             cx.redraw();
             return;
         }
+        if self.status_viewer.is_some() {
+            updates::viewer_gesture(self, cx, gesture);
+            return;
+        }
         if matches!(gesture, Gesture::Back) {
             self.back(cx);
             return;
@@ -633,6 +666,7 @@ impl App for WhatsApp {
         match self.page {
             Page::List | Page::Archived => list::gesture(self, cx, gesture),
             Page::Chat => chat::gesture(self, cx, gesture),
+            Page::Updates => updates::gesture(self, cx, gesture),
             Page::Settings => {}
         }
     }
@@ -674,11 +708,12 @@ impl App for WhatsApp {
             Page::List => list::tick(&mut self.list, &mut self.chats, cx),
             Page::Archived => list::tick(&mut self.archived, &mut self.chats, cx),
             Page::Chat => chat::tick(self, cx),
-            Page::Settings => {}
+            Page::Settings | Page::Updates => {}
         }
         if let Some(viewer) = self.viewer.as_mut() {
             viewer::tick(viewer, cx);
         }
+        updates::tick(self, cx);
         if self
             .toast
             .as_ref()
@@ -714,6 +749,15 @@ impl App for WhatsApp {
             self.full = true;
             return;
         }
+        if self.status_viewer.is_some() {
+            // The bars move every frame; the rest when the update changes.
+            cx.damage = updates::draw_viewer(self, canvas, cx, full).map(|rows| shell::Damage {
+                moved: None,
+                rows: vec![rows],
+            });
+            self.full = true;
+            return;
+        }
         if self.signed_out() {
             self.damage_full = true;
             login::draw(self, canvas, cx);
@@ -725,6 +769,10 @@ impl App for WhatsApp {
                 Page::Settings => {
                     self.damage_full = true;
                     settings::draw(self, canvas, cx);
+                }
+                Page::Updates => {
+                    self.damage_full = true;
+                    updates::draw(self, canvas, cx, full);
                 }
             }
             if !full && verify() {
@@ -804,7 +852,7 @@ impl WhatsApp {
             Page::List => list::draw(self, &mut whole, cx, true, false),
             Page::Archived => list::draw(self, &mut whole, cx, true, true),
             Page::Chat => chat::draw(self, &mut whole, cx, true),
-            Page::Settings => return,
+            Page::Settings | Page::Updates => return,
         }
         self.list.waiting = saved.0;
         self.archived.waiting = saved.1;

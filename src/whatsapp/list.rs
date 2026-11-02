@@ -271,6 +271,7 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
                 }
                 Some(Hit::Back) => app.back(cx),
                 Some(Hit::More) | Some(Hit::Tab(Page::Settings)) => app.go(cx, Page::Settings),
+                Some(Hit::Tab(Page::Updates)) => app.go(cx, Page::Updates),
                 Some(Hit::Tab(_)) => {
                     let list = view(app);
                     list.scroll.reset();
@@ -332,11 +333,7 @@ fn hit(app: &mut WhatsApp, x: f32, y: f32, height: f32, now: Instant) -> Option<
     }
     if y >= bottom {
         if page == Page::List && !list.searching() {
-            return Some(Hit::Tab(if x < app_width() / 2.0 {
-                Page::List
-            } else {
-                Page::Settings
-            }));
+            return Some(Hit::Tab(tab_at(x, app_width())));
         }
         return None;
     }
@@ -423,7 +420,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
         canvas.clear(theme::BG);
         draw_app_bar(canvas, &status, list, archive, width);
         if !archive && !searching {
-            draw_tabs(canvas, width, height);
+            draw_tabs(canvas, width, height, Page::List);
         }
     }
     let key = band::key_of(&[
@@ -1063,7 +1060,21 @@ fn draw_row(
     );
 }
 
-fn draw_tabs(canvas: &mut Canvas, width: f32, height: f32) {
+/// The pages the tab bar leads to, in its order.
+const TABS: [(Glyph, &str, Page); 3] = [
+    (Glyph::Chats, "Chats", Page::List),
+    (Glyph::Updates, "Updates", Page::Updates),
+    (Glyph::Settings, "Settings", Page::Settings),
+];
+
+/// The tab under `x`.
+pub fn tab_at(x: f32, width: f32) -> Page {
+    let slot = width / TABS.len() as f32;
+    TABS[((x / slot) as usize).min(TABS.len() - 1)].2
+}
+
+/// WhatsApp's bottom bar: Chats, Updates, Settings; `active` lit.
+pub fn draw_tabs(canvas: &mut Canvas, width: f32, height: f32, active: Page) {
     let top = height - theme::TAB_BAR;
     canvas.fill_rect(
         0,
@@ -1074,15 +1085,12 @@ fn draw_tabs(canvas: &mut Canvas, width: f32, height: f32) {
         1.0,
     );
     canvas.fill_rect(0, top as i32, canvas.width, 2, theme::DIVIDER, 1.0);
-    let tabs = [
-        (Glyph::Chats, "Chats", true),
-        (Glyph::Settings, "Settings", false),
-    ];
-    let slot = width / tabs.len() as f32;
-    for (index, (glyph, label, active)) in tabs.into_iter().enumerate() {
+    let slot = width / TABS.len() as f32;
+    for (index, (glyph, label, page)) in TABS.into_iter().enumerate() {
+        let on = page == active;
         let cx = slot * (index as f32 + 0.5);
         let icon_y = top + 62.0;
-        if active {
+        if on {
             canvas.fill_rrect(
                 RectF {
                     x: cx - 88.0,
@@ -1101,11 +1109,7 @@ fn draw_tabs(canvas: &mut Canvas, width: f32, height: f32) {
             cx,
             icon_y,
             60.0,
-            if active {
-                theme::GREEN_TEXT
-            } else {
-                theme::TEXT
-            },
+            if on { theme::GREEN_TEXT } else { theme::TEXT },
             1.0,
         );
         text::draw_centered(
@@ -1113,11 +1117,7 @@ fn draw_tabs(canvas: &mut Canvas, width: f32, height: f32) {
             label,
             cx,
             top + 152.0,
-            if active {
-                Weight::SemiBold
-            } else {
-                Weight::Medium
-            },
+            if on { Weight::SemiBold } else { Weight::Medium },
             32.0,
             theme::TEXT,
             1.0,
