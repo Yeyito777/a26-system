@@ -63,5 +63,8 @@ pub enum Action {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Code (inline or blocks) is in Mono: parsed meanwhile on another core,
+    // not by the frame that first scrolls one into view (7 M instructions).
+    crate::text::preload(&[crate::text::Weight::Mono]);
     shell::run(app::DiscordApp::new())
 }
