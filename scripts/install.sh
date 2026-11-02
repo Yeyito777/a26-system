@@ -47,6 +47,9 @@ cp "$PROJECT_ROOT/target/$TARGET/release/a26-systemctl" "$HOST_STAGE/a26-systemc
 cp "$PROJECT_ROOT/target/$TARGET/release/exocortex-notify" "$HOST_STAGE/exocortex-notify"
 cp "$PROJECT_ROOT/assets/system-app.bgrx" "$HOST_STAGE/system-app.bgrx"
 cp "$PROJECT_ROOT/assets/exocortex-app.bgrx" "$HOST_STAGE/exocortex-app.bgrx"
+for icon in instagram-app whatsapp-app discord-app; do
+    cp "$PROJECT_ROOT/assets/$icon.bgrx" "$HOST_STAGE/$icon.bgrx"
+done
 cp "$PROJECT_ROOT/scripts/phone/a26-udhcpc.script" "$HOST_STAGE/a26-udhcpc.script"
 cp "$PROJECT_ROOT/scripts/phone/a26-wifi-start" "$HOST_STAGE/a26-wifi-start"
 cp "$PROJECT_ROOT/scripts/phone/a26-wifi-stop" "$HOST_STAGE/a26-wifi-stop"
@@ -96,7 +99,7 @@ for name in a26-system a26-wifi-service a26-wifi-ctl a26-systemctl exocortex-not
     chmod 0755 \"\$dest/bin/\$name.new\"
     mv -f \"\$dest/bin/\$name.new\" \"\$dest/bin/\$name\"
 done
-for icon in system-app.bgrx exocortex-app.bgrx; do
+for icon in system-app.bgrx exocortex-app.bgrx instagram-app.bgrx whatsapp-app.bgrx discord-app.bgrx; do
     cp \"\$stage/\$icon\" \"\$dest/share/\$icon.new\"
     chown 0:0 \"\$dest/share/\$icon.new\"
     chmod 0644 \"\$dest/share/\$icon.new\"

@@ -11,8 +11,9 @@ from PIL import Image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-# The System app's icon, and the Exocortex app's (scripts/draw-exocortex-icon.py).
-ICONS = ("system-app", "exocortex-app")
+# The System app's icon, the Exocortex app's (scripts/draw-exocortex-icon.py) and
+# the social apps' (scripts/draw-social-icons.py).
+ICONS = ("system-app", "exocortex-app", "instagram-app", "whatsapp-app", "discord-app")
 SIZE = (220, 220)
 PINNED_PILLOW = "12.1.1"
 

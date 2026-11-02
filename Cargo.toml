@@ -8,6 +8,10 @@ license = "MIT"
 
 [dependencies]
 fontdue = { version = "0.9", default-features = false, features = ["std", "simd"] }
+# The social apps' pictures (src/social/media.rs): pure Rust decoders.
+gif = { version = "0.13", default-features = false, features = ["std"] }
+image-webp = "0.2"
+jpeg-decoder = { version = "0.3", default-features = false }
 libc = "0.2"
 png = "0.17"
 ttf-parser = { version = "0.25", default-features = false, features = ["std", "opentype-layout"] }

@@ -5,20 +5,24 @@ mod clock_ui;
 mod comms;
 mod comms_ui;
 mod control;
+mod discord;
 mod display_ui;
 mod exocortex;
 mod finger;
 mod general_ui;
 mod gfx;
+mod instagram;
 mod keys;
 mod metrics;
 mod present;
+mod social;
 mod storage;
 mod telephony;
 mod text;
 mod tz;
 mod ui;
 mod wallpapers;
+mod whatsapp;
 mod wifi;
 
 use std::env;
@@ -101,6 +105,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     match app {
         AppKind::Comms(kind) => return comms::run(kind),
         AppKind::Exocortex => return exocortex::app::run(),
+        AppKind::Instagram => return instagram::run(),
+        AppKind::WhatsApp => return whatsapp::run(),
+        AppKind::Discord => return discord::run(),
         AppKind::System => {}
     }
 
@@ -695,26 +702,33 @@ enum AppKind {
     System,
     Comms(comms::Kind),
     Exocortex,
+    Instagram,
+    WhatsApp,
+    Discord,
 }
 
 /// No arguments: the System app; `--app phone|messages`: Phone or
-/// Messages (comms.rs); `--app exocortex`: the Exocortex app.
+/// Messages (comms.rs); `--app exocortex`: the Exocortex app;
+/// `--app instagram|whatsapp|discord`: the social apps (social/).
 fn parse_arguments() -> Result<AppKind, Box<dyn Error>> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     match arguments.as_slice() {
         [] => Ok(AppKind::System),
         [flag] if matches!(flag.as_str(), "--help" | "-h") => {
-            println!("usage: {APP_NAME} [--app phone|messages|exocortex]");
+            println!("usage: {APP_NAME} [--app phone|messages|exocortex|instagram|whatsapp|discord]");
             std::process::exit(0);
         }
         [flag, app] if flag == "--app" && app == "exocortex" => Ok(AppKind::Exocortex),
+        [flag, app] if flag == "--app" && app == "instagram" => Ok(AppKind::Instagram),
+        [flag, app] if flag == "--app" && app == "whatsapp" => Ok(AppKind::WhatsApp),
+        [flag, app] if flag == "--app" && app == "discord" => Ok(AppKind::Discord),
         [flag, app] if flag == "--app" && comms::Kind::parse(app).is_some() => {
             Ok(AppKind::Comms(comms::Kind::parse(app).expect("checked")))
         }
         // Never echo arbitrary argv: credentials are not accepted here, and an
         // accidental secret-shaped argument must not be copied to diagnostics.
         _ => Err(format!(
-            "unexpected argument; usage: {APP_NAME} [--app phone|messages|exocortex]"
+            "unexpected argument; usage: {APP_NAME} [--app phone|messages|exocortex|instagram|whatsapp|discord]"
         )
         .into()),
     }
