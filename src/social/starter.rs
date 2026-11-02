@@ -32,7 +32,8 @@ pub struct Theme {
     pub badge: Rgb,
 }
 
-const TOP: f32 = 124.0;
+/// Moon places app windows under its status bar: the window starts below it.
+const TOP: f32 = 0.0;
 const BAR_H: f32 = 150.0;
 const ROW_H: f32 = 190.0;
 const AVATAR: f32 = 130.0;
