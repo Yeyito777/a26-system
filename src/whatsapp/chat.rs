@@ -227,8 +227,9 @@ impl ChatView {
 
     pub fn page_arrived(&mut self, value: &Value, older: bool, now: Instant) {
         let started = Instant::now();
-        let page: Vec<Message> =
+        let mut page: Vec<Message> =
             serde::Deserialize::deserialize(&value["messages"]).unwrap_or_default();
+        page.iter_mut().for_each(rich::colour_message);
         if super::profile() {
             eprintln!(
                 "whatsapp: page of {} parsed in {:.2} ms",
@@ -1387,12 +1388,7 @@ fn draw_header(
         now,
     );
     let x = 104.0 + size + 30.0;
-    let title = text::fit(
-        &rich::emojify(view.title),
-        Weight::Medium,
-        48.0,
-        width - x - 50.0,
-    );
+    let title = text::fit(view.title, Weight::Medium, 48.0, width - x - 50.0);
     let subtitle = if view.group {
         view.members
             .map(|n| format!("{n} members"))
@@ -1751,7 +1747,7 @@ fn draw_bubble(
             *color,
             1.0,
         );
-        let quoted = text::fit(&rich::emojify(quoted), Weight::Regular, 36.0, q.w - 50.0);
+        let quoted = text::fit(quoted, Weight::Regular, 36.0, q.w - 50.0);
         text::draw(
             canvas,
             &quoted,

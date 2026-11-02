@@ -54,8 +54,9 @@ impl InfoView {
     }
 
     pub fn media_arrived(&mut self, value: &Value) {
-        let page: Vec<Message> =
+        let mut page: Vec<Message> =
             serde::Deserialize::deserialize(&value["messages"]).unwrap_or_default();
+        page.iter_mut().for_each(rich::colour_message);
         self.media.extend(page);
         self.more = value["more"].as_bool().unwrap_or(false);
         self.loading = false;

@@ -184,33 +184,77 @@ pub fn url_of(link: &str) -> String {
 /// gets the emoji selector (the shared text drawing gives a lone one the
 /// symbol fonts' outline when they have it: 👍 drew as a line drawing).
 pub fn emojify(text_in: &str) -> std::borrow::Cow<'_, str> {
-    let needs = |c: char, next: Option<char>| {
-        let code = c as u32;
+    if text_in.is_ascii() {
+        return std::borrow::Cow::Borrowed(text_in);
+    }
+    let chars: Vec<char> = text_in.chars().collect();
+    // A pictograph standing alone: not joined to the one before (the end
+    // of a ZWJ sequence) and followed by no selector, skin tone or joiner.
+    let alone = |i: usize| {
+        let code = chars[i] as u32;
         ((0x1f300..=0x1faff).contains(&code) && !(0x1f3fb..=0x1f3ff).contains(&code)
             || emoji_presentation(code))
-            && !next
-                .is_some_and(|n| matches!(n as u32, 0xfe0e | 0xfe0f | 0x200d | 0x1f3fb..=0x1f3ff))
+            && (i == 0 || chars[i - 1] != '\u{200d}')
+            && !chars
+                .get(i + 1)
+                .is_some_and(|&n| matches!(n as u32, 0xfe0e | 0xfe0f | 0x200d | 0x1f3fb..=0x1f3ff))
     };
-    let mut chars = text_in.chars().peekable();
-    let mut any = false;
-    while let Some(c) = chars.next() {
-        if needs(c, chars.peek().copied()) {
-            any = true;
-            break;
-        }
-    }
-    if !any {
+    if !(0..chars.len()).any(alone) {
         return std::borrow::Cow::Borrowed(text_in);
     }
     let mut out = String::with_capacity(text_in.len() + 8);
-    let mut chars = text_in.chars().peekable();
-    while let Some(c) = chars.next() {
+    for (i, &c) in chars.iter().enumerate() {
         out.push(c);
-        if needs(c, chars.peek().copied()) {
+        if alone(i) {
             out.push('\u{fe0f}');
         }
     }
     std::borrow::Cow::Owned(out)
+}
+
+fn colour_in_place(text: &mut String) {
+    if let std::borrow::Cow::Owned(coloured) = emojify(text) {
+        *text = coloured;
+    }
+}
+
+/// A chat as the app shows it: every emoji in its names and preview in
+/// colour (done once, as it arrives, so every place that draws or measures
+/// it agrees).
+pub fn colour_chat(chat: &mut crate::social::proto::Chat) {
+    colour_in_place(&mut chat.title);
+    if let Some(push) = chat.ext.get("push_name").and_then(|p| p.as_str())
+        && let std::borrow::Cow::Owned(coloured) = emojify(push)
+    {
+        chat.ext["push_name"] = serde_json::Value::String(coloured);
+    }
+    if let Some(last) = chat.last.as_mut() {
+        colour_in_place(&mut last.text);
+        if let Some(author) = last.author.as_mut() {
+            colour_in_place(author);
+        }
+    }
+}
+
+/// A message as the app shows it: its text, names, quote, reactions and
+/// push name with emoji in colour.
+pub fn colour_message(message: &mut crate::social::proto::Message) {
+    colour_in_place(&mut message.text);
+    colour_in_place(&mut message.author.name);
+    if let Some(reply) = message.reply_to.as_mut() {
+        colour_in_place(&mut reply.text);
+        if let Some(author) = reply.author.as_mut() {
+            colour_in_place(author);
+        }
+    }
+    for reaction in &mut message.reactions {
+        colour_in_place(&mut reaction.emoji);
+    }
+    if let Some(push) = message.ext.get("push_name").and_then(|p| p.as_str())
+        && let std::borrow::Cow::Owned(coloured) = emojify(push)
+    {
+        message.ext["push_name"] = serde_json::Value::String(coloured);
+    }
 }
 
 /// The symbols before U+1F300 that show as emoji by default (Unicode's
@@ -467,6 +511,27 @@ mod tests {
         let linked = spans("see https://example.com/a, ok");
         assert_eq!(linked[1], ("https://example.com/a".to_owned(), Style::Link));
         assert_eq!(linked[2].0, ", ok");
+    }
+
+    #[test]
+    fn lone_emoji_ask_for_colour_everywhere_a_message_shows_them() {
+        let mut message = crate::social::proto::Message {
+            text: "ok 👍".into(),
+            reactions: vec![crate::social::proto::Reaction {
+                emoji: "👍".into(),
+                count: 1,
+                mine: false,
+            }],
+            ..Default::default()
+        };
+        message.author.name = "Ana 🌸".into();
+        colour_message(&mut message);
+        assert_eq!(message.text, "ok 👍\u{fe0f}");
+        assert_eq!(message.reactions[0].emoji, "👍\u{fe0f}");
+        assert_eq!(message.author.name, "Ana 🌸\u{fe0f}");
+        // Already coloured, skin-toned and joined ones stay as they are.
+        assert_eq!(emojify("❤️ 👍🏽 👨‍👩‍👧"), "❤️ 👍🏽 👨‍👩‍👧");
+        assert_eq!(emojify("☔"), "☔\u{fe0f}");
     }
 
     #[test]

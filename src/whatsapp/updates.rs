@@ -57,11 +57,16 @@ pub fn parse(value: &Value) -> Vec<Update> {
         .map(|updates| {
             updates
                 .iter()
-                .map(|u| Update {
-                    user: serde_json::from_value(u["user"].clone()).unwrap_or_default(),
-                    ts: u["ts"].as_i64().unwrap_or(0),
-                    seen: u["seen"].as_bool().unwrap_or(false),
-                    items: serde_json::from_value(u["items"].clone()).unwrap_or_default(),
+                .map(|u| {
+                    let mut update = Update {
+                        user: serde_json::from_value(u["user"].clone()).unwrap_or_default(),
+                        ts: u["ts"].as_i64().unwrap_or(0),
+                        seen: u["seen"].as_bool().unwrap_or(false),
+                        items: serde_json::from_value(u["items"].clone()).unwrap_or_default(),
+                    };
+                    update.user.name = rich::emojify(&update.user.name).into_owned();
+                    update.items.iter_mut().for_each(rich::colour_message);
+                    update
                 })
                 .filter(|u| !u.items.is_empty())
                 .collect()
@@ -473,7 +478,7 @@ fn draw_row(
     );
     let tx = x + AVATAR + 48.0;
     let name = text::fit(
-        &rich::emojify(&update.user.name),
+        &update.user.name,
         Weight::Medium,
         theme::T_TITLE,
         width - tx - theme::MARGIN,
@@ -584,12 +589,7 @@ pub fn draw_viewer(
             cx.now,
         );
         missing |= !waiting.is_empty();
-        let name = text::fit(
-            &rich::emojify(&update.user.name),
-            Weight::Medium,
-            44.0,
-            width - 300.0,
-        );
+        let name = text::fit(&update.user.name, Weight::Medium, 44.0, width - 300.0);
         text::draw(
             canvas,
             &name,
