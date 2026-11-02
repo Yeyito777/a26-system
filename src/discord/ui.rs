@@ -19,6 +19,11 @@ use crate::text::{self, Weight};
 
 use super::theme::{self, dp};
 
+/// An italic run's coverage: width, height, ascent, rows.
+type SlantedRun = (i32, i32, i32, Vec<u8>);
+/// A glyph's coverage: x, y, width, height, rows.
+type GlyphMask = (i32, i32, i32, i32, Vec<u8>);
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ShapeKey {
     reference: String,
@@ -36,8 +41,8 @@ thread_local! {
     static MISSES: RefCell<Vec<(String, u32, u32, Fit)>> = const { RefCell::new(Vec::new()) };
     static SHAPED: RefCell<HashMap<ShapeKey, Shaped>> = RefCell::new(HashMap::new());
     static CORNERS: RefCell<HashMap<u32, Rc<[Vec<u8>; 4]>>> = RefCell::new(HashMap::new());
-    static ITALIC: RefCell<HashMap<(String, u8, u32), Rc<(i32, i32, i32, Vec<u8>)>>> = RefCell::new(HashMap::new());
-    static MASKS: RefCell<HashMap<(u8, u32), Rc<(i32, i32, i32, i32, Vec<u8>)>>> = RefCell::new(HashMap::new());
+    static ITALIC: RefCell<HashMap<(String, u8, u32), Rc<SlantedRun>>> = RefCell::new(HashMap::new());
+    static MASKS: RefCell<HashMap<(u8, u32), Rc<GlyphMask>>> = RefCell::new(HashMap::new());
 }
 
 /// `Media::get`, remembering what was not ready (a frame drawn in part
@@ -114,6 +119,7 @@ pub fn shaped(
 }
 
 /// A round avatar at (`x`, `y`) (its top left); a disc of `fallback` while it loads.
+#[allow(clippy::too_many_arguments)]
 pub fn avatar(
     canvas: &mut Canvas,
     media: &mut Media,

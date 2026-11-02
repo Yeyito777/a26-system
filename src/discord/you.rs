@@ -351,7 +351,7 @@ impl YouView {
                     theme::MUTED,
                     1.0,
                 );
-                let enabled = !(matches!(item, Item::Previews) && !model.settings.notifications);
+                let enabled = !matches!(item, Item::Previews) || model.settings.notifications;
                 ui::switch(canvas, on, card.x + card.w - dp(16.0), cy, enabled);
                 if i < 2 {
                     canvas.fill_rect(

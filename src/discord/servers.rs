@@ -64,11 +64,16 @@ pub struct ServersView {
     pub last_channel: HashMap<String, String>,
     dragging_rail: bool,
     /// What the rail and the list showed last frame (each is redrawn only when it changes).
-    last_rail: Option<(u64, i32, Option<String>, usize, i32)>,
-    last_list: Option<(u64, u64, usize, i32, Option<String>, Option<String>, i32)>,
+    last_rail: Option<RailKey>,
+    last_list: Option<ListKey>,
     /// Something besides scrolling changed: the next frame is whole.
     pub dirty: bool,
 }
+
+/// What the rail shows: servers, its offset, the chosen server, open folders, the height.
+type RailKey = (u64, i32, Option<String>, usize, i32);
+/// What the channel list shows: chats, servers, collapsed categories, its offset, server, channel, height.
+type ListKey = (u64, u64, usize, i32, Option<String>, Option<String>, i32);
 
 const ITEM: f32 = theme::SERVER_ICON + theme::SERVER_GAP;
 const ROW_H: f32 = dp(38.0);
