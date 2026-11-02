@@ -12,8 +12,8 @@ use serde_json::json;
 use super::app::{Action, Area, Screen};
 use super::model::Activity;
 use super::paint::{
-    self, Icon, Line, Paint, Ring, BG, BLUE, BODY, BODY_BOLD, BUTTON, DP, MARGIN, SAFE_BOTTOM, SECONDARY,
-    SMALL, STATUS, TAB_BAR, TEXT, TOP_BAR,
+    self, BG, BLUE, BODY, BODY_BOLD, BUTTON, DP, Icon, Line, MARGIN, Paint, Ring, SAFE_BOTTOM,
+    SECONDARY, SMALL, STATUS, TAB_BAR, TEXT, TOP_BAR,
 };
 use super::post::PostScreen;
 use super::profile::ProfileScreen;
@@ -132,7 +132,11 @@ impl Screen for ActivityScreen {
                 let mut current = "";
                 let fresh = activity.badge.total as usize;
                 for (index, item) in items.iter().enumerate() {
-                    let name = section(item.ts, now, index < fresh.min(4) && activity.badge.total > 0 && false);
+                    let name = section(
+                        item.ts,
+                        now,
+                        index < fresh.min(4) && activity.badge.total > 0 && false,
+                    );
                     if name != current {
                         current = name;
                         self.rows.push((y, Row::Section(name)));
@@ -144,7 +148,14 @@ impl Screen for ActivityScreen {
                     y += h;
                 }
                 if items.is_empty() {
-                    let note = paint::wrap_plain("Activity on your posts will show here.", BODY, SECONDARY, width - 2.0 * MARGIN, 3).0;
+                    let note = paint::wrap_plain(
+                        "Activity on your posts will show here.",
+                        BODY,
+                        SECONDARY,
+                        width - 2.0 * MARGIN,
+                        3,
+                    )
+                    .0;
                     self.rows.push((y, Row::Note(note)));
                     y += 200.0;
                 }
@@ -162,8 +173,13 @@ impl Screen for ActivityScreen {
                         parts.push(format!("{n} {}", if n == 1 { one } else { many }));
                     }
                 }
-                let summary = if parts.is_empty() { "Nothing new on Instagram.".to_owned() } else { format!("New on Instagram: {}.", parts.join(", ")) };
-                let mut lines = paint::wrap_plain(&summary, BODY_BOLD, TEXT, width - 2.0 * MARGIN, 4).0;
+                let summary = if parts.is_empty() {
+                    "Nothing new on Instagram.".to_owned()
+                } else {
+                    format!("New on Instagram: {}.", parts.join(", "))
+                };
+                let mut lines =
+                    paint::wrap_plain(&summary, BODY_BOLD, TEXT, width - 2.0 * MARGIN, 4).0;
                 lines.push(Vec::new());
                 lines.extend(
                     paint::wrap_plain(
@@ -201,13 +217,34 @@ impl Screen for ActivityScreen {
                     }
                     let cy = y + h / 2.0;
                     let first = &activity.requests[0];
-                    paint::avatar(canvas, p, first.avatar_ref(), MARGIN + AVATAR / 2.0, cy, AVATAR, Ring::None);
+                    paint::avatar(
+                        canvas,
+                        p,
+                        first.avatar_ref(),
+                        MARGIN + AVATAR / 2.0,
+                        cy,
+                        AVATAR,
+                        Ring::None,
+                    );
                     let x = MARGIN + AVATAR + 30.0;
                     paint::draw_text(canvas, "Follow requests", x, cy - 6.0, BODY_BOLD, TEXT);
-                    let others = if *count > 1 { format!("{} + {} others", first.handle(), count - 1) } else { first.handle().to_owned() };
+                    let others = if *count > 1 {
+                        format!("{} + {} others", first.handle(), count - 1)
+                    } else {
+                        first.handle().to_owned()
+                    };
                     paint::draw_text(canvas, &others, x, cy + 40.0, SMALL, SECONDARY);
                     canvas.fill_circle(area.width - MARGIN - 80.0, cy, 4.0 * DP, BLUE, 1.0);
-                    paint::icon(canvas, p.cache, Icon::ChevronRight, area.width - MARGIN - 50.0, cy - 25.0, 50.0, false, SECONDARY);
+                    paint::icon(
+                        canvas,
+                        p.cache,
+                        Icon::ChevronRight,
+                        area.width - MARGIN - 50.0,
+                        cy - 25.0,
+                        50.0,
+                        false,
+                        SECONDARY,
+                    );
                 }
                 Row::Section(name) => {
                     if area.visible(y, y + 110.0) {
@@ -218,17 +255,48 @@ impl Screen for ActivityScreen {
                     if !area.visible(y, y + h) {
                         continue;
                     }
-                    let Some(item) = activity.items.as_ref().and_then(|items| items.get(*index)) else {
+                    let Some(item) = activity.items.as_ref().and_then(|items| items.get(*index))
+                    else {
                         continue;
                     };
                     let cy = y + 20.0 + AVATAR / 2.0;
                     if item.actors.len() >= 2 {
                         let small = AVATAR * 0.72;
-                        paint::avatar(canvas, p, item.actors[1].avatar_ref(), MARGIN + small / 2.0 + AVATAR * 0.28, cy - AVATAR * 0.14, small, Ring::None);
-                        canvas.fill_circle(MARGIN + small / 2.0, cy + AVATAR * 0.14, small / 2.0 + 4.0, BG, 1.0);
-                        paint::avatar(canvas, p, item.actors[0].avatar_ref(), MARGIN + small / 2.0, cy + AVATAR * 0.14, small, Ring::None);
+                        paint::avatar(
+                            canvas,
+                            p,
+                            item.actors[1].avatar_ref(),
+                            MARGIN + small / 2.0 + AVATAR * 0.28,
+                            cy - AVATAR * 0.14,
+                            small,
+                            Ring::None,
+                        );
+                        canvas.fill_circle(
+                            MARGIN + small / 2.0,
+                            cy + AVATAR * 0.14,
+                            small / 2.0 + 4.0,
+                            BG,
+                            1.0,
+                        );
+                        paint::avatar(
+                            canvas,
+                            p,
+                            item.actors[0].avatar_ref(),
+                            MARGIN + small / 2.0,
+                            cy + AVATAR * 0.14,
+                            small,
+                            Ring::None,
+                        );
                     } else if let Some(actor) = item.actors.first() {
-                        paint::avatar(canvas, p, actor.avatar_ref(), MARGIN + AVATAR / 2.0, cy, AVATAR, Ring::from_story(actor.story.as_deref()));
+                        paint::avatar(
+                            canvas,
+                            p,
+                            actor.avatar_ref(),
+                            MARGIN + AVATAR / 2.0,
+                            cy,
+                            AVATAR,
+                            Ring::from_story(actor.story.as_deref()),
+                        );
                     }
                     let x = MARGIN + AVATAR + 30.0;
                     for (n, line) in lines.iter().enumerate() {
@@ -242,11 +310,22 @@ impl Screen for ActivityScreen {
                         paint::round_corners(canvas, r, 6.0 * DP, BG);
                     } else if item.kind == "follow" {
                         let following = item.following == Some(true);
-                        let label = if following { "Following" } else { "Follow back" };
+                        let label = if following {
+                            "Following"
+                        } else {
+                            "Follow back"
+                        };
                         let w = paint::measure(label, BODY_BOLD) + 60.0;
                         let r = RectF::new(right - w, y + 20.0, w, 32.0 * DP);
                         canvas.fill_rrect(r, 8.0 * DP, if following { BUTTON } else { BLUE }, 1.0);
-                        paint::draw_text_centered(canvas, label, r.x + r.w / 2.0, paint::baseline(r.y + r.h / 2.0, BODY_BOLD), BODY_BOLD, TEXT);
+                        paint::draw_text_centered(
+                            canvas,
+                            label,
+                            r.x + r.w / 2.0,
+                            paint::baseline(r.y + r.h / 2.0, BODY_BOLD),
+                            BODY_BOLD,
+                            TEXT,
+                        );
                     }
                 }
                 Row::Note(lines) => {
@@ -266,13 +345,33 @@ impl Screen for ActivityScreen {
     fn chrome(&mut self, canvas: &mut Canvas, p: &mut Paint, _store: &Store, area: Area) {
         canvas.fill_rect(0, 0, canvas.width, area.top as i32, BG, 1.0);
         let cy = STATUS + TOP_BAR / 2.0;
-        paint::icon(canvas, p.cache, Icon::Back, MARGIN - 10.0, cy - 36.0, 72.0, false, TEXT);
-        paint::draw_text(canvas, "Notifications", MARGIN + 100.0, paint::baseline(cy, paint::TITLE), paint::TITLE, TEXT);
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Back,
+            MARGIN - 10.0,
+            cy - 36.0,
+            72.0,
+            false,
+            TEXT,
+        );
+        paint::draw_text(
+            canvas,
+            "Notifications",
+            MARGIN + 100.0,
+            paint::baseline(cy, paint::TITLE),
+            paint::TITLE,
+            TEXT,
+        );
     }
 
     fn tap(&mut self, store: &Store, x: f32, y: f32, area: Area) -> Action {
         if y < area.top {
-            return if x < MARGIN + 110.0 { Action::Pop } else { Action::None };
+            return if x < MARGIN + 110.0 {
+                Action::Pop
+            } else {
+                Action::None
+            };
         }
         let cy = y - area.top + area.offset;
         for (row_y, row) in &self.rows {
@@ -285,18 +384,31 @@ impl Screen for ActivityScreen {
                 continue;
             }
             match row {
-                Row::Requests(_) => return Action::Toast("Approving requests needs writes on.".into()),
+                Row::Requests(_) => {
+                    return Action::Toast("Approving requests needs writes on.".into());
+                }
                 Row::Item(index, _, _) => {
-                    let Some(item) = store.activity.items.as_ref().and_then(|items| items.get(*index)) else {
+                    let Some(item) = store
+                        .activity
+                        .items
+                        .as_ref()
+                        .and_then(|items| items.get(*index))
+                    else {
                         return Action::None;
                     };
                     if x < MARGIN + AVATAR + 20.0 || item.target.kind == "profile" {
                         if let Some(actor) = item.actors.first() {
-                            return Action::Push(Box::new(ProfileScreen::user(actor.id.clone(), actor.username.clone())));
+                            return Action::Push(Box::new(ProfileScreen::user(
+                                actor.id.clone(),
+                                actor.username.clone(),
+                            )));
                         }
                     }
                     return match item.target.kind.as_str() {
-                        "post" => Action::Push(Box::new(PostScreen::new(item.target.id.clone(), item.kind == "comment"))),
+                        "post" => Action::Push(Box::new(PostScreen::new(
+                            item.target.id.clone(),
+                            item.kind == "comment",
+                        ))),
                         "story" => Action::Stories {
                             ids: vec![item.target.id.clone()],
                             start: 0,
@@ -311,11 +423,23 @@ impl Screen for ActivityScreen {
     }
 
     fn shown(&mut self, store: &Store) -> Action {
-        let mut actions = vec![Action::request("instagram.activity", json!({"cached": true}), Ask::Activity { cached: true })];
-        actions.push(Action::request("instagram.activity", json!({}), Ask::Activity { cached: false }));
+        let mut actions = vec![Action::request(
+            "instagram.activity",
+            json!({"cached": true}),
+            Ask::Activity { cached: true },
+        )];
+        actions.push(Action::request(
+            "instagram.activity",
+            json!({}),
+            Ask::Activity { cached: false },
+        ));
         if !self.viewed || store.activity.badge.unseen > 0 {
             self.viewed = true;
-            actions.push(Action::request("instagram.activity.viewed", json!({}), Ask::Badge));
+            actions.push(Action::request(
+                "instagram.activity.viewed",
+                json!({}),
+                Ask::Badge,
+            ));
         }
         Action::Many(actions)
     }

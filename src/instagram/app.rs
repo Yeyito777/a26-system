@@ -16,11 +16,11 @@ use serde_json::{Value, json};
 use super::activity::ActivityScreen;
 use super::direct::{InboxScreen, ThreadScreen};
 use super::feed::FeedScreen;
-use super::paint::{self, Cache, Icon, Paint, Want, BG, DP, SAFE_BOTTOM, TAB_BAR, TEXT};
+use super::paint::{self, BG, Cache, DP, Icon, Paint, SAFE_BOTTOM, TAB_BAR, TEXT, Want};
 use super::profile::ProfileScreen;
 use super::search::SearchScreen;
-use super::stories::StoryViewer;
 use super::store::{Ask, Store};
+use super::stories::StoryViewer;
 use crate::comms::Scroll;
 use crate::control::KeyboardPurpose;
 use crate::exocortex::gesture::{Axis, Gesture};
@@ -66,8 +66,15 @@ pub enum Action {
     Push(Box<dyn Screen>),
     Pop,
     Tab(Tab),
-    Request { cmd: &'static str, args: Value, ask: Ask },
-    Stories { ids: Vec<String>, start: usize },
+    Request {
+        cmd: &'static str,
+        args: Value,
+        ask: Ask,
+    },
+    Stories {
+        ids: Vec<String>,
+        start: usize,
+    },
     Toast(String),
     Keyboard(Option<KeyboardPurpose>),
     OpenUrl(String),
@@ -176,7 +183,6 @@ pub struct Instagram {
     keyboard: bool,
     shown: bool,
     drag: Option<Axis>,
-    started: Instant,
     frames: u64,
     profile: bool,
     sends: u32,
@@ -219,9 +225,9 @@ impl Instagram {
             keyboard: false,
             shown: false,
             drag: None,
-            started: Instant::now(),
             frames: 0,
-            profile: std::env::var_os("INSTAGRAM_APP_PROFILE").is_some() || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some(),
+            profile: std::env::var_os("INSTAGRAM_APP_PROFILE").is_some()
+                || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some(),
             sends: 0,
             verify: std::env::var_os("INSTAGRAM_APP_VERIFY").is_some(),
             finger: None,
@@ -231,11 +237,16 @@ impl Instagram {
 
     fn show_top(&mut self) -> Action {
         let store = &self.store;
-        self.stacks[self.tab as usize].last_mut().expect("a tab has its root").shown(store)
+        self.stacks[self.tab as usize]
+            .last_mut()
+            .expect("a tab has its root")
+            .shown(store)
     }
 
     fn top(&mut self) -> &mut Box<dyn Screen> {
-        self.stacks[self.tab as usize].last_mut().expect("a tab has its root")
+        self.stacks[self.tab as usize]
+            .last_mut()
+            .expect("a tab has its root")
     }
 
     fn area(&mut self, width: f32, height: f32, now: Instant) -> Area {
@@ -244,7 +255,9 @@ impl Instagram {
         let (top, bottom) = screen.viewport(height);
         let content = screen.layout(store, width);
         let max = (content - (bottom - top)).max(0.0);
-        let offset = screen.scroll().map_or(0.0, |scroll| scroll.value(now).clamp(-max - 400.0, max + 400.0).round());
+        let offset = screen.scroll().map_or(0.0, |scroll| {
+            scroll.value(now).clamp(-max - 400.0, max + 400.0).round()
+        });
         Area {
             top,
             bottom,
@@ -295,12 +308,20 @@ impl Instagram {
                 }
             }
             Action::Tab(tab) => self.switch_tab(cx, tab),
-            Action::Request { cmd, mut args, mut ask } => {
+            Action::Request {
+                cmd,
+                mut args,
+                mut ask,
+            } => {
                 if let Ask::Send { chat, .. } = &ask {
                     // Shown at once, pending, under a client id the echo carries.
                     let client_id = offline_threading_id(&mut self.sends);
                     let text = args["text"].as_str().unwrap_or("").to_owned();
-                    let me = self.store.account().map(|a| a.id.clone()).unwrap_or_default();
+                    let me = self
+                        .store
+                        .account()
+                        .map(|a| a.id.clone())
+                        .unwrap_or_default();
                     self.store.add_pending(chat, &text, &client_id, &me);
                     args["client_id"] = json!(client_id);
                     ask = Ask::Send {
@@ -411,7 +432,13 @@ impl Instagram {
 
     /// Development check (`INSTAGRAM_APP_VERIFY`): a frame that moved rows
     /// equals one drawn whole.
-    fn check_band(&mut self, canvas: &Canvas, media: &mut crate::social::media::Media, now: Instant, area: Area) -> bool {
+    fn check_band(
+        &mut self,
+        canvas: &Canvas,
+        media: &mut crate::social::media::Media,
+        now: Instant,
+        area: Area,
+    ) -> bool {
         let mut full = Canvas::new(canvas.width, canvas.height);
         full.clear(BG);
         let store = &self.store;
@@ -424,18 +451,30 @@ impl Instagram {
             cache: &self.cache,
         };
         full.set_clip(0, area.top as i32, full.width, area.bottom as i32);
-        screen.draw(&mut full, &mut p, store, Area { band: (area.top, area.bottom), ..area });
+        screen.draw(
+            &mut full,
+            &mut p,
+            store,
+            Area {
+                band: (area.top, area.bottom),
+                ..area
+            },
+        );
         if !missing.is_empty() || !self.missing.is_empty() {
             // Pictures still on their way: placeholders differ by design.
             return true;
         }
         let width = full.width as usize;
         let rows: Vec<usize> = (area.top as usize..area.bottom as usize)
-            .filter(|y| full.pixels[y * width..(y + 1) * width] != canvas.pixels[y * width..(y + 1) * width])
+            .filter(|y| {
+                full.pixels[y * width..(y + 1) * width] != canvas.pixels[y * width..(y + 1) * width]
+            })
             .collect();
         if let (Some(&first), Some(last)) = (rows.first(), rows.last()) {
             let row = first * width..(first + 1) * width;
-            let xs: Vec<usize> = (0..width).filter(|x| full.pixels[row.start + x] != canvas.pixels[row.start + x]).collect();
+            let xs: Vec<usize> = (0..width)
+                .filter(|x| full.pixels[row.start + x] != canvas.pixels[row.start + x])
+                .collect();
             eprintln!(
                 "instagram: band frame differs in {} rows ({first}..{last}), x {:?}..{:?} ({} px, full {:06x} band {:06x}), offset {}",
                 rows.len(),
@@ -451,7 +490,12 @@ impl Instagram {
         true
     }
 
-    fn full_frame(&mut self, canvas: &mut Canvas, media: &mut crate::social::media::Media, now: Instant) {
+    fn full_frame(
+        &mut self,
+        canvas: &mut Canvas,
+        media: &mut crate::social::media::Media,
+        now: Instant,
+    ) {
         self.missing.clear();
         let (width, height) = (canvas.width as f32, canvas.height as f32);
         canvas.reset_clip();
@@ -515,23 +559,61 @@ fn draw_tab_bar(canvas: &mut Canvas, p: &mut Paint, store: &Store, current: Tab,
         let cy = top + TAB_BAR / 2.0;
         let active = *tab == current;
         match tab {
-            Tab::Home => paint::icon(canvas, p.cache, Icon::Home, cx - size / 2.0, cy - size / 2.0, size, active, TEXT),
+            Tab::Home => paint::icon(
+                canvas,
+                p.cache,
+                Icon::Home,
+                cx - size / 2.0,
+                cy - size / 2.0,
+                size,
+                active,
+                TEXT,
+            ),
             Tab::Messages => {
-                paint::icon(canvas, p.cache, Icon::Direct, cx - size / 2.0, cy - size / 2.0, size, active, TEXT);
+                paint::icon(
+                    canvas,
+                    p.cache,
+                    Icon::Direct,
+                    cx - size / 2.0,
+                    cy - size / 2.0,
+                    size,
+                    active,
+                    TEXT,
+                );
                 let unread = store.unread_chats();
                 if unread > 0 {
                     paint::badge(canvas, cx + size * 0.42, cy - size * 0.38, unread);
                 }
             }
-            Tab::Search => paint::icon(canvas, p.cache, Icon::Search, cx - size / 2.0, cy - size / 2.0, size, active, TEXT),
+            Tab::Search => paint::icon(
+                canvas,
+                p.cache,
+                Icon::Search,
+                cx - size / 2.0,
+                cy - size / 2.0,
+                size,
+                active,
+                TEXT,
+            ),
             Tab::Profile => {
                 let d = 28.0 * DP;
                 if active {
                     canvas.fill_circle(cx, cy, d / 2.0 + 5.0, TEXT, 1.0);
                     canvas.fill_circle(cx, cy, d / 2.0 + 1.0, BG, 1.0);
                 }
-                let reference = account.as_ref().and_then(|a| a.avatar.as_ref()).map(|m| m.reference.clone());
-                paint::avatar(canvas, p, reference.as_deref(), cx, cy, d, paint::Ring::None);
+                let reference = account
+                    .as_ref()
+                    .and_then(|a| a.avatar.as_ref())
+                    .map(|m| m.reference.clone());
+                paint::avatar(
+                    canvas,
+                    p,
+                    reference.as_deref(),
+                    cx,
+                    cy,
+                    d,
+                    paint::Ring::None,
+                );
             }
         }
     }
@@ -551,9 +633,22 @@ impl App for Instagram {
         self.store.fixtures = hello.fixtures;
         self.store.capabilities = hello.capabilities.clone();
         self.store.settings.writes = hello.status.writes;
-        self.perform(cx, Action::request("chats.list", json!({"limit": 500, "folder": "inbox"}), Ask::Chats));
-        self.perform(cx, Action::request("settings.get", json!({}), Ask::Settings));
-        self.perform(cx, Action::request("instagram.badge", json!({}), Ask::Badge));
+        self.perform(
+            cx,
+            Action::request(
+                "chats.list",
+                json!({"limit": 500, "folder": "inbox"}),
+                Ask::Chats,
+            ),
+        );
+        self.perform(
+            cx,
+            Action::request("settings.get", json!({}), Ask::Settings),
+        );
+        self.perform(
+            cx,
+            Action::request("instagram.badge", json!({}), Ask::Badge),
+        );
         for stack in 0..self.stacks.len() {
             for index in 0..self.stacks[stack].len() {
                 let action = self.stacks[stack][index].shown(&self.store);
@@ -575,7 +670,8 @@ impl App for Instagram {
     }
 
     fn event(&mut self, cx: &mut Cx, event: Event) {
-        let requests_changed = matches!(&event, Event::Chat(chat) if chat.folder.as_deref() == Some("requests"));
+        let requests_changed =
+            matches!(&event, Event::Chat(chat) if chat.folder.as_deref() == Some("requests"));
         if self.store.event(event) {
             self.dirty = true;
             cx.redraw();
@@ -591,9 +687,17 @@ impl App for Instagram {
         };
         if matches!(ask, Ask::Chats) {
             // Requests live in their own folder: listed once the inbox is in.
-            self.perform(cx, Action::request("chats.list", json!({"limit": 100, "folder": "requests"}), Ask::Other));
+            self.perform(
+                cx,
+                Action::request(
+                    "chats.list",
+                    json!({"limit": 100, "folder": "requests"}),
+                    Ask::Other,
+                ),
+            );
         }
-        let requests = matches!(ask, Ask::Other) && result.as_ref().is_ok_and(|v| v.get("chats").is_some());
+        let requests =
+            matches!(ask, Ask::Other) && result.as_ref().is_ok_and(|v| v.get("chats").is_some());
         if requests {
             if let Ok(value) = &result {
                 for chat in value["chats"].as_array().into_iter().flatten() {
@@ -617,9 +721,15 @@ impl App for Instagram {
             match gesture {
                 Gesture::Down { y, .. } => {
                     self.finger = Some(y.round() as i32);
-                    eprintln!("instagram: press at {:.3} y {}", monotonic_ms(), y.round() as i32 + 124);
+                    eprintln!(
+                        "instagram: press at {:.3} y {}",
+                        monotonic_ms(),
+                        y.round() as i32 + 124
+                    );
                 }
-                Gesture::DragStart { y, .. } | Gesture::Drag { y, .. } | Gesture::DragEnd { y, .. } => self.finger = Some(y.round() as i32),
+                Gesture::DragStart { y, .. }
+                | Gesture::Drag { y, .. }
+                | Gesture::DragEnd { y, .. } => self.finger = Some(y.round() as i32),
                 _ => {}
             }
         }
@@ -801,7 +911,10 @@ impl App for Instagram {
             return;
         }
         let max = self.max_scroll(width, height);
-        let moving = self.top().scroll().is_some_and(|scroll| scroll.step(max, now));
+        let moving = self
+            .top()
+            .scroll()
+            .is_some_and(|scroll| scroll.step(max, now));
         if moving {
             cx.animate();
         }
@@ -824,17 +937,21 @@ impl App for Instagram {
         if self.stories.is_some() || self.tab != Tab::Messages {
             return None;
         }
-        self.stacks[Tab::Messages as usize].last().and_then(|screen| screen.chat()).map(str::to_owned)
+        self.stacks[Tab::Messages as usize]
+            .last()
+            .and_then(|screen| screen.chat())
+            .map(str::to_owned)
     }
 
     fn draw(&mut self, canvas: &mut Canvas, cx: &mut DrawCx) {
         let now = cx.now;
         let started = Instant::now();
         // A picture the last frame waited for arrived: draw it.
-        let arrived = self
-            .missing
-            .iter()
-            .any(|want| cx.media.peek(&want.reference, want.w, want.h, want.fit).is_some());
+        let arrived = self.missing.iter().any(|want| {
+            cx.media
+                .peek(&want.reference, want.w, want.h, want.fit)
+                .is_some()
+        });
         for want in &self.missing {
             let _ = cx.media.get(&want.reference, want.w, want.h, want.fit, now);
         }
@@ -843,12 +960,18 @@ impl App for Instagram {
         let mut kind = "full";
         if stories {
             let viewer = self.stories.as_mut().expect("open");
-            let partial = !cx.full && !self.dirty && !arrived && self.last.as_ref().is_some_and(|last| last.stories);
+            let partial = !cx.full
+                && !self.dirty
+                && !arrived
+                && self.last.as_ref().is_some_and(|last| last.stories);
             if partial {
                 kind = "progress";
                 viewer.draw_progress(canvas, &self.store, width, now, false);
                 let (y0, y1) = StoryViewer::progress_rows();
-                cx.damage = Some(Damage { moved: None, rows: vec![(y0, y1)] });
+                cx.damage = Some(Damage {
+                    moved: None,
+                    rows: vec![(y0, y1)],
+                });
             } else {
                 self.full_frame(canvas, cx.media, now);
             }
@@ -871,7 +994,11 @@ impl App for Instagram {
             let inverted = self.top().inverted();
             let blit_ok = self.top().blit_ok() && self.toast.is_none();
             let same = self.last.as_ref().is_some_and(|last| {
-                !last.stories && last.tab == self.tab && last.depth == depth && last.screen == screen_id && last.area == geometry
+                !last.stories
+                    && last.tab == self.tab
+                    && last.depth == depth
+                    && last.screen == screen_id
+                    && last.area == geometry
             });
             let view_h = (area.bottom - area.top) as i32;
             let (top, bottom) = (area.top as i32, area.bottom as i32);
@@ -881,12 +1008,18 @@ impl App for Instagram {
             let arrived_rows: Option<Vec<(i32, i32)>> = arrived.then(|| {
                 self.missing
                     .iter()
-                    .filter(|want| cx.media.peek(&want.reference, want.w, want.h, want.fit).is_some())
+                    .filter(|want| {
+                        cx.media
+                            .peek(&want.reference, want.w, want.h, want.fit)
+                            .is_some()
+                    })
                     .map(|want| want.rows)
                     .collect()
             });
             // (Pictures in the bars and the tab bar: drawn with the whole frame.)
-            let rows_ok = arrived_rows.as_ref().is_none_or(|rows| rows.iter().all(|&(a, _)| a != i32::MIN));
+            let rows_ok = arrived_rows
+                .as_ref()
+                .is_none_or(|rows| rows.iter().all(|&(a, _)| a != i32::MIN));
             if same && !cx.full && !self.dirty && rows_ok && blit_ok {
                 let last_offset = self.last.as_ref().map_or(0.0, |last| last.offset);
                 let delta = (area.offset - last_offset) as i32;
@@ -896,9 +1029,17 @@ impl App for Instagram {
                     let mut bands: Vec<(i32, i32)> = Vec::new();
                     if dy != 0 {
                         canvas.move_rows(top, bottom, dy);
-                        bands.push(if dy < 0 { (bottom + dy, bottom) } else { (top, top + dy) });
+                        bands.push(if dy < 0 {
+                            (bottom + dy, bottom)
+                        } else {
+                            (top, top + dy)
+                        });
                         // What waits for pictures moved with the rows.
-                        for want in self.missing.iter_mut().filter(|want| want.rows.0 != i32::MIN) {
+                        for want in self
+                            .missing
+                            .iter_mut()
+                            .filter(|want| want.rows.0 != i32::MIN)
+                        {
                             want.rows = (want.rows.0 + dy, want.rows.1 + dy);
                         }
                     }
@@ -909,7 +1050,11 @@ impl App for Instagram {
                         }
                     }
                     // Drawn below; what is still missing is asked for again there.
-                    self.missing.retain(|want| cx.media.peek(&want.reference, want.w, want.h, want.fit).is_none());
+                    self.missing.retain(|want| {
+                        cx.media
+                            .peek(&want.reference, want.w, want.h, want.fit)
+                            .is_none()
+                    });
                     let bands = merge_rows(bands);
                     cx.damage = Some(Damage {
                         moved: (dy != 0).then_some((top, bottom, dy)),
@@ -926,10 +1071,24 @@ impl App for Instagram {
                             missing: &mut self.missing,
                             cache: &self.cache,
                         };
-                        screen.draw(canvas, &mut p, store, Area { band: (a as f32, b as f32), ..area });
+                        screen.draw(
+                            canvas,
+                            &mut p,
+                            store,
+                            Area {
+                                band: (a as f32, b as f32),
+                                ..area
+                            },
+                        );
                     }
                     canvas.reset_clip();
-                    kind = if bands.is_empty() { "none" } else if dy == 0 { "pictures" } else { "band" };
+                    kind = if bands.is_empty() {
+                        "none"
+                    } else if dy == 0 {
+                        "pictures"
+                    } else {
+                        "band"
+                    };
                     done = true;
                     if self.verify && !bands.is_empty() {
                         if !self.check_band(canvas, cx.media, now, area) {
@@ -961,9 +1120,16 @@ impl App for Instagram {
                 started.elapsed().as_secs_f64() * 1000.0
             );
             // Screen rows: Moon puts the window under its 124-row status bar.
-            eprintln!("instagram: shown at {:.3} finger {}", monotonic_ms(), self.finger.map_or(-1, |y| y + 124));
+            eprintln!(
+                "instagram: shown at {:.3} finger {}",
+                monotonic_ms(),
+                self.finger.map_or(-1, |y| y + 124)
+            );
             if let Some((chat, at)) = &self.opening
-                && self.stacks[Tab::Messages as usize].last().and_then(|s| s.chat()) == Some(chat.as_str())
+                && self.stacks[Tab::Messages as usize]
+                    .last()
+                    .and_then(|s| s.chat())
+                    == Some(chat.as_str())
                 && self.store.threads.get(chat).is_some_and(|t| t.loaded)
             {
                 eprintln!(
@@ -992,7 +1158,10 @@ fn merge_rows(mut rows: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
 
 /// CLOCK_MONOTONIC in milliseconds (the clock the bench's touch reports use).
 fn monotonic_ms() -> f64 {
-    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     // SAFETY: writes the time into a live timespec.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
     now.tv_sec as f64 * 1000.0 + now.tv_nsec as f64 / 1e6

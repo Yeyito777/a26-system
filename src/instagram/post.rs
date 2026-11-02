@@ -11,8 +11,8 @@ use super::app::{Action, Area, Screen};
 use super::feed::{self, Layouts, PostHit};
 use super::model::{Comment, Post};
 use super::paint::{
-    self, Icon, Line, Paint, Ring, BG, BODY, BODY_BOLD, DP, MARGIN, SAFE_BOTTOM, SECONDARY, SEPARATOR, STATUS,
-    TAB_BAR, TEXT, TINY, TOP_BAR,
+    self, BG, BODY, BODY_BOLD, DP, Icon, Line, MARGIN, Paint, Ring, SAFE_BOTTOM, SECONDARY,
+    SEPARATOR, STATUS, TAB_BAR, TEXT, TINY, TOP_BAR,
 };
 use super::profile::ProfileScreen;
 use super::store::{Ask, Store};
@@ -32,7 +32,10 @@ struct LaidComment {
 }
 
 pub struct PostScreen {
+    /// The post's id, or `code:SHORTCODE` for one known by its link.
     id: String,
+    code: Option<String>,
+    asked_comments: bool,
     scroll: Scroll,
     layouts: Layouts,
     generation: u64,
@@ -46,8 +49,19 @@ pub struct PostScreen {
 
 impl PostScreen {
     pub fn new(id: String, comments: bool) -> Self {
+        Self::make(id, None, comments)
+    }
+
+    /// A post known by its link's shortcode (one shared in a chat).
+    pub fn by_code(code: String) -> Self {
+        Self::make(format!("code:{code}"), Some(code), false)
+    }
+
+    fn make(id: String, code: Option<String>, comments: bool) -> Self {
         Self {
             id,
+            code,
+            asked_comments: false,
             scroll: Scroll::default(),
             layouts: Layouts::default(),
             generation: u64::MAX,
@@ -64,8 +78,29 @@ impl PostScreen {
         store
             .posts
             .get(&self.id)
-            .or_else(|| store.feed.posts.iter().find(|p| p.id == self.id))
-            .or_else(|| store.grids.values().chain(store.tagged.values()).flat_map(|g| g.posts.iter()).find(|p| p.id == self.id))
+            .or_else(|| {
+                store
+                    .feed
+                    .posts
+                    .iter()
+                    .find(|p| p.id == self.id || self.code.is_some() && p.code == self.code)
+            })
+            .or_else(|| {
+                store
+                    .grids
+                    .values()
+                    .chain(store.tagged.values())
+                    .flat_map(|g| g.posts.iter())
+                    .find(|p| p.id == self.id)
+            })
+    }
+
+    /// The post's real id (comments are kept under it), once known.
+    fn post_id(&self, store: &Store) -> Option<String> {
+        if self.code.is_none() {
+            return Some(self.id.clone());
+        }
+        self.post(store).map(|post| post.id.clone())
     }
 
     fn lay_comment(comment: &Comment, width: f32, reply: bool) -> (Vec<Line>, f32) {
@@ -99,7 +134,7 @@ impl Screen for PostScreen {
         }
         y += 20.0;
         self.comments.clear();
-        if let Some(comments) = store.comments.get(&self.id) {
+        if let Some(comments) = self.post_id(store).and_then(|id| store.comments.get(&id)) {
             for comment in &comments.items {
                 let (lines, h) = Self::lay_comment(comment, width, false);
                 self.comments.push(LaidComment {
@@ -140,7 +175,17 @@ impl Screen for PostScreen {
         if let Some(post) = self.post(store) {
             if area.visible(base, base + self.post_h) {
                 let layout = self.layouts.get(post, area.width, true).clone();
-                feed::draw_post(canvas, p, post, &layout, base, area.width, self.carousel.min(post.media.len().saturating_sub(1)), 0.0, area.band);
+                feed::draw_post(
+                    canvas,
+                    p,
+                    post,
+                    &layout,
+                    base,
+                    area.width,
+                    self.carousel.min(post.media.len().saturating_sub(1)),
+                    0.0,
+                    area.band,
+                );
             }
         } else {
             super::direct::spinner(canvas, area.width / 2.0, area.top + 300.0);
@@ -159,7 +204,15 @@ impl Screen for PostScreen {
             }
             let indent = if laid.reply { AVATAR + 30.0 } else { 0.0 };
             let d = if laid.reply { AVATAR * 0.75 } else { AVATAR };
-            paint::avatar(canvas, p, laid.comment.author.avatar_ref(), MARGIN + indent + d / 2.0, y + 30.0 + d / 2.0, d, Ring::from_story(laid.comment.author.story.as_deref()));
+            paint::avatar(
+                canvas,
+                p,
+                laid.comment.author.avatar_ref(),
+                MARGIN + indent + d / 2.0,
+                y + 30.0 + d / 2.0,
+                d,
+                Ring::from_story(laid.comment.author.story.as_deref()),
+            );
             let x = TEXT_X + indent;
             for (n, line) in laid.lines.iter().enumerate() {
                 paint::draw_line(canvas, line, x, y + 66.0 + n as f32 * 50.0);
@@ -167,24 +220,60 @@ impl Screen for PostScreen {
             let meta_y = y + 66.0 + laid.lines.len() as f32 * 50.0 + 6.0;
             let mut meta = paint::age_short(laid.comment.ts, now);
             if laid.comment.likes > 0 {
-                meta.push_str(&format!("   {} like{}", paint::count(laid.comment.likes), if laid.comment.likes == 1 { "" } else { "s" }));
+                meta.push_str(&format!(
+                    "   {} like{}",
+                    paint::count(laid.comment.likes),
+                    if laid.comment.likes == 1 { "" } else { "s" }
+                ));
             }
             meta.push_str("   Reply");
             paint::draw_text(canvas, &meta, x, meta_y, TINY, SECONDARY);
-            paint::icon(canvas, p.cache, Icon::Heart, area.width - MARGIN - 40.0, y + 40.0, 40.0, laid.comment.liked, if laid.comment.liked { paint::RED } else { SECONDARY });
+            paint::icon(
+                canvas,
+                p.cache,
+                Icon::Heart,
+                area.width - MARGIN - 40.0,
+                y + 40.0,
+                40.0,
+                laid.comment.liked,
+                if laid.comment.liked {
+                    paint::RED
+                } else {
+                    SECONDARY
+                },
+            );
             if !laid.reply && laid.comment.replies > 0 {
                 let open = self.open_replies.contains(&laid.comment.id);
-                let label = if open { "Hide replies".to_owned() } else { format!("View {} more repl{}", laid.comment.replies, if laid.comment.replies == 1 { "y" } else { "ies" }) };
+                let label = if open {
+                    "Hide replies".to_owned()
+                } else {
+                    format!(
+                        "View {} more repl{}",
+                        laid.comment.replies,
+                        if laid.comment.replies == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        }
+                    )
+                };
                 canvas.fill_rect(x as i32, (meta_y + 44.0) as i32, 60, 2, SECONDARY, 1.0);
                 paint::draw_text(canvas, &label, x + 80.0, meta_y + 56.0, TINY, SECONDARY);
             }
         }
-        let comments = store.comments.get(&self.id);
+        let comments = self.post_id(store).and_then(|id| store.comments.get(&id));
         let end = base + self.height - 260.0;
         if area.visible(end, end + 260.0) {
             match comments {
                 Some(c) if c.loaded && c.items.is_empty() => {
-                    paint::draw_text_centered(canvas, "No comments yet", area.width / 2.0, end + 120.0, BODY, SECONDARY);
+                    paint::draw_text_centered(
+                        canvas,
+                        "No comments yet",
+                        area.width / 2.0,
+                        end + 120.0,
+                        BODY,
+                        SECONDARY,
+                    );
                 }
                 Some(c) if c.loaded && c.cursor.is_none() => {}
                 _ => super::direct::spinner(canvas, area.width / 2.0, end + 100.0),
@@ -195,14 +284,38 @@ impl Screen for PostScreen {
     fn chrome(&mut self, canvas: &mut Canvas, p: &mut Paint, store: &Store, area: Area) {
         canvas.fill_rect(0, 0, canvas.width, area.top as i32, BG, 1.0);
         let cy = STATUS + TOP_BAR / 2.0;
-        paint::icon(canvas, p.cache, Icon::Back, MARGIN - 10.0, cy - 36.0, 72.0, false, TEXT);
-        let title = if self.post(store).is_some_and(|post| post.reel) { "Reel" } else { "Post" };
-        paint::draw_text(canvas, title, MARGIN + 100.0, paint::baseline(cy, paint::TITLE), paint::TITLE, TEXT);
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Back,
+            MARGIN - 10.0,
+            cy - 36.0,
+            72.0,
+            false,
+            TEXT,
+        );
+        let title = if self.post(store).is_some_and(|post| post.reel) {
+            "Reel"
+        } else {
+            "Post"
+        };
+        paint::draw_text(
+            canvas,
+            title,
+            MARGIN + 100.0,
+            paint::baseline(cy, paint::TITLE),
+            paint::TITLE,
+            TEXT,
+        );
     }
 
     fn tap(&mut self, store: &Store, x: f32, y: f32, area: Area) -> Action {
         if y < area.top {
-            return if x < MARGIN + 110.0 { Action::Pop } else { Action::None };
+            return if x < MARGIN + 110.0 {
+                Action::Pop
+            } else {
+                Action::None
+            };
         }
         let cy = y - area.top + area.offset;
         if cy < self.post_h {
@@ -228,7 +341,10 @@ impl Screen for PostScreen {
             if cy >= laid.y && cy < laid.y + laid.h {
                 let indent = if laid.reply { AVATAR + 30.0 } else { 0.0 };
                 if x < TEXT_X + indent {
-                    return Action::Push(Box::new(ProfileScreen::user(laid.comment.author.id.clone(), laid.comment.author.username.clone())));
+                    return Action::Push(Box::new(ProfileScreen::user(
+                        laid.comment.author.id.clone(),
+                        laid.comment.author.username.clone(),
+                    )));
                 }
                 if x > area.width - MARGIN - 80.0 {
                     return Action::Toast("Liking comments needs writes on.".into());
@@ -242,10 +358,11 @@ impl Screen for PostScreen {
                     }
                     self.open_replies.push(id.clone());
                     self.generation = u64::MAX;
+                    let post = self.post_id(store).unwrap_or_default();
                     return Action::request(
                         "instagram.replies",
-                        json!({"post": self.id, "comment": id}),
-                        Ask::Replies { post: self.id.clone(), comment: id },
+                        json!({"post": post, "comment": id}),
+                        Ask::Replies { post, comment: id },
                     );
                 }
                 return Action::None;
@@ -255,7 +372,22 @@ impl Screen for PostScreen {
     }
 
     fn tick(&mut self, store: &Store, area: Area, _now: Instant) -> Action {
-        if let Some(comments) = store.comments.get(&self.id)
+        let Some(id) = self.post_id(store) else {
+            return Action::None;
+        };
+        // A post opened by its link: its comments once its id is known.
+        if !self.asked_comments && !store.comments.contains_key(&id) {
+            self.asked_comments = true;
+            return Action::request(
+                "instagram.comments",
+                json!({"post": id}),
+                Ask::Comments {
+                    post: id,
+                    more: false,
+                },
+            );
+        }
+        if let Some(comments) = store.comments.get(&id)
             && comments.loaded
             && !comments.loading
             && let Some(cursor) = &comments.cursor
@@ -263,8 +395,11 @@ impl Screen for PostScreen {
         {
             return Action::request(
                 "instagram.comments",
-                json!({"post": self.id, "cursor": cursor}),
-                Ask::Comments { post: self.id.clone(), more: true },
+                json!({"post": id, "cursor": cursor}),
+                Ask::Comments {
+                    post: id.clone(),
+                    more: true,
+                },
             );
         }
         Action::None
@@ -273,16 +408,29 @@ impl Screen for PostScreen {
     fn shown(&mut self, store: &Store) -> Action {
         let mut actions = Vec::new();
         if !store.posts.contains_key(&self.id) {
-            actions.push(Action::request("instagram.post", json!({"post": self.id}), Ask::Post { id: self.id.clone() }));
+            let args = match &self.code {
+                Some(code) => json!({"code": code}),
+                None => json!({"post": self.id}),
+            };
+            actions.push(Action::request(
+                "instagram.post",
+                args,
+                Ask::Post {
+                    id: self.id.clone(),
+                },
+            ));
         }
-        if !store.comments.contains_key(&self.id) {
-            actions.push(Action::request("instagram.comments", json!({"post": self.id}), Ask::Comments { post: self.id.clone(), more: false }));
+        if self.code.is_none() && !store.comments.contains_key(&self.id) {
+            self.asked_comments = true;
+            actions.push(Action::request(
+                "instagram.comments",
+                json!({"post": self.id}),
+                Ask::Comments {
+                    post: self.id.clone(),
+                    more: false,
+                },
+            ));
         }
         Action::Many(actions)
     }
-}
-
-/// A one-line summary of a comment (activity rows).
-pub fn comment_line(comment: &Comment) -> String {
-    format!("{} {}", comment.author.handle(), comment.text)
 }

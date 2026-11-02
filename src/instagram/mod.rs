@@ -7,14 +7,16 @@ mod activity;
 mod app;
 mod direct;
 mod feed;
+mod follows;
 mod model;
 mod paint;
 mod post;
 mod profile;
 mod search;
 mod settings;
-mod stories;
+mod signin;
 mod store;
+mod stories;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     crate::social::shell::run(app::Instagram::new())

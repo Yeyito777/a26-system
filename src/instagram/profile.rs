@@ -11,8 +11,8 @@ use serde_json::json;
 use super::app::{Action, Area, Screen};
 use super::model::{Post, Profile};
 use super::paint::{
-    self, Icon, Line, Paint, Ring, BG, BLUE, BODY, BODY_BOLD, BUTTON, DP, LINK, MARGIN, SAFE_BOTTOM, SECONDARY,
-    SEPARATOR, SMALL, STATUS, TAB_BAR, TEXT, TINY, TOP_BAR,
+    self, BG, BLUE, BODY, BODY_BOLD, BUTTON, DP, Icon, LINK, Line, MARGIN, Paint, Ring,
+    SAFE_BOTTOM, SECONDARY, SEPARATOR, SMALL, STATUS, TAB_BAR, TEXT, TINY, TOP_BAR,
 };
 use super::post::PostScreen;
 use super::settings::SettingsScreen;
@@ -74,11 +74,16 @@ impl ProfileScreen {
 
     fn user_id(&self, store: &Store) -> Option<String> {
         if self.own {
-            return store.account().map(|a| a.id.clone()).filter(|id| !id.is_empty());
+            return store
+                .account()
+                .map(|a| a.id.clone())
+                .filter(|id| !id.is_empty());
         }
-        self.id
-            .clone()
-            .or_else(|| self.username.as_ref().and_then(|u| store.usernames.get(u).cloned()))
+        self.id.clone().or_else(|| {
+            self.username
+                .as_ref()
+                .and_then(|u| store.usernames.get(u).cloned())
+        })
     }
 
     fn profile<'a>(&self, store: &'a Store) -> Option<&'a Profile> {
@@ -89,7 +94,11 @@ impl ProfileScreen {
         let Some(id) = self.user_id(store) else {
             return &[];
         };
-        let map = if self.tagged { &store.tagged } else { &store.grids };
+        let map = if self.tagged {
+            &store.tagged
+        } else {
+            &store.grids
+        };
         map.get(&id).map_or(&[], |grid| grid.posts.as_slice())
     }
 
@@ -103,17 +112,44 @@ impl ProfileScreen {
         match self.user_id(store) {
             Some(id) => {
                 if self.own {
-                    actions.push(Action::request("instagram.profile", json!({"user": id, "cached": true}), Ask::Profile { key: id.clone(), cached: true }));
+                    actions.push(Action::request(
+                        "instagram.profile",
+                        json!({"user": id, "cached": true}),
+                        Ask::Profile {
+                            key: id.clone(),
+                            cached: true,
+                        },
+                    ));
                 }
-                actions.push(Action::request("instagram.profile", json!({"user": id}), Ask::Profile { key: id.clone(), cached: false }));
-                actions.push(Action::request("instagram.highlights", json!({"user": id}), Ask::Highlights { user: id.clone() }));
+                actions.push(Action::request(
+                    "instagram.profile",
+                    json!({"user": id}),
+                    Ask::Profile {
+                        key: id.clone(),
+                        cached: false,
+                    },
+                ));
+                actions.push(Action::request(
+                    "instagram.highlights",
+                    json!({"user": id}),
+                    Ask::Highlights { user: id.clone() },
+                ));
                 if !self.asked_posts {
                     self.asked_posts = true;
-                    let username = self.username.clone().or_else(|| store.profiles.get(&id).and_then(|p| p.user.username.clone()));
+                    let username = self.username.clone().or_else(|| {
+                        store
+                            .profiles
+                            .get(&id)
+                            .and_then(|p| p.user.username.clone())
+                    });
                     actions.push(Action::request(
                         "instagram.posts",
                         json!({"user": id, "username": username}),
-                        Ask::Posts { user: id.clone(), tagged: false, more: false },
+                        Ask::Posts {
+                            user: id.clone(),
+                            tagged: false,
+                            more: false,
+                        },
                     ));
                 }
             }
@@ -122,7 +158,10 @@ impl ProfileScreen {
                     actions.push(Action::request(
                         "instagram.profile",
                         json!({"username": username}),
-                        Ask::Profile { key: username.clone(), cached: false },
+                        Ask::Profile {
+                            key: username.clone(),
+                            cached: false,
+                        },
                     ));
                 }
             }
@@ -162,10 +201,21 @@ impl Screen for ProfileScreen {
                 }]);
             }
             for paragraph in profile.bio.split('\n') {
-                lines.extend(paint::wrap_runs(&paint::rich_words(paragraph, BODY, TEXT), width - 2.0 * MARGIN, 10).0);
+                lines.extend(
+                    paint::wrap_runs(
+                        &paint::rich_words(paragraph, BODY, TEXT),
+                        width - 2.0 * MARGIN,
+                        10,
+                    )
+                    .0,
+                );
             }
             for link in &profile.links {
-                let label = if link.title.is_empty() { link.url.clone() } else { link.url.trim_start_matches("https://").to_owned() };
+                let label = if link.title.is_empty() {
+                    link.url.clone()
+                } else {
+                    link.url.trim_start_matches("https://").to_owned()
+                };
                 lines.push(vec![paint::Run {
                     text: paint::fit(&label, BODY_BOLD, width - 2.0 * MARGIN),
                     font: BODY_BOLD,
@@ -182,7 +232,10 @@ impl Screen for ProfileScreen {
         self.buttons_y = y;
         y += BUTTON_H + 40.0;
         self.highlights_y = y;
-        let has_highlights = self.user_id(store).and_then(|id| store.highlights.get(&id)).is_some_and(|h| !h.is_empty());
+        let has_highlights = self
+            .user_id(store)
+            .and_then(|id| store.highlights.get(&id))
+            .is_some_and(|h| !h.is_empty());
         if has_highlights {
             y += HIGHLIGHT + 110.0;
         }
@@ -193,7 +246,11 @@ impl Screen for ProfileScreen {
         let _ = tw;
         let locked = self.profile(store).is_some_and(|p| p.locked);
         let count = self.posts(store).len();
-        y += if locked { 700.0 } else { (count.div_ceil(3)) as f32 * (th + GAP) + 200.0 };
+        y += if locked {
+            700.0
+        } else {
+            (count.div_ceil(3)) as f32 * (th + GAP) + 200.0
+        };
         self.height = y;
         y
     }
@@ -206,17 +263,48 @@ impl Screen for ProfileScreen {
         if area.visible(base, base + self.buttons_y) {
             let cy = base + 40.0 + AVATAR / 2.0;
             let (avatar, ring) = match profile {
-                Some(profile) => (profile.user.avatar_ref().map(str::to_owned), Ring::from_story(profile.user.story.as_deref())),
-                None if self.own => (account.as_ref().and_then(|a| a.avatar.as_ref()).map(|m| m.reference.clone()), Ring::None),
+                Some(profile) => (
+                    profile.user.avatar_ref().map(str::to_owned),
+                    Ring::from_story(profile.user.story.as_deref()),
+                ),
+                None if self.own => (
+                    account
+                        .as_ref()
+                        .and_then(|a| a.avatar.as_ref())
+                        .map(|m| m.reference.clone()),
+                    Ring::None,
+                ),
                 None => (None, Ring::None),
             };
-            paint::avatar(canvas, p, avatar.as_deref(), MARGIN + AVATAR / 2.0, cy, AVATAR, ring);
+            paint::avatar(
+                canvas,
+                p,
+                avatar.as_deref(),
+                MARGIN + AVATAR / 2.0,
+                cy,
+                AVATAR,
+                ring,
+            );
             if let Some(profile) = profile {
                 let left = MARGIN + AVATAR + 40.0;
                 let col = (width - left - MARGIN) / 3.0;
-                for (n, (value, label)) in [(profile.posts, "posts"), (profile.followers, "followers"), (profile.following, "following")].iter().enumerate() {
+                for (n, (value, label)) in [
+                    (profile.posts, "posts"),
+                    (profile.followers, "followers"),
+                    (profile.following, "following"),
+                ]
+                .iter()
+                .enumerate()
+                {
                     let cx = left + col * (n as f32 + 0.5);
-                    paint::draw_text_centered(canvas, &paint::count(*value), cx, cy - 4.0, paint::HEADLINE, TEXT);
+                    paint::draw_text_centered(
+                        canvas,
+                        &paint::count(*value),
+                        cx,
+                        cy - 4.0,
+                        paint::HEADLINE,
+                        TEXT,
+                    );
                     paint::draw_text_centered(canvas, label, cx, cy + 46.0, BODY, TEXT);
                 }
                 let mut ly = base + 40.0 + AVATAR + 30.0;
@@ -235,15 +323,33 @@ impl Screen for ProfileScreen {
                 match profile.map(|p| p.relation.as_str()) {
                     Some("following") => vec![("Following", false), ("Message", false)],
                     Some("requested") => vec![("Requested", false), ("Message", false)],
-                    _ => vec![(if profile.is_some_and(|p| p.followed_by) { "Follow back" } else { "Follow" }, true), ("Message", false)],
+                    _ => vec![
+                        (
+                            if profile.is_some_and(|p| p.followed_by) {
+                                "Follow back"
+                            } else {
+                                "Follow"
+                            },
+                            true,
+                        ),
+                        ("Message", false),
+                    ],
                 }
             };
             let gap = 16.0;
-            let bw = (width - 2.0 * MARGIN - gap * (labels.len() as f32 - 1.0)) / labels.len() as f32;
+            let bw =
+                (width - 2.0 * MARGIN - gap * (labels.len() as f32 - 1.0)) / labels.len() as f32;
             for (n, (label, primary)) in labels.iter().enumerate() {
                 let r = RectF::new(MARGIN + n as f32 * (bw + gap), by, bw, BUTTON_H);
                 canvas.fill_rrect(r, 8.0 * DP, if *primary { BLUE } else { BUTTON }, 1.0);
-                paint::draw_text_centered(canvas, label, r.x + r.w / 2.0, paint::baseline(r.y + r.h / 2.0, BODY_BOLD), BODY_BOLD, TEXT);
+                paint::draw_text_centered(
+                    canvas,
+                    label,
+                    r.x + r.w / 2.0,
+                    paint::baseline(r.y + r.h / 2.0, BODY_BOLD),
+                    BODY_BOLD,
+                    TEXT,
+                );
             }
         }
         // Highlights.
@@ -260,7 +366,15 @@ impl Screen for ProfileScreen {
                 }
                 let cy = hy + HIGHLIGHT / 2.0 + 10.0;
                 canvas.stroke_circle(cx, cy, HIGHLIGHT / 2.0, 3.0, 0x3a3a3a, 1.0);
-                paint::avatar(canvas, p, highlight.cover.as_ref().map(|m| m.reference.as_str()), cx, cy, HIGHLIGHT - 16.0, Ring::None);
+                paint::avatar(
+                    canvas,
+                    p,
+                    highlight.cover.as_ref().map(|m| m.reference.as_str()),
+                    cx,
+                    cy,
+                    HIGHLIGHT - 16.0,
+                    Ring::None,
+                );
                 let title = paint::fit(&highlight.title, TINY, slot - 10.0);
                 paint::draw_text_centered(canvas, &title, cx, hy + HIGHLIGHT + 70.0, TINY, TEXT);
             }
@@ -272,21 +386,67 @@ impl Screen for ProfileScreen {
             for (n, icon) in [Icon::Grid, Icon::Tagged].iter().enumerate() {
                 let active = (n == 1) == self.tagged;
                 let cx = half * (n as f32 + 0.5);
-                paint::icon(canvas, p.cache, *icon, cx - 34.0, ty + TABS_H / 2.0 - 34.0, 68.0, false, if active { TEXT } else { SECONDARY });
+                paint::icon(
+                    canvas,
+                    p.cache,
+                    *icon,
+                    cx - 34.0,
+                    ty + TABS_H / 2.0 - 34.0,
+                    68.0,
+                    false,
+                    if active { TEXT } else { SECONDARY },
+                );
                 if active {
-                    canvas.fill_rect((half * n as f32) as i32, (ty + TABS_H - 4.0) as i32, half as i32, 4, TEXT, 1.0);
+                    canvas.fill_rect(
+                        (half * n as f32) as i32,
+                        (ty + TABS_H - 4.0) as i32,
+                        half as i32,
+                        4,
+                        TEXT,
+                        1.0,
+                    );
                 }
             }
-            canvas.fill_rect(0, (ty + TABS_H - 1.0) as i32, width as i32, 1, SEPARATOR, 1.0);
+            canvas.fill_rect(
+                0,
+                (ty + TABS_H - 1.0) as i32,
+                width as i32,
+                1,
+                SEPARATOR,
+                1.0,
+            );
         }
         // Grid.
         let gy = base + self.grid_y;
         if profile.is_some_and(|p| p.locked) {
             if area.visible(gy, gy + 600.0) {
                 canvas.stroke_circle(width / 2.0, gy + 160.0, 90.0, 5.0, TEXT, 1.0);
-                paint::icon(canvas, p.cache, Icon::Lock, width / 2.0 - 45.0, gy + 115.0, 90.0, false, TEXT);
-                paint::draw_text_centered(canvas, "This account is private", width / 2.0, gy + 330.0, BODY_BOLD, TEXT);
-                paint::draw_text_centered(canvas, "Follow to see their photos and videos.", width / 2.0, gy + 390.0, BODY, SECONDARY);
+                paint::icon(
+                    canvas,
+                    p.cache,
+                    Icon::Lock,
+                    width / 2.0 - 45.0,
+                    gy + 115.0,
+                    90.0,
+                    false,
+                    TEXT,
+                );
+                paint::draw_text_centered(
+                    canvas,
+                    "This account is private",
+                    width / 2.0,
+                    gy + 330.0,
+                    BODY_BOLD,
+                    TEXT,
+                );
+                paint::draw_text_centered(
+                    canvas,
+                    "Follow to see their photos and videos.",
+                    width / 2.0,
+                    gy + 390.0,
+                    BODY,
+                    SECONDARY,
+                );
             }
             return;
         }
@@ -316,17 +476,36 @@ impl Screen for ProfileScreen {
                 None
             };
             if let Some(icon) = icon {
-                paint::icon(canvas, p.cache, icon, x + tw - 66.0, y + 18.0, 48.0, true, 0xffffff);
+                paint::icon(
+                    canvas,
+                    p.cache,
+                    icon,
+                    x + tw - 66.0,
+                    y + 18.0,
+                    48.0,
+                    true,
+                    0xffffff,
+                );
             }
         }
         let user = self.user_id(store);
-        let grid = user.as_ref().and_then(|id| if self.tagged { store.tagged.get(id) } else { store.grids.get(id) });
+        let grid = user.as_ref().and_then(|id| {
+            if self.tagged {
+                store.tagged.get(id)
+            } else {
+                store.grids.get(id)
+            }
+        });
         let end = gy + posts.len().div_ceil(3) as f32 * (th + GAP);
         if area.visible(end, end + 200.0) {
             if grid.is_none_or(|g| g.loading || !g.loaded) {
                 super::direct::spinner(canvas, width / 2.0, end + 100.0);
             } else if posts.is_empty() {
-                let note = if self.tagged { "No photos of them yet" } else { "No posts yet" };
+                let note = if self.tagged {
+                    "No photos of them yet"
+                } else {
+                    "No posts yet"
+                };
                 paint::draw_text_centered(canvas, note, width / 2.0, end + 120.0, BODY, SECONDARY);
             }
         }
@@ -334,7 +513,12 @@ impl Screen for ProfileScreen {
         let next = ((area.bottom - gy) / (th + GAP)).ceil().max(0.0) as usize * 3;
         for post in posts.iter().skip(next).take(9) {
             if let Some(media) = post.media.first() {
-                p.prefetch(media.thumb.as_deref().unwrap_or(&media.reference), tw.round() as u32, th.round() as u32, Fit::Cover);
+                p.prefetch(
+                    media.thumb.as_deref().unwrap_or(&media.reference),
+                    tw.round() as u32,
+                    th.round() as u32,
+                    Fit::Cover,
+                );
             }
         }
     }
@@ -346,7 +530,13 @@ impl Screen for ProfileScreen {
         let name = profile
             .and_then(|p| p.user.username.clone())
             .or_else(|| self.username.clone())
-            .or_else(|| if self.own { store.account().and_then(|a| a.username.clone()) } else { None })
+            .or_else(|| {
+                if self.own {
+                    store.account().and_then(|a| a.username.clone())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_default();
         if self.own {
             let mut x = MARGIN;
@@ -354,17 +544,69 @@ impl Screen for ProfileScreen {
                 paint::icon(canvas, p.cache, Icon::Lock, x, cy - 24.0, 48.0, false, TEXT);
                 x += 60.0;
             }
-            let w = crate::text::draw(canvas, &name, x, paint::baseline(cy, paint::TITLE), Weight::Bold, 54.0, TEXT, 1.0);
-            paint::icon(canvas, p.cache, Icon::ChevronDown, x + w + 10.0, cy - 18.0, 40.0, false, TEXT);
-            paint::icon(canvas, p.cache, Icon::Menu, area.width - MARGIN - 66.0, cy - 33.0, 66.0, false, TEXT);
+            let w = crate::text::draw(
+                canvas,
+                &name,
+                x,
+                paint::baseline(cy, paint::TITLE),
+                Weight::Bold,
+                54.0,
+                TEXT,
+                1.0,
+            );
+            paint::icon(
+                canvas,
+                p.cache,
+                Icon::ChevronDown,
+                x + w + 10.0,
+                cy - 18.0,
+                40.0,
+                false,
+                TEXT,
+            );
+            paint::icon(
+                canvas,
+                p.cache,
+                Icon::Menu,
+                area.width - MARGIN - 66.0,
+                cy - 33.0,
+                66.0,
+                false,
+                TEXT,
+            );
         } else {
-            paint::icon(canvas, p.cache, Icon::Back, MARGIN - 10.0, cy - 36.0, 72.0, false, TEXT);
+            paint::icon(
+                canvas,
+                p.cache,
+                Icon::Back,
+                MARGIN - 10.0,
+                cy - 36.0,
+                72.0,
+                false,
+                TEXT,
+            );
             let x = MARGIN + 100.0;
-            let w = paint::draw_text(canvas, &paint::fit(&name, paint::TITLE, area.width - 400.0), x, paint::baseline(cy, paint::TITLE), paint::TITLE, TEXT);
+            let w = paint::draw_text(
+                canvas,
+                &paint::fit(&name, paint::TITLE, area.width - 400.0),
+                x,
+                paint::baseline(cy, paint::TITLE),
+                paint::TITLE,
+                TEXT,
+            );
             if profile.is_some_and(|p| p.user.verified) {
                 paint::verified(canvas, p.cache, x + w + 14.0, cy, 40.0);
             }
-            paint::icon(canvas, p.cache, Icon::More, area.width - MARGIN - 60.0, cy - 30.0, 60.0, false, TEXT);
+            paint::icon(
+                canvas,
+                p.cache,
+                Icon::More,
+                area.width - MARGIN - 60.0,
+                cy - 30.0,
+                60.0,
+                false,
+                TEXT,
+            );
         }
     }
 
@@ -380,6 +622,25 @@ impl Screen for ProfileScreen {
         }
         let cy = y - area.top + area.offset;
         let profile = self.profile(store);
+        // The counts: followers and following open their lists.
+        if cy > 40.0
+            && cy < 40.0 + AVATAR
+            && x > MARGIN + AVATAR + 40.0
+            && let Some(profile) = profile
+            && !profile.locked
+        {
+            let col = (area.width - MARGIN - AVATAR - 40.0 - MARGIN) / 3.0;
+            let n = ((x - MARGIN - AVATAR - 40.0) / col).floor() as i32;
+            if n == 1 || n == 2 {
+                return Action::Push(Box::new(super::follows::FollowsScreen::new(
+                    profile.user.id.clone(),
+                    profile.user.handle().to_owned(),
+                    n == 2,
+                    (profile.followers, profile.following),
+                )));
+            }
+            return Action::None;
+        }
         if cy < 40.0 + AVATAR + 20.0 && x < MARGIN + AVATAR {
             if let Some(profile) = profile
                 && profile.user.story.is_some()
@@ -430,8 +691,19 @@ impl Screen for ProfileScreen {
             if tagged != self.tagged {
                 self.tagged = tagged;
                 self.generation = u64::MAX;
-                if tagged && let Some(id) = self.user_id(store) && !store.tagged.contains_key(&id) {
-                    return Action::request("instagram.tagged", json!({"user": id}), Ask::Posts { user: id, tagged: true, more: false });
+                if tagged
+                    && let Some(id) = self.user_id(store)
+                    && !store.tagged.contains_key(&id)
+                {
+                    return Action::request(
+                        "instagram.tagged",
+                        json!({"user": id}),
+                        Ask::Posts {
+                            user: id,
+                            tagged: true,
+                            more: false,
+                        },
+                    );
                 }
                 return Action::Redraw;
             }
@@ -456,13 +728,21 @@ impl Screen for ProfileScreen {
         let Some(id) = self.user_id(store) else {
             return Action::None;
         };
-        let map = if self.tagged { &store.tagged } else { &store.grids };
+        let map = if self.tagged {
+            &store.tagged
+        } else {
+            &store.grids
+        };
         if let Some(grid) = map.get(&id)
             && !grid.loading
             && let Some(cursor) = &grid.cursor
             && area.offset > self.height - (area.bottom - area.top) - 2500.0
         {
-            let cmd = if self.tagged { "instagram.tagged" } else { "instagram.posts" };
+            let cmd = if self.tagged {
+                "instagram.tagged"
+            } else {
+                "instagram.posts"
+            };
             return Action::request(
                 cmd,
                 json!({"user": id, "cursor": cursor}),

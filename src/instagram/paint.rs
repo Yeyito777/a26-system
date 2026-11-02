@@ -30,15 +30,11 @@ pub const GREEN: Rgb = 0x1cd14f;
 pub const PLACEHOLDER: Rgb = 0x1c1c1c;
 /// The story ring, bottom-left to top-right.
 pub const RING: [Rgb; 5] = [0xfeda75, 0xfa7e1e, 0xd62976, 0x962fbf, 0x4f5bd5];
-/// Own messages: purple at the top of the screen, blue at the bottom.
-pub const MINE_TOP: Rgb = 0xa033ff;
-pub const MINE_BOTTOM: Rgb = 0x3797f0;
 
 // ----- Metrics ------------------------------------------------------------
 
 /// Instagram's point on this screen.
 pub const DP: f32 = 2.625;
-pub const W: f32 = 1080.0;
 /// Where the app's own content starts: Moon puts the window under its
 /// status bar (y 124 on the screen), so at the window's top.
 pub const STATUS: f32 = 0.0;
@@ -93,15 +89,45 @@ pub const MESSAGE: Font = Font {
     weight: Weight::Regular,
 };
 
-pub fn draw_text(canvas: &mut Canvas, s: &str, x: f32, baseline: f32, font: Font, color: Rgb) -> f32 {
+pub fn draw_text(
+    canvas: &mut Canvas,
+    s: &str,
+    x: f32,
+    baseline: f32,
+    font: Font,
+    color: Rgb,
+) -> f32 {
     text::draw(canvas, s, x, baseline, font.weight, font.size, color, 1.0)
 }
 
-pub fn draw_text_right(canvas: &mut Canvas, s: &str, right: f32, baseline: f32, font: Font, color: Rgb) {
-    text::draw_right(canvas, s, right, baseline, font.weight, font.size, color, 1.0);
+pub fn draw_text_right(
+    canvas: &mut Canvas,
+    s: &str,
+    right: f32,
+    baseline: f32,
+    font: Font,
+    color: Rgb,
+) {
+    text::draw_right(
+        canvas,
+        s,
+        right,
+        baseline,
+        font.weight,
+        font.size,
+        color,
+        1.0,
+    );
 }
 
-pub fn draw_text_centered(canvas: &mut Canvas, s: &str, cx: f32, baseline: f32, font: Font, color: Rgb) {
+pub fn draw_text_centered(
+    canvas: &mut Canvas,
+    s: &str,
+    cx: f32,
+    baseline: f32,
+    font: Font,
+    color: Rgb,
+) {
     text::draw_centered(canvas, s, cx, baseline, font.weight, font.size, color, 1.0);
 }
 
@@ -136,18 +162,23 @@ pub fn wrap_runs(words: &[(String, Font, Rgb)], width: f32, max_lines: usize) ->
     let mut line: Line = Vec::new();
     let mut used = 0.0;
     let mut truncated = false;
-    let push_word = |line: &mut Line, used: &mut f32, word: &str, font: Font, color: Rgb, space: bool| {
-        let piece = if space { format!(" {word}") } else { word.to_owned() };
-        *used += measure(&piece, font);
-        match line.last_mut() {
-            Some(run) if run.font == font && run.color == color => run.text.push_str(&piece),
-            _ => line.push(Run {
-                text: piece,
-                font,
-                color,
-            }),
-        }
-    };
+    let push_word =
+        |line: &mut Line, used: &mut f32, word: &str, font: Font, color: Rgb, space: bool| {
+            let piece = if space {
+                format!(" {word}")
+            } else {
+                word.to_owned()
+            };
+            *used += measure(&piece, font);
+            match line.last_mut() {
+                Some(run) if run.font == font && run.color == color => run.text.push_str(&piece),
+                _ => line.push(Run {
+                    text: piece,
+                    font,
+                    color,
+                }),
+            }
+        };
     'words: for (word, font, color) in words {
         let parts: Vec<&str> = word.split('\n').collect();
         for (index, part) in parts.iter().enumerate() {
@@ -197,7 +228,13 @@ pub fn wrap_runs(words: &[(String, Font, Rgb)], width: f32, max_lines: usize) ->
 }
 
 /// Plain text in one font and colour, wrapped.
-pub fn wrap_plain(s: &str, font: Font, color: Rgb, width: f32, max_lines: usize) -> (Vec<Line>, bool) {
+pub fn wrap_plain(
+    s: &str,
+    font: Font,
+    color: Rgb,
+    width: f32,
+    max_lines: usize,
+) -> (Vec<Line>, bool) {
     let words: Vec<(String, Font, Rgb)> = s
         .split(' ')
         .filter(|word| !word.is_empty())
@@ -301,8 +338,18 @@ pub fn age_long(ts: i64, now: i64) -> String {
 }
 
 const MONTHS: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
-    "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -376,7 +423,14 @@ pub struct Paint<'a> {
 impl Paint<'_> {
     /// The picture, or None (and it is asked for); `y` is the window row
     /// its top is drawn at.
-    pub fn picture(&mut self, reference: &str, w: u32, h: u32, fit: Fit, y: f32) -> Option<Rc<Image>> {
+    pub fn picture(
+        &mut self,
+        reference: &str,
+        w: u32,
+        h: u32,
+        fit: Fit,
+        y: f32,
+    ) -> Option<Rc<Image>> {
         if reference.is_empty() || w == 0 || h == 0 {
             return None;
         }
@@ -405,7 +459,8 @@ impl Paint<'_> {
 /// whether a picture is opaque.
 #[derive(Default)]
 pub struct Cache {
-    rounds: RefCell<HashMap<(usize, i32), Rc<Image>>>,
+    rounds: RefCell<HashMap<(usize, i32), (Rc<Image>, Rc<Image>)>>,
+    circles: RefCell<HashMap<(i32, i32), Rc<Vec<u32>>>>,
     rings: RefCell<HashMap<(i32, i32, u8), Rc<Image>>>,
     icons: RefCell<HashMap<(Icon, i32, bool), Rc<Mask>>>,
     opaque: RefCell<HashMap<usize, (Rc<Image>, bool)>>,
@@ -434,24 +489,23 @@ impl Cache {
         opaque
     }
 
-    /// `image` cut to a circle of `d` px (it is `d`x`d`, Fit::Cover).
+    /// `image` cut to a circle of `d` px (it is `d`x`d`, Fit::Cover). The
+    /// source is kept with it, so its address can't be reused by another.
     fn round(&self, image: &Rc<Image>, d: i32) -> Rc<Image> {
         let key = (Rc::as_ptr(image) as usize, d);
-        if let Some(found) = self.rounds.borrow().get(&key) {
+        if let Some((_, found)) = self.rounds.borrow().get(&key) {
             return found.clone();
         }
+        let mask = self.circle(image.width, image.height);
         let mut out = (**image).clone();
-        let r = d as f32 / 2.0;
-        for y in 0..out.height {
-            for x in 0..out.width {
-                let dx = x as f32 + 0.5 - out.width as f32 / 2.0;
-                let dy = y as f32 + 0.5 - out.height as f32 / 2.0;
-                let coverage = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
-                if coverage < 1.0 {
-                    let i = (y * out.width + x) as usize;
-                    let p = out.pixels[i];
-                    let scale = |c: u32| ((c as f32) * coverage) as u32;
-                    out.pixels[i] = scale(p >> 24) << 24
+        for (pixel, &m) in out.pixels.iter_mut().zip(mask.iter()) {
+            match m {
+                256 => {}
+                0 => *pixel = 0,
+                m => {
+                    let p = *pixel;
+                    let scale = |c: u32| (c * m) >> 8;
+                    *pixel = scale(p >> 24) << 24
                         | scale(p >> 16 & 0xff) << 16
                         | scale(p >> 8 & 0xff) << 8
                         | scale(p & 0xff);
@@ -463,8 +517,28 @@ impl Cache {
         if map.len() > 400 {
             map.clear();
         }
-        map.insert(key, out.clone());
+        map.insert(key, (image.clone(), out.clone()));
         out
+    }
+
+    /// A circle's coverage (0..=256) per pixel of a `w`x`h` box, made once per size.
+    fn circle(&self, w: i32, h: i32) -> Rc<Vec<u32>> {
+        if let Some(found) = self.circles.borrow().get(&(w, h)) {
+            return found.clone();
+        }
+        let r = w.min(h) as f32 / 2.0;
+        let mut mask = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 + 0.5 - w as f32 / 2.0;
+                let dy = y as f32 + 0.5 - h as f32 / 2.0;
+                let coverage = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
+                mask.push((coverage * 256.0).round() as u32);
+            }
+        }
+        let mask = Rc::new(mask);
+        self.circles.borrow_mut().insert((w, h), mask.clone());
+        mask
     }
 
     /// A story ring of outer diameter `d` and width `w`: kind 0 the
@@ -481,7 +555,8 @@ impl Cache {
                 let dx = x as f32 + 0.5 - r;
                 let dy = y as f32 + 0.5 - r;
                 let dist = (dx * dx + dy * dy).sqrt();
-                let coverage = ((r - dist + 0.5).clamp(0.0, 1.0)) * ((dist - inner + 0.5).clamp(0.0, 1.0));
+                let coverage =
+                    ((r - dist + 0.5).clamp(0.0, 1.0)) * ((dist - inner + 0.5).clamp(0.0, 1.0));
                 if coverage <= 0.0 {
                     continue;
                 }
@@ -495,8 +570,10 @@ impl Cache {
                 };
                 let a = (coverage * 255.0) as u32;
                 let pre = |c: u32| c * a / 255;
-                pixels[(y * d + x) as usize] =
-                    a << 24 | pre(color >> 16 & 0xff) << 16 | pre(color >> 8 & 0xff) << 8 | pre(color & 0xff);
+                pixels[(y * d + x) as usize] = a << 24
+                    | pre(color >> 16 & 0xff) << 16
+                    | pre(color >> 8 & 0xff) << 8
+                    | pre(color & 0xff);
             }
         }
         let image = Rc::new(Image {
@@ -525,7 +602,9 @@ impl Cache {
             },
         };
         let mask = Rc::new(mask);
-        self.icons.borrow_mut().insert((icon, size, filled), mask.clone());
+        self.icons
+            .borrow_mut()
+            .insert((icon, size, filled), mask.clone());
         mask
     }
 }
@@ -560,11 +639,23 @@ pub fn blit(canvas: &mut Canvas, cache: &Cache, image: &Rc<Image>, x: i32, y: i3
 }
 
 /// A picture in `rect` (Fit::Cover), or a placeholder while it loads.
-pub fn picture(canvas: &mut Canvas, p: &mut Paint, reference: &str, rect: RectF, placeholder: Rgb) -> bool {
+pub fn picture(
+    canvas: &mut Canvas,
+    p: &mut Paint,
+    reference: &str,
+    rect: RectF,
+    placeholder: Rgb,
+) -> bool {
     let (w, h) = (rect.w.round() as u32, rect.h.round() as u32);
     match p.picture(reference, w, h, Fit::Cover, rect.y) {
         Some(image) => {
-            blit(canvas, p.cache, &image, rect.x.round() as i32, rect.y.round() as i32);
+            blit(
+                canvas,
+                p.cache,
+                &image,
+                rect.x.round() as i32,
+                rect.y.round() as i32,
+            );
             true
         }
         None => {
@@ -603,7 +694,15 @@ impl Ring {
 
 /// A round avatar of diameter `d` centred on (cx, cy); with a ring, the
 /// ring is `d` and the picture sits inside it with a gap.
-pub fn avatar(canvas: &mut Canvas, p: &mut Paint, reference: Option<&str>, cx: f32, cy: f32, d: f32, ring: Ring) {
+pub fn avatar(
+    canvas: &mut Canvas,
+    p: &mut Paint,
+    reference: Option<&str>,
+    cx: f32,
+    cy: f32,
+    d: f32,
+    ring: Ring,
+) {
     let (inner, ring_w) = match ring {
         Ring::None => (d, 0.0),
         Ring::Seen => (d - 2.0 * (dp(1.0) + dp(3.0)), dp(1.0)),
@@ -617,12 +716,18 @@ pub fn avatar(canvas: &mut Canvas, p: &mut Paint, reference: Option<&str>, cx: f
             _ => 2,
         };
         let image = p.cache.ring(size, ring_w.round() as i32, kind);
-        canvas.draw_image(&image, (cx - size as f32 / 2.0).round() as i32, (cy - size as f32 / 2.0).round() as i32, 1.0);
+        canvas.draw_image(
+            &image,
+            (cx - size as f32 / 2.0).round() as i32,
+            (cy - size as f32 / 2.0).round() as i32,
+            1.0,
+        );
     }
     let size = inner.round() as i32;
     let x = (cx - size as f32 / 2.0).round() as i32;
     let y = (cy - size as f32 / 2.0).round() as i32;
-    let image = reference.and_then(|r| p.picture(r, size as u32, size as u32, Fit::Cover, y as f32));
+    let image =
+        reference.and_then(|r| p.picture(r, size as u32, size as u32, Fit::Cover, y as f32));
     match image {
         Some(image) => {
             let round = p.cache.round(&image, size);
@@ -694,7 +799,12 @@ pub fn round_corners(canvas: &mut Canvas, rect: RectF, radius: f32, bg: Rgb) {
         (rect.x, rect.y, rect.x + r, rect.y + r),
         (rect.x + rect.w - r, rect.y, rect.x + rect.w - r, rect.y + r),
         (rect.x, rect.y + rect.h - r, rect.x + r, rect.y + rect.h - r),
-        (rect.x + rect.w - r, rect.y + rect.h - r, rect.x + rect.w - r, rect.y + rect.h - r),
+        (
+            rect.x + rect.w - r,
+            rect.y + rect.h - r,
+            rect.x + rect.w - r,
+            rect.y + rect.h - r,
+        ),
     ];
     let (cx0, cy0, cx1, cy1) = canvas.clip();
     for (bx, by, ox, oy) in corners {
@@ -710,7 +820,8 @@ pub fn round_corners(canvas: &mut Canvas, rect: RectF, radius: f32, bg: Rgb) {
                 let outside = (d + 0.5).clamp(0.0, 1.0);
                 if outside > 0.0 {
                     let i = (y * canvas.width + x) as usize;
-                    canvas.pixels[i] = crate::gfx::blend(canvas.pixels[i], bg, (outside * 256.0) as u32);
+                    canvas.pixels[i] =
+                        crate::gfx::blend(canvas.pixels[i], bg, (outside * 256.0) as u32);
                 }
             }
         }
@@ -748,13 +859,20 @@ pub enum Icon {
     Photo,
     Phone,
     Video,
-    Profile,
     Hashtag,
-    Settings,
 }
 
 /// Draws an icon `size` px square with its top-left at (x, y).
-pub fn icon(canvas: &mut Canvas, cache: &Cache, icon: Icon, x: f32, y: f32, size: f32, filled: bool, color: Rgb) {
+pub fn icon(
+    canvas: &mut Canvas,
+    cache: &Cache,
+    icon: Icon,
+    x: f32,
+    y: f32,
+    size: f32,
+    filled: bool,
+    color: Rgb,
+) {
     let mask = cache.icon(icon, size.round() as i32, filled);
     if mask.w > 0 {
         canvas.draw_mask(
@@ -810,15 +928,30 @@ fn icon_path(path: &mut Path, icon: Icon, s: f32, filled: bool) {
                 let mut closed = pts.to_vec();
                 closed.push(pts[0]);
                 path.stroke_polyline(&closed, w);
-                path.stroke_polyline(&[(s * 0.4, s * 0.88), (s * 0.4, s * 0.62), (s * 0.6, s * 0.62), (s * 0.6, s * 0.88)], w);
+                path.stroke_polyline(
+                    &[
+                        (s * 0.4, s * 0.88),
+                        (s * 0.4, s * 0.62),
+                        (s * 0.6, s * 0.62),
+                        (s * 0.6, s * 0.88),
+                    ],
+                    w,
+                );
             }
         }
         Icon::Search => {
             let r = s * 0.3;
             let cx = s * 0.43;
             let cy = s * 0.43;
-            path.stroke_polyline(&arc_points(cx, cy, r, 0.0, PI * 2.0), if filled { w * 1.6 } else { w });
-            path.stroke_segment((cx + r * 0.72, cy + r * 0.72), (s * 0.88, s * 0.88), if filled { w * 1.6 } else { w });
+            path.stroke_polyline(
+                &arc_points(cx, cy, r, 0.0, PI * 2.0),
+                if filled { w * 1.6 } else { w },
+            );
+            path.stroke_segment(
+                (cx + r * 0.72, cy + r * 0.72),
+                (s * 0.88, s * 0.88),
+                if filled { w * 1.6 } else { w },
+            );
         }
         Icon::Direct | Icon::Share => {
             let a = (s * 0.1, s * 0.14);
@@ -868,7 +1001,10 @@ fn icon_path(path: &mut Path, icon: Icon, s: f32, filled: bool) {
                 path.circle(x, c, w * 0.9);
             }
         }
-        Icon::Back => path.stroke_polyline(&[(s * 0.62, s * 0.14), (s * 0.3, c), (s * 0.62, s * 0.86)], w),
+        Icon::Back => path.stroke_polyline(
+            &[(s * 0.62, s * 0.14), (s * 0.3, c), (s * 0.62, s * 0.86)],
+            w,
+        ),
         Icon::Close => {
             path.stroke_segment((s * 0.18, s * 0.18), (s * 0.82, s * 0.82), w);
             path.stroke_segment((s * 0.82, s * 0.18), (s * 0.18, s * 0.82), w);
@@ -895,7 +1031,13 @@ fn icon_path(path: &mut Path, icon: Icon, s: f32, filled: bool) {
             path.stroke_segment((s * 0.15, c), (s * 0.85, c), w);
         }
         Icon::Grid => {
-            let pts = [(s * 0.12, s * 0.12), (s * 0.88, s * 0.12), (s * 0.88, s * 0.88), (s * 0.12, s * 0.88), (s * 0.12, s * 0.12)];
+            let pts = [
+                (s * 0.12, s * 0.12),
+                (s * 0.88, s * 0.12),
+                (s * 0.88, s * 0.88),
+                (s * 0.12, s * 0.88),
+                (s * 0.12, s * 0.12),
+            ];
             path.stroke_polyline(&pts, w);
             for t in [0.37, 0.63] {
                 path.stroke_segment((s * t, s * 0.12), (s * t, s * 0.88), w * 0.8);
@@ -903,20 +1045,53 @@ fn icon_path(path: &mut Path, icon: Icon, s: f32, filled: bool) {
             }
         }
         Icon::Tagged => {
-            let pts = [(s * 0.12, s * 0.12), (s * 0.88, s * 0.12), (s * 0.88, s * 0.88), (s * 0.12, s * 0.88), (s * 0.12, s * 0.12)];
+            let pts = [
+                (s * 0.12, s * 0.12),
+                (s * 0.88, s * 0.12),
+                (s * 0.88, s * 0.88),
+                (s * 0.12, s * 0.88),
+                (s * 0.12, s * 0.12),
+            ];
             path.stroke_polyline(&pts, w);
             path.stroke_polyline(&arc_points(c, s * 0.42, s * 0.13, 0.0, PI * 2.0), w);
             path.stroke_polyline(&arc_points(c, s * 0.9, s * 0.25, PI * 1.15, PI * 1.85), w);
         }
         Icon::Carousel => {
-            path.polygon(&[(s * 0.3, s * 0.08), (s * 0.92, s * 0.08), (s * 0.92, s * 0.7), (s * 0.3, s * 0.7)]);
-            path.stroke_polyline(&[(s * 0.12, s * 0.3), (s * 0.12, s * 0.92), (s * 0.72, s * 0.92)], w);
+            path.polygon(&[
+                (s * 0.3, s * 0.08),
+                (s * 0.92, s * 0.08),
+                (s * 0.92, s * 0.7),
+                (s * 0.3, s * 0.7),
+            ]);
+            path.stroke_polyline(
+                &[
+                    (s * 0.12, s * 0.3),
+                    (s * 0.12, s * 0.92),
+                    (s * 0.72, s * 0.92),
+                ],
+                w,
+            );
         }
         Icon::Play => path.polygon(&[(s * 0.25, s * 0.12), (s * 0.88, c), (s * 0.25, s * 0.88)]),
-        Icon::ChevronDown => path.stroke_polyline(&[(s * 0.2, s * 0.36), (c, s * 0.66), (s * 0.8, s * 0.36)], w),
-        Icon::ChevronRight => path.stroke_polyline(&[(s * 0.36, s * 0.2), (s * 0.66, c), (s * 0.36, s * 0.8)], w),
+        Icon::ChevronDown => path.stroke_polyline(
+            &[(s * 0.2, s * 0.36), (c, s * 0.66), (s * 0.8, s * 0.36)],
+            w,
+        ),
+        Icon::ChevronRight => path.stroke_polyline(
+            &[(s * 0.36, s * 0.2), (s * 0.66, c), (s * 0.36, s * 0.8)],
+            w,
+        ),
         Icon::Compose => {
-            path.stroke_polyline(&[(s * 0.55, s * 0.12), (s * 0.12, s * 0.12), (s * 0.12, s * 0.88), (s * 0.88, s * 0.88), (s * 0.88, s * 0.45)], w);
+            path.stroke_polyline(
+                &[
+                    (s * 0.55, s * 0.12),
+                    (s * 0.12, s * 0.12),
+                    (s * 0.12, s * 0.88),
+                    (s * 0.88, s * 0.88),
+                    (s * 0.88, s * 0.45),
+                ],
+                w,
+            );
             path.stroke_segment((s * 0.45, s * 0.55), (s * 0.86, s * 0.14), w);
         }
         Icon::Menu => {
@@ -925,14 +1100,37 @@ fn icon_path(path: &mut Path, icon: Icon, s: f32, filled: bool) {
             }
         }
         Icon::Lock => {
-            path.stroke_polyline(&[(s * 0.2, s * 0.44), (s * 0.8, s * 0.44), (s * 0.8, s * 0.9), (s * 0.2, s * 0.9), (s * 0.2, s * 0.44)], w);
+            path.stroke_polyline(
+                &[
+                    (s * 0.2, s * 0.44),
+                    (s * 0.8, s * 0.44),
+                    (s * 0.8, s * 0.9),
+                    (s * 0.2, s * 0.9),
+                    (s * 0.2, s * 0.44),
+                ],
+                w,
+            );
             path.stroke_polyline(&arc_points(c, s * 0.34, s * 0.2, PI, PI * 2.0), w);
             path.stroke_segment((s * 0.3, s * 0.34), (s * 0.3, s * 0.44), w);
             path.stroke_segment((s * 0.7, s * 0.34), (s * 0.7, s * 0.44), w);
         }
-        Icon::Check => path.stroke_polyline(&[(s * 0.16, s * 0.52), (s * 0.4, s * 0.76), (s * 0.84, s * 0.26)], w * 1.3),
+        Icon::Check => path.stroke_polyline(
+            &[
+                (s * 0.16, s * 0.52),
+                (s * 0.4, s * 0.76),
+                (s * 0.84, s * 0.26),
+            ],
+            w * 1.3,
+        ),
         Icon::Pin => {
-            path.polygon(&[(s * 0.3, s * 0.1), (s * 0.7, s * 0.1), (s * 0.64, s * 0.46), (s * 0.82, s * 0.62), (s * 0.18, s * 0.62), (s * 0.36, s * 0.46)]);
+            path.polygon(&[
+                (s * 0.3, s * 0.1),
+                (s * 0.7, s * 0.1),
+                (s * 0.64, s * 0.46),
+                (s * 0.82, s * 0.62),
+                (s * 0.18, s * 0.62),
+                (s * 0.36, s * 0.46),
+            ]);
             path.stroke_segment((c, s * 0.6), (c, s * 0.92), w);
         }
         Icon::Mic => {
@@ -944,8 +1142,26 @@ fn icon_path(path: &mut Path, icon: Icon, s: f32, filled: bool) {
             path.stroke_segment((c, s * 0.8), (c, s * 0.92), w);
         }
         Icon::Photo => {
-            path.stroke_polyline(&[(s * 0.1, s * 0.14), (s * 0.9, s * 0.14), (s * 0.9, s * 0.86), (s * 0.1, s * 0.86), (s * 0.1, s * 0.14)], w);
-            path.stroke_polyline(&[(s * 0.14, s * 0.76), (s * 0.4, s * 0.48), (s * 0.6, s * 0.66), (s * 0.72, s * 0.56), (s * 0.88, s * 0.72)], w);
+            path.stroke_polyline(
+                &[
+                    (s * 0.1, s * 0.14),
+                    (s * 0.9, s * 0.14),
+                    (s * 0.9, s * 0.86),
+                    (s * 0.1, s * 0.86),
+                    (s * 0.1, s * 0.14),
+                ],
+                w,
+            );
+            path.stroke_polyline(
+                &[
+                    (s * 0.14, s * 0.76),
+                    (s * 0.4, s * 0.48),
+                    (s * 0.6, s * 0.66),
+                    (s * 0.72, s * 0.56),
+                    (s * 0.88, s * 0.72),
+                ],
+                w,
+            );
             path.circle(s * 0.68, s * 0.34, w * 1.1);
         }
         Icon::Phone => {
@@ -953,30 +1169,31 @@ fn icon_path(path: &mut Path, icon: Icon, s: f32, filled: bool) {
             path.stroke_polyline(&pts, w * 1.6);
         }
         Icon::Video => {
-            path.stroke_polyline(&[(s * 0.08, s * 0.26), (s * 0.66, s * 0.26), (s * 0.66, s * 0.74), (s * 0.08, s * 0.74), (s * 0.08, s * 0.26)], w);
-            path.stroke_polyline(&[(s * 0.66, s * 0.44), (s * 0.92, s * 0.3), (s * 0.92, s * 0.7), (s * 0.66, s * 0.56)], w);
-        }
-        Icon::Profile => {
-            path.stroke_polyline(&arc_points(c, s * 0.34, s * 0.2, 0.0, PI * 2.0), w);
-            path.stroke_polyline(&arc_points(c, s * 1.0, s * 0.36, PI * 1.12, PI * 1.88), w);
+            path.stroke_polyline(
+                &[
+                    (s * 0.08, s * 0.26),
+                    (s * 0.66, s * 0.26),
+                    (s * 0.66, s * 0.74),
+                    (s * 0.08, s * 0.74),
+                    (s * 0.08, s * 0.26),
+                ],
+                w,
+            );
+            path.stroke_polyline(
+                &[
+                    (s * 0.66, s * 0.44),
+                    (s * 0.92, s * 0.3),
+                    (s * 0.92, s * 0.7),
+                    (s * 0.66, s * 0.56),
+                ],
+                w,
+            );
         }
         Icon::Hashtag => {
             path.stroke_segment((s * 0.38, s * 0.12), (s * 0.3, s * 0.88), w);
             path.stroke_segment((s * 0.7, s * 0.12), (s * 0.62, s * 0.88), w);
             path.stroke_segment((s * 0.14, s * 0.36), (s * 0.88, s * 0.36), w);
             path.stroke_segment((s * 0.12, s * 0.64), (s * 0.86, s * 0.64), w);
-        }
-        Icon::Settings => {
-            path.stroke_polyline(&arc_points(c, c, s * 0.16, 0.0, PI * 2.0), w);
-            path.stroke_polyline(&arc_points(c, c, s * 0.36, 0.0, PI * 2.0), w);
-            for n in 0..8 {
-                let a = n as f32 * PI / 4.0;
-                path.stroke_segment(
-                    (c + a.cos() * s * 0.36, c + a.sin() * s * 0.36),
-                    (c + a.cos() * s * 0.46, c + a.sin() * s * 0.46),
-                    w * 1.4,
-                );
-            }
         }
     }
 }
@@ -994,7 +1211,16 @@ pub fn verified(canvas: &mut Canvas, cache: &Cache, x: f32, cy: f32, size: f32) 
     }
     path.polygon(&pts);
     canvas.fill_path(&path, 0x0095f6, 1.0);
-    icon(canvas, cache, Icon::Check, x + size * 0.2, cy - size * 0.3, size * 0.6, false, 0xffffff);
+    icon(
+        canvas,
+        cache,
+        Icon::Check,
+        x + size * 0.2,
+        cy - size * 0.3,
+        size * 0.6,
+        false,
+        0xffffff,
+    );
 }
 
 /// A red dot or count badge centred at (cx, cy).
@@ -1003,15 +1229,29 @@ pub fn badge(canvas: &mut Canvas, cx: f32, cy: f32, n: u32) {
         canvas.fill_circle(cx, cy, dp(4.0), RED, 1.0);
         return;
     }
-    let label = if n > 9 { "9+".to_owned() } else { n.to_string() };
+    let label = if n > 9 {
+        "9+".to_owned()
+    } else {
+        n.to_string()
+    };
     let font = Font {
         size: 30.0,
         weight: Weight::SemiBold,
     };
     let w = (measure(&label, font) + dp(10.0)).max(dp(18.0));
     let h = dp(18.0);
-    canvas.fill_rrect(RectF::new(cx - w / 2.0 - 4.0, cy - h / 2.0 - 4.0, w + 8.0, h + 8.0), (h + 8.0) / 2.0, BG, 1.0);
-    canvas.fill_rrect(RectF::new(cx - w / 2.0, cy - h / 2.0, w, h), h / 2.0, RED, 1.0);
+    canvas.fill_rrect(
+        RectF::new(cx - w / 2.0 - 4.0, cy - h / 2.0 - 4.0, w + 8.0, h + 8.0),
+        (h + 8.0) / 2.0,
+        BG,
+        1.0,
+    );
+    canvas.fill_rrect(
+        RectF::new(cx - w / 2.0, cy - h / 2.0, w, h),
+        h / 2.0,
+        RED,
+        1.0,
+    );
     draw_text_centered(canvas, &label, cx, baseline(cy, font), font, 0xffffff);
 }
 
@@ -1049,7 +1289,11 @@ mod tests {
         let (two, cut) = wrap_runs(&words, 300.0, 2);
         assert_eq!(two.len(), 2);
         assert!(cut);
-        let tinted: Vec<_> = lines.iter().flatten().filter(|run| run.color == LINK).collect();
+        let tinted: Vec<_> = lines
+            .iter()
+            .flatten()
+            .filter(|run| run.color == LINK)
+            .collect();
         assert!(!tinted.is_empty());
     }
 }

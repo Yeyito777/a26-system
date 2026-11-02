@@ -10,10 +10,11 @@ use std::time::Instant;
 use serde_json::{Value, json};
 
 use super::app::{Action, Area, Screen};
-use super::model::{self, User};
+use super::model;
 use super::paint::{
-    self, Font, Icon, Line, Paint, Ring, BG, BLUE, BODY, BODY_BOLD, DP, ELEVATED, FIELD, MARGIN, MESSAGE, RED,
-    SAFE_BOTTOM, SECONDARY, SEPARATOR, SMALL, SMALL_BOLD, STATUS, TAB_BAR, TERTIARY, TEXT, TINY, TOP_BAR,
+    self, BG, BLUE, BODY, BODY_BOLD, DP, ELEVATED, FIELD, Font, Icon, Line, MARGIN, MESSAGE, Paint,
+    RED, Ring, SAFE_BOTTOM, SECONDARY, SEPARATOR, SMALL, SMALL_BOLD, STATUS, TAB_BAR, TERTIARY,
+    TEXT, TINY, TOP_BAR,
 };
 use super::profile::ProfileScreen;
 use super::store::{Ask, Store};
@@ -81,7 +82,14 @@ pub fn preview(chat: &Chat, now: i64) -> (String, bool) {
     let age = paint::age_short(last.ts, now);
     if unread {
         let text = if chat.unread >= 2 {
-            format!("{} new messages", if chat.unread > 4 { "4+".to_owned() } else { chat.unread.to_string() })
+            format!(
+                "{} new messages",
+                if chat.unread > 4 {
+                    "4+".to_owned()
+                } else {
+                    chat.unread.to_string()
+                }
+            )
         } else if chat.is_group() {
             format!("{}: {}", last.author.clone().unwrap_or_default(), last.text)
         } else {
@@ -90,7 +98,11 @@ pub fn preview(chat: &Chat, now: i64) -> (String, bool) {
         return (format!("{text} · {age}"), true);
     }
     if last.mine {
-        let seen = chat.ext.get("seen").and_then(Value::as_bool).unwrap_or(false);
+        let seen = chat
+            .ext
+            .get("seen")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if seen && !chat.is_group() {
             return (format!("Seen {age} ago"), false);
         }
@@ -117,9 +129,25 @@ fn draw_chat_avatar(canvas: &mut Canvas, p: &mut Paint, chat: &Chat, cx: f32, cy
     if chat.is_group() && users.len() >= 2 {
         // Two faces, the second over the first's corner.
         let small = d * 0.72;
-        paint::avatar(canvas, p, users[1].avatar_ref(), cx - d * 0.14, cy - d * 0.14, small, Ring::None);
+        paint::avatar(
+            canvas,
+            p,
+            users[1].avatar_ref(),
+            cx - d * 0.14,
+            cy - d * 0.14,
+            small,
+            Ring::None,
+        );
         canvas.fill_circle(cx + d * 0.14, cy + d * 0.14, small / 2.0 + 5.0, BG, 1.0);
-        paint::avatar(canvas, p, users[0].avatar_ref(), cx + d * 0.14, cy + d * 0.14, small, Ring::None);
+        paint::avatar(
+            canvas,
+            p,
+            users[0].avatar_ref(),
+            cx + d * 0.14,
+            cy + d * 0.14,
+            small,
+            Ring::None,
+        );
     } else {
         let reference = chat.avatar.as_ref().map(|m| m.reference.as_str());
         paint::avatar(canvas, p, reference, cx, cy, d, chat_ring(chat));
@@ -128,7 +156,11 @@ fn draw_chat_avatar(canvas: &mut Canvas, p: &mut Paint, chat: &Chat, cx: f32, cy
 
 impl Screen for InboxScreen {
     fn viewport(&self, height: f32) -> (f32, f32) {
-        let bottom = if self.requests { height - SAFE_BOTTOM } else { height - SAFE_BOTTOM - TAB_BAR };
+        let bottom = if self.requests {
+            height - SAFE_BOTTOM
+        } else {
+            height - SAFE_BOTTOM - TAB_BAR
+        };
         (top_of_content(), bottom)
     }
 
@@ -141,18 +173,56 @@ impl Screen for InboxScreen {
     }
 
     fn draw(&mut self, canvas: &mut Canvas, p: &mut Paint, store: &Store, area: Area) {
+        if super::signin::wanted(store) && store.chats.is_empty() {
+            super::signin::draw(canvas, p, store, area);
+            return;
+        }
         let now = paint::now_ms();
         let y0 = area.top - area.offset;
         if !self.requests && area.visible(y0, y0 + HEADER_H) {
             let field = RectF::new(MARGIN, y0 + 16.0, area.width - 2.0 * MARGIN, SEARCH_H);
             canvas.fill_rrect(field, 10.0 * DP, FIELD, 1.0);
-            paint::icon(canvas, p.cache, Icon::Search, field.x + 30.0, field.y + (SEARCH_H - 44.0) / 2.0, 44.0, false, SECONDARY);
-            paint::draw_text(canvas, "Search", field.x + 96.0, paint::baseline(field.y + SEARCH_H / 2.0, BODY), BODY, SECONDARY);
+            paint::icon(
+                canvas,
+                p.cache,
+                Icon::Search,
+                field.x + 30.0,
+                field.y + (SEARCH_H - 44.0) / 2.0,
+                44.0,
+                false,
+                SECONDARY,
+            );
+            paint::draw_text(
+                canvas,
+                "Search",
+                field.x + 96.0,
+                paint::baseline(field.y + SEARCH_H / 2.0, BODY),
+                BODY,
+                SECONDARY,
+            );
             let hy = y0 + SEARCH_H + 34.0 + 60.0;
-            paint::draw_text(canvas, "Messages", MARGIN, paint::baseline(hy, paint::HEADLINE), paint::HEADLINE, TEXT);
+            paint::draw_text(
+                canvas,
+                "Messages",
+                MARGIN,
+                paint::baseline(hy, paint::HEADLINE),
+                paint::HEADLINE,
+                TEXT,
+            );
             let requests = store.requests().count();
-            let label = if requests > 0 { format!("Requests ({requests})") } else { "Requests".to_owned() };
-            paint::draw_text_right(canvas, &label, area.width - MARGIN, paint::baseline(hy, BODY_BOLD), BODY_BOLD, BLUE);
+            let label = if requests > 0 {
+                format!("Requests ({requests})")
+            } else {
+                "Requests".to_owned()
+            };
+            paint::draw_text_right(
+                canvas,
+                &label,
+                area.width - MARGIN,
+                paint::baseline(hy, BODY_BOLD),
+                BODY_BOLD,
+                BLUE,
+            );
         }
         let rows = self.rows(store);
         let start = y0 + self.header();
@@ -174,7 +244,14 @@ impl Screen for InboxScreen {
             } else {
                 "No messages yet"
             };
-            paint::draw_text_centered(canvas, note, area.width / 2.0, start + 300.0, BODY, SECONDARY);
+            paint::draw_text_centered(
+                canvas,
+                note,
+                area.width / 2.0,
+                start + 300.0,
+                BODY,
+                SECONDARY,
+            );
         }
         // The next rows' avatars, ahead of the scroll.
         let last = ((area.bottom - start) / ROW).ceil().max(0.0) as usize;
@@ -190,21 +267,67 @@ impl Screen for InboxScreen {
         canvas.fill_rect(0, 0, canvas.width, area.top as i32, BG, 1.0);
         let cy = STATUS + TOP_BAR / 2.0;
         if self.requests {
-            paint::icon(canvas, p.cache, Icon::Back, MARGIN - 10.0, cy - 36.0, 72.0, false, TEXT);
-            paint::draw_text(canvas, "Message requests", MARGIN + 92.0, paint::baseline(cy, paint::TITLE), paint::TITLE, TEXT);
+            paint::icon(
+                canvas,
+                p.cache,
+                Icon::Back,
+                MARGIN - 10.0,
+                cy - 36.0,
+                72.0,
+                false,
+                TEXT,
+            );
+            paint::draw_text(
+                canvas,
+                "Message requests",
+                MARGIN + 92.0,
+                paint::baseline(cy, paint::TITLE),
+                paint::TITLE,
+                TEXT,
+            );
             return;
         }
         let name = store
             .account()
-            .map(|account| account.username.clone().unwrap_or_else(|| account.name.clone()))
+            .map(|account| {
+                account
+                    .username
+                    .clone()
+                    .unwrap_or_else(|| account.name.clone())
+            })
             .unwrap_or_else(|| "Messages".to_owned());
         let font = paint::TITLE;
         let w = paint::draw_text(canvas, &name, MARGIN, paint::baseline(cy, font), font, TEXT);
-        paint::icon(canvas, p.cache, Icon::ChevronDown, MARGIN + w + 10.0, cy - 18.0, 40.0, false, TEXT);
-        paint::icon(canvas, p.cache, Icon::Compose, area.width - MARGIN - 66.0, cy - 33.0, 66.0, false, TEXT);
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::ChevronDown,
+            MARGIN + w + 10.0,
+            cy - 18.0,
+            40.0,
+            false,
+            TEXT,
+        );
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Compose,
+            area.width - MARGIN - 66.0,
+            cy - 33.0,
+            66.0,
+            false,
+            TEXT,
+        );
         if !store.status.online() && store.status.state != "connecting" {
             let note = status_note(store);
-            paint::draw_text_right(canvas, &note, area.width - MARGIN - 100.0, paint::baseline(cy, TINY), TINY, SECONDARY);
+            paint::draw_text_right(
+                canvas,
+                &note,
+                area.width - MARGIN - 100.0,
+                paint::baseline(cy, TINY),
+                TINY,
+                SECONDARY,
+            );
         }
     }
 
@@ -214,6 +337,9 @@ impl Screen for InboxScreen {
                 return Action::Pop;
             }
             return Action::None;
+        }
+        if super::signin::wanted(store) && store.chats.is_empty() {
+            return super::signin::tap(area, x, y);
         }
         let content_y = y - area.top + area.offset;
         if !self.requests && content_y < HEADER_H {
@@ -244,7 +370,11 @@ impl Screen for InboxScreen {
     }
 
     fn shown(&mut self, _store: &Store) -> Action {
-        Action::request("instagram.tray", json!({"cached": true}), Ask::Tray { cached: true })
+        Action::request(
+            "instagram.tray",
+            json!({"cached": true}),
+            Ask::Tray { cached: true },
+        )
     }
 
     fn tab_bar(&self) -> bool {
@@ -281,7 +411,16 @@ fn draw_row(canvas: &mut Canvas, p: &mut Paint, chat: &Chat, y: f32, width: f32,
     } else if chat.muted {
         paint::draw_text_right(canvas, "Muted", width - MARGIN, cy + 10.0, TINY, TERTIARY);
     } else {
-        paint::icon(canvas, p.cache, Icon::Camera, width - MARGIN - 64.0, cy - 32.0, 64.0, false, SECONDARY);
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Camera,
+            width - MARGIN - 64.0,
+            cy - 32.0,
+            64.0,
+            false,
+            SECONDARY,
+        );
     }
 }
 
@@ -376,7 +515,8 @@ fn is_jumbo(text: &str) -> bool {
     let t = text.trim();
     !t.is_empty()
         && t.chars().count() <= 8
-        && t.chars().all(|c| !c.is_alphanumeric() && !c.is_ascii_punctuation() && !c.is_whitespace())
+        && t.chars()
+            .all(|c| !c.is_alphanumeric() && !c.is_ascii_punctuation() && !c.is_whitespace())
 }
 
 impl ThreadScreen {
@@ -447,7 +587,12 @@ impl ThreadScreen {
                         .take(4)
                         .map(|m| {
                             let reference = m.thumb.clone().unwrap_or_else(|| m.reference.clone());
-                            (reference, m.w.unwrap_or(1) as f32, m.h.unwrap_or(1) as f32, m.kind == "video")
+                            (
+                                reference,
+                                m.w.unwrap_or(1) as f32,
+                                m.h.unwrap_or(1) as f32,
+                                m.kind == "video",
+                            )
                         })
                         .collect();
                     if items.len() == 1 {
@@ -462,7 +607,11 @@ impl ThreadScreen {
                     } else {
                         let cell = (MEDIA_W - 6.0) / 2.0;
                         let rows = items.len().div_ceil(2) as f32;
-                        (Body::Pictures(items), MEDIA_W, rows * cell + (rows - 1.0) * 6.0)
+                        (
+                            Body::Pictures(items),
+                            MEDIA_W,
+                            rows * cell + (rows - 1.0) * 6.0,
+                        )
                     }
                 }
             }
@@ -480,16 +629,30 @@ impl ThreadScreen {
             let who = match (&reply.author, message.mine) {
                 (Some(author), true) if author == "You" => "You replied to yourself".to_owned(),
                 (Some(author), true) => format!("You replied to {author}"),
-                (Some(author), false) if author == "You" => format!("{} replied to you", message.author.name.split(' ').next().unwrap_or("")),
-                (Some(author), false) => format!("{} replied to {author}", message.author.name.split(' ').next().unwrap_or("")),
+                (Some(author), false) if author == "You" => format!(
+                    "{} replied to you",
+                    message.author.name.split(' ').next().unwrap_or("")
+                ),
+                (Some(author), false) => format!(
+                    "{} replied to {author}",
+                    message.author.name.split(' ').next().unwrap_or("")
+                ),
                 (None, _) => "Replied".to_owned(),
             };
-            (who, paint::wrap_plain(&reply.text, SMALL, SECONDARY, BUBBLE_MAX - 2.0 * PAD_X, 2).0)
+            (
+                who,
+                paint::wrap_plain(&reply.text, SMALL, SECONDARY, BUBBLE_MAX - 2.0 * PAD_X, 2).0,
+            )
         });
         let reactions = if message.reactions.is_empty() {
             None
         } else {
-            let mut label: String = message.reactions.iter().take(3).map(|r| r.emoji.as_str()).collect();
+            let mut label: String = message
+                .reactions
+                .iter()
+                .take(3)
+                .map(|r| r.emoji.as_str())
+                .collect();
             let total: u32 = message.reactions.iter().map(|r| r.count).sum();
             if total > 1 {
                 label.push_str(&format!(" {total}"));
@@ -521,11 +684,17 @@ impl ThreadScreen {
         } else {
             paint::wrap_plain(text, MESSAGE, TEXT, BUBBLE_MAX - 2.0 * PAD_X, 50).0
         };
-        let note_h = if note.is_empty() { 0.0 } else { note.len() as f32 * LINE_H + 2.0 * PAD_Y + 8.0 };
+        let note_h = if note.is_empty() {
+            0.0
+        } else {
+            note.len() as f32 * LINE_H + 2.0 * PAD_Y + 8.0
+        };
         match kind {
             "reel" | "story" => {
                 let expired = share["expired"].as_bool().unwrap_or(false);
                 let context = share["context"].as_str().unwrap_or("");
+                // A story without its picture is gone (expired or removed).
+                let expired = expired || preview.is_none();
                 let label = match (kind, context) {
                     ("story", "reply") => "Replied to a story",
                     ("story", "reaction") => "Reacted to a story",
@@ -562,9 +731,15 @@ impl ThreadScreen {
                     paint::wrap_runs(&words, width - 2.0 * PAD_X, 2).0
                 };
                 let header = if author.is_empty() { 0.0 } else { 100.0 };
-                let picture = preview.as_ref().map_or(0.0, |(_, aspect)| width / aspect.max(0.8));
+                let picture = preview
+                    .as_ref()
+                    .map_or(0.0, |(_, aspect)| width / aspect.max(0.8));
                 let unavailable = kind == "unavailable" && preview.is_none();
-                let title = if unavailable && title.is_empty() { "This content isn't available".to_owned() } else { title };
+                let title = if unavailable && title.is_empty() {
+                    "This content isn't available".to_owned()
+                } else {
+                    title
+                };
                 let title_h = if title.is_empty() { 0.0 } else { 70.0 };
                 let h = header + picture + lines.len() as f32 * 44.0 + title_h + 28.0;
                 (
@@ -611,20 +786,30 @@ impl ThreadScreen {
             let laid = &self.laid[&message.id];
             let prev = index.checked_sub(1).map(|i| &messages[i]);
             let next = messages.get(index + 1);
-            let same = |a: &Message, b: &Message| a.author.id == b.author.id && !a.system && !b.system && (a.ts - b.ts).abs() < 120_000;
+            let same = |a: &Message, b: &Message| {
+                a.author.id == b.author.id
+                    && !a.system
+                    && !b.system
+                    && (a.ts - b.ts).abs() < 120_000
+            };
             let first = prev.is_none_or(|prev| !same(prev, message));
             let last = next.is_none_or(|next| !same(message, next));
             let separator = match prev {
                 None => Some(paint::separator_time(message.ts, paint::now_ms())),
-                Some(prev) if message.ts - prev.ts > 3_600_000 => Some(paint::separator_time(message.ts, paint::now_ms())),
+                Some(prev) if message.ts - prev.ts > 3_600_000 => {
+                    Some(paint::separator_time(message.ts, paint::now_ms()))
+                }
                 _ => None,
             };
-            let name = (group && !message.mine && first && !message.system).then(|| message.author.name.clone());
-            let seen = (Some(index) == newest_mine && index == last_index).then(|| match message.status.as_deref() {
-                Some("read") => "Seen",
-                Some("pending") => "Sending…",
-                Some("failed") => "Not sent",
-                _ => "Sent",
+            let name = (group && !message.mine && first && !message.system)
+                .then(|| message.author.name.clone());
+            let seen = (Some(index) == newest_mine && index == last_index).then(|| {
+                match message.status.as_deref() {
+                    Some("read") => "Seen",
+                    Some("pending") => "Sending…",
+                    Some("failed") => "Not sent",
+                    _ => "Sent",
+                }
             });
             let mut h = laid.h;
             if matches!(laid.body, Body::Notice(..)) {
@@ -667,7 +852,15 @@ impl ThreadScreen {
         self.placed = placed;
     }
 
-    fn draw_message(&self, canvas: &mut Canvas, p: &mut Paint, message: &Message, place: &Placed, bottom_y: f32, width: f32) {
+    fn draw_message(
+        &self,
+        canvas: &mut Canvas,
+        p: &mut Paint,
+        message: &Message,
+        place: &Placed,
+        bottom_y: f32,
+        width: f32,
+    ) {
         let laid = &self.laid[&message.id];
         let mut y = bottom_y - place.height;
         if let Some(sep) = &place.separator {
@@ -680,7 +873,20 @@ impl ThreadScreen {
             if *call {
                 let w = paint::measure(&line, font) + 60.0;
                 let x = width / 2.0 - w / 2.0;
-                paint::icon(canvas, p.cache, Icon::Video, x, y + 14.0, 44.0, false, if text.starts_with("Missed") { RED } else { SECONDARY });
+                paint::icon(
+                    canvas,
+                    p.cache,
+                    Icon::Video,
+                    x,
+                    y + 14.0,
+                    44.0,
+                    false,
+                    if text.starts_with("Missed") {
+                        RED
+                    } else {
+                        SECONDARY
+                    },
+                );
                 paint::draw_text(canvas, &line, x + 60.0, y + 48.0, font, SECONDARY);
             } else {
                 paint::draw_text_centered(canvas, &line, width / 2.0, y + 48.0, font, SECONDARY);
@@ -721,19 +927,40 @@ impl ThreadScreen {
         let x = if mine { right - laid.w } else { THEIR_X };
         let rect = RectF::new(x, y, laid.w, laid.h);
         let radii = {
-            let (top, bottom) = (if place.first { RADIUS } else { SMALL_R }, if place.last { RADIUS } else { SMALL_R });
-            if mine { [RADIUS, top, bottom, RADIUS] } else { [top, RADIUS, RADIUS, bottom] }
+            let (top, bottom) = (
+                if place.first { RADIUS } else { SMALL_R },
+                if place.last { RADIUS } else { SMALL_R },
+            );
+            if mine {
+                [RADIUS, top, bottom, RADIUS]
+            } else {
+                [top, RADIUS, RADIUS, bottom]
+            }
         };
         let fill = if mine { MINE } else { ELEVATED };
         match &laid.body {
             Body::Text(lines) => {
                 paint::fill_rrect4(canvas, rect, radii, &|_| fill);
                 for (n, line) in lines.iter().enumerate() {
-                    paint::draw_line(canvas, line, x + PAD_X, y + PAD_Y + 40.0 + n as f32 * LINE_H);
+                    paint::draw_line(
+                        canvas,
+                        line,
+                        x + PAD_X,
+                        y + PAD_Y + 40.0 + n as f32 * LINE_H,
+                    );
                 }
             }
             Body::Jumbo(text) => {
-                crate::text::draw(canvas, text, x, y + laid.h * 0.8, Weight::Regular, 110.0, TEXT, 1.0);
+                crate::text::draw(
+                    canvas,
+                    text,
+                    x,
+                    y + laid.h * 0.8,
+                    Weight::Regular,
+                    110.0,
+                    TEXT,
+                    1.0,
+                );
             }
             Body::Heart => paint::icon(canvas, p.cache, Icon::Heart, x, y, laid.w, true, RED),
             Body::Pictures(items) => {
@@ -747,7 +974,12 @@ impl ThreadScreen {
                 } else {
                     let cell = (MEDIA_W - 6.0) / 2.0;
                     for (n, (reference, _, _, video)) in items.iter().enumerate() {
-                        let cr = RectF::new(x + (n % 2) as f32 * (cell + 6.0), y + (n / 2) as f32 * (cell + 6.0), cell, cell);
+                        let cr = RectF::new(
+                            x + (n % 2) as f32 * (cell + 6.0),
+                            y + (n / 2) as f32 * (cell + 6.0),
+                            cell,
+                            cell,
+                        );
                         paint::picture(canvas, p, reference, cr, 0x1a1a1a);
                         paint::round_corners(canvas, cr, 14.0 * DP, BG);
                         if *video {
@@ -763,15 +995,36 @@ impl ThreadScreen {
             }
             Body::Voice(ms) => {
                 paint::fill_rrect4(canvas, rect, radii, &|_| fill);
-                paint::icon(canvas, p.cache, Icon::Play, x + 30.0, y + rect.h / 2.0 - 24.0, 48.0, true, TEXT);
+                paint::icon(
+                    canvas,
+                    p.cache,
+                    Icon::Play,
+                    x + 30.0,
+                    y + rect.h / 2.0 - 24.0,
+                    48.0,
+                    true,
+                    TEXT,
+                );
                 let bars = 26;
                 for n in 0..bars {
                     let amp = ((n as f32 * 1.7).sin().abs() * 0.7 + 0.3) * (rect.h * 0.5);
                     let bx = x + 100.0 + n as f32 * 13.0;
-                    canvas.fill_rrect(RectF::new(bx, y + rect.h / 2.0 - amp / 2.0, 6.0, amp), 3.0, TEXT, 0.8);
+                    canvas.fill_rrect(
+                        RectF::new(bx, y + rect.h / 2.0 - amp / 2.0, 6.0, amp),
+                        3.0,
+                        TEXT,
+                        0.8,
+                    );
                 }
                 let label = format!("{}:{:02}", ms / 60_000, (ms / 1000) % 60);
-                paint::draw_text_right(canvas, &label, x + rect.w - PAD_X, paint::baseline(y + rect.h / 2.0, TINY), TINY, TEXT);
+                paint::draw_text_right(
+                    canvas,
+                    &label,
+                    x + rect.w - PAD_X,
+                    paint::baseline(y + rect.h / 2.0, TINY),
+                    TINY,
+                    TEXT,
+                );
             }
             Body::Card(card) => {
                 let mut cy = y;
@@ -784,7 +1037,14 @@ impl ThreadScreen {
                 canvas.fill_rrect(RectF::new(x, cy, laid.w, card_h), RADIUS, 0x1c1c1c, 1.0);
                 if !card.author.is_empty() {
                     canvas.fill_circle(x + PAD_X + 30.0, cy + 50.0, 30.0, 0x363636, 1.0);
-                    paint::draw_text(canvas, &card.author, x + PAD_X + 76.0, cy + 62.0, SMALL_BOLD, TEXT);
+                    paint::draw_text(
+                        canvas,
+                        &card.author,
+                        x + PAD_X + 76.0,
+                        cy + 62.0,
+                        SMALL_BOLD,
+                        TEXT,
+                    );
                     cy += 100.0;
                 }
                 if let Some((reference, aspect)) = &card.preview {
@@ -792,7 +1052,12 @@ impl ThreadScreen {
                     let pr = RectF::new(x, cy, laid.w, ph);
                     paint::picture(canvas, p, reference, pr, 0x1a1a1a);
                     if card.author.is_empty() {
-                        paint::round_corners(canvas, RectF::new(x, cy, laid.w, ph + 30.0), RADIUS, BG);
+                        paint::round_corners(
+                            canvas,
+                            RectF::new(x, cy, laid.w, ph + 30.0),
+                            RADIUS,
+                            BG,
+                        );
                     }
                     cy += ph;
                 }
@@ -801,7 +1066,14 @@ impl ThreadScreen {
                 }
                 cy += card.lines.len() as f32 * 44.0;
                 if !card.title.is_empty() {
-                    paint::draw_text(canvas, &paint::fit(&card.title, SMALL, laid.w - 2.0 * PAD_X), x + PAD_X, cy + 52.0, SMALL, SECONDARY);
+                    paint::draw_text(
+                        canvas,
+                        &paint::fit(&card.title, SMALL, laid.w - 2.0 * PAD_X),
+                        x + PAD_X,
+                        cy + 52.0,
+                        SMALL,
+                        SECONDARY,
+                    );
                 }
                 if !card.note.is_empty() {
                     draw_note(canvas, &card.note, mine, x, y + card_h + 8.0, right, fill);
@@ -817,7 +1089,14 @@ impl ThreadScreen {
                 let mut cy = y;
                 if !label.is_empty() {
                     if mine {
-                        paint::draw_text_right(canvas, label, right - 10.0, cy + 34.0, TINY, SECONDARY);
+                        paint::draw_text_right(
+                            canvas,
+                            label,
+                            right - 10.0,
+                            cy + 34.0,
+                            TINY,
+                            SECONDARY,
+                        );
                     } else {
                         paint::draw_text(canvas, label, x + 10.0, cy + 34.0, TINY, SECONDARY);
                     }
@@ -828,7 +1107,14 @@ impl ThreadScreen {
                 if *expired {
                     let r = RectF::new(px, cy, w, 120.0);
                     canvas.stroke_rrect(r, 30.0, 3.0, SEPARATOR, 1.0);
-                    paint::draw_text_centered(canvas, "Story unavailable", px + w / 2.0, cy + 72.0, SMALL, SECONDARY);
+                    paint::draw_text_centered(
+                        canvas,
+                        "Story unavailable",
+                        px + w / 2.0,
+                        cy + 72.0,
+                        SMALL,
+                        SECONDARY,
+                    );
                     cy += 120.0;
                 } else {
                     let r = RectF::new(px, cy, w, w * 16.0 / 9.0);
@@ -836,12 +1122,21 @@ impl ThreadScreen {
                         Some(reference) => {
                             paint::picture(canvas, p, reference, r, 0x1a1a1a);
                         }
-                        None => canvas.fill_rect(r.x as i32, r.y as i32, r.w as i32, r.h as i32, 0x1a1a1a, 1.0),
+                        None => canvas.fill_rect(
+                            r.x as i32, r.y as i32, r.w as i32, r.h as i32, 0x1a1a1a, 1.0,
+                        ),
                     }
                     paint::round_corners(canvas, r, 18.0 * DP, BG);
                     if !author.is_empty() {
                         canvas.fill_rect(r.x as i32 + 20, r.y as i32 + 20, 0, 0, BG, 0.0);
-                        paint::draw_text(canvas, &paint::fit(author, SMALL_BOLD, w - 60.0), r.x + 28.0, r.y + 60.0, SMALL_BOLD, TEXT);
+                        paint::draw_text(
+                            canvas,
+                            &paint::fit(author, SMALL_BOLD, w - 60.0),
+                            r.x + 28.0,
+                            r.y + 60.0,
+                            SMALL_BOLD,
+                            TEXT,
+                        );
                     }
                     cy += r.h;
                 }
@@ -851,7 +1146,14 @@ impl ThreadScreen {
             }
             Body::Outline(label) => {
                 canvas.stroke_rrect(rect, RADIUS, 3.0, 0x363636, 1.0);
-                paint::draw_text(canvas, label, x + PAD_X, y + PAD_Y + 40.0, MESSAGE, SECONDARY);
+                paint::draw_text(
+                    canvas,
+                    label,
+                    x + PAD_X,
+                    y + PAD_Y + 40.0,
+                    MESSAGE,
+                    SECONDARY,
+                );
             }
             Body::Notice(..) => {}
         }
@@ -860,14 +1162,27 @@ impl ThreadScreen {
             let w = paint::measure(reactions, SMALL) + 36.0;
             let rx = if mine { right - w - 20.0 } else { x + 20.0 };
             let pill = RectF::new(rx, below - 14.0, w, 52.0);
-            canvas.fill_rrect(RectF::new(pill.x - 4.0, pill.y - 4.0, pill.w + 8.0, pill.h + 8.0), 30.0, BG, 1.0);
+            canvas.fill_rrect(
+                RectF::new(pill.x - 4.0, pill.y - 4.0, pill.w + 8.0, pill.h + 8.0),
+                30.0,
+                BG,
+                1.0,
+            );
             canvas.fill_rrect(pill, 26.0, ELEVATED, 1.0);
             paint::draw_text(canvas, reactions, rx + 18.0, below + 24.0, SMALL, TEXT);
             below += 40.0;
         }
         if place.avatar {
             let d = 28.0 * DP;
-            paint::avatar(canvas, p, message.author.avatar.as_ref().map(|m| m.reference.as_str()), MARGIN + d / 2.0, y + laid.h - d / 2.0, d, Ring::None);
+            paint::avatar(
+                canvas,
+                p,
+                message.author.avatar.as_ref().map(|m| m.reference.as_str()),
+                MARGIN + d / 2.0,
+                y + laid.h - d / 2.0,
+                d,
+                Ring::None,
+            );
         }
         if let Some(seen) = place.seen {
             let color = if seen == "Not sent" { RED } else { SECONDARY };
@@ -876,20 +1191,42 @@ impl ThreadScreen {
     }
 }
 
-fn draw_note(canvas: &mut Canvas, lines: &[Line], mine: bool, x: f32, y: f32, right: f32, fill: u32) {
+fn draw_note(
+    canvas: &mut Canvas,
+    lines: &[Line],
+    mine: bool,
+    x: f32,
+    y: f32,
+    right: f32,
+    fill: u32,
+) {
     let w = lines.iter().map(paint::line_width).fold(0.0, f32::max) + 2.0 * PAD_X;
     let h = lines.len() as f32 * LINE_H + 2.0 * PAD_Y;
     let bx = if mine { right - w } else { x };
     canvas.fill_rrect(RectF::new(bx, y, w, h), RADIUS, fill, 1.0);
     for (n, line) in lines.iter().enumerate() {
-        paint::draw_line(canvas, line, bx + PAD_X, y + PAD_Y + 40.0 + n as f32 * LINE_H);
+        paint::draw_line(
+            canvas,
+            line,
+            bx + PAD_X,
+            y + PAD_Y + 40.0 + n as f32 * LINE_H,
+        );
     }
 }
 
 fn play_badge(canvas: &mut Canvas, p: &mut Paint, rect: RectF) {
     let (cx, cy) = rect.center();
     canvas.fill_circle(cx, cy, 52.0, 0x000000, 0.45);
-    paint::icon(canvas, p.cache, Icon::Play, cx - 26.0, cy - 30.0, 60.0, true, 0xffffff);
+    paint::icon(
+        canvas,
+        p.cache,
+        Icon::Play,
+        cx - 26.0,
+        cy - 30.0,
+        60.0,
+        true,
+        0xffffff,
+    );
 }
 
 impl Screen for ThreadScreen {
@@ -920,12 +1257,30 @@ impl Screen for ThreadScreen {
 
     fn draw(&mut self, canvas: &mut Canvas, p: &mut Paint, store: &Store, area: Area) {
         let Some(thread) = store.threads.get(&self.chat) else {
-            paint::draw_text_centered(canvas, "Loading…", area.width / 2.0, (area.top + area.bottom) / 2.0, BODY, SECONDARY);
+            paint::draw_text_centered(
+                canvas,
+                "Loading…",
+                area.width / 2.0,
+                (area.top + area.bottom) / 2.0,
+                BODY,
+                SECONDARY,
+            );
             return;
         };
         if thread.messages.is_empty() {
-            let note = thread.failed.as_deref().unwrap_or(if thread.loaded { "No messages yet" } else { "" });
-            paint::draw_text_centered(canvas, note, area.width / 2.0, (area.top + area.bottom) / 2.0, BODY, SECONDARY);
+            let note = thread.failed.as_deref().unwrap_or(if thread.loaded {
+                "No messages yet"
+            } else {
+                ""
+            });
+            paint::draw_text_centered(
+                canvas,
+                note,
+                area.width / 2.0,
+                (area.top + area.bottom) / 2.0,
+                BODY,
+                SECONDARY,
+            );
         }
         let base = area.bottom + area.offset;
         for place in &self.placed {
@@ -959,7 +1314,16 @@ impl Screen for ThreadScreen {
         canvas.fill_rect(0, 0, canvas.width, area.top as i32, BG, 1.0);
         canvas.fill_rect(0, area.top as i32 - 1, canvas.width, 1, SEPARATOR, 1.0);
         let cy = STATUS + TOP_BAR / 2.0;
-        paint::icon(canvas, p.cache, Icon::Back, MARGIN - 10.0, cy - 36.0, 72.0, false, TEXT);
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Back,
+            MARGIN - 10.0,
+            cy - 36.0,
+            72.0,
+            false,
+            TEXT,
+        );
         let chat = store.chat(&self.chat);
         let d = 34.0 * DP;
         let ax = MARGIN + 90.0 + d / 2.0;
@@ -972,29 +1336,99 @@ impl Screen for ThreadScreen {
             let sub = if chat.is_group() {
                 format!("{} members", chat.members.unwrap_or(users.len() as u32 + 1))
             } else {
-                users.first().and_then(|u| u.username.clone()).unwrap_or_default()
+                users
+                    .first()
+                    .and_then(|u| u.username.clone())
+                    .unwrap_or_default()
             };
-            paint::draw_text(canvas, &paint::fit(&sub, TINY, area.width - x - 260.0), x, cy + 40.0, TINY, SECONDARY);
+            paint::draw_text(
+                canvas,
+                &paint::fit(&sub, TINY, area.width - x - 260.0),
+                x,
+                cy + 40.0,
+                TINY,
+                SECONDARY,
+            );
         }
-        paint::icon(canvas, p.cache, Icon::Phone, area.width - MARGIN - 190.0, cy - 30.0, 60.0, false, TEXT);
-        paint::icon(canvas, p.cache, Icon::Video, area.width - MARGIN - 70.0, cy - 33.0, 70.0, false, TEXT);
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Phone,
+            area.width - MARGIN - 190.0,
+            cy - 30.0,
+            60.0,
+            false,
+            TEXT,
+        );
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Video,
+            area.width - MARGIN - 70.0,
+            cy - 33.0,
+            70.0,
+            false,
+            TEXT,
+        );
         // The composer.
         let bottom = area.bottom;
-        canvas.fill_rect(0, bottom as i32, canvas.width, canvas.height - bottom as i32, BG, 1.0);
+        canvas.fill_rect(
+            0,
+            bottom as i32,
+            canvas.width,
+            canvas.height - bottom as i32,
+            BG,
+            1.0,
+        );
         let h = self.composer_height() - 24.0;
         let field = RectF::new(MARGIN * 0.6, bottom + 12.0, area.width - MARGIN * 1.2, h);
         canvas.fill_rrect(field, (COMPOSER_H / 2.0).min(h / 2.0), FIELD, 1.0);
         let cam = 36.0 * DP;
-        canvas.fill_circle(field.x + 14.0 + cam / 2.0, field.y + h - COMPOSER_H / 2.0, cam / 2.0, BLUE, 1.0);
-        paint::icon(canvas, p.cache, Icon::Camera, field.x + 14.0 + cam / 2.0 - 30.0, field.y + h - COMPOSER_H / 2.0 - 30.0, 60.0, false, 0xffffff);
+        canvas.fill_circle(
+            field.x + 14.0 + cam / 2.0,
+            field.y + h - COMPOSER_H / 2.0,
+            cam / 2.0,
+            BLUE,
+            1.0,
+        );
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Camera,
+            field.x + 14.0 + cam / 2.0 - 30.0,
+            field.y + h - COMPOSER_H / 2.0 - 30.0,
+            60.0,
+            false,
+            0xffffff,
+        );
         let tx = field.x + 14.0 + cam + 26.0;
         let read_only = chat.is_some_and(|chat| chat.ext.get("read_only").is_some());
         if self.composer.is_empty() {
-            let hint = if read_only { "You can't reply to this conversation" } else { "Message…" };
-            paint::draw_text(canvas, hint, tx, paint::baseline(field.y + h - COMPOSER_H / 2.0, BODY), BODY, SECONDARY);
+            let hint = if read_only {
+                "You can't reply to this conversation"
+            } else {
+                "Message…"
+            };
+            paint::draw_text(
+                canvas,
+                hint,
+                tx,
+                paint::baseline(field.y + h - COMPOSER_H / 2.0, BODY),
+                BODY,
+                SECONDARY,
+            );
             let ix = field.x + field.w - 40.0;
             for (n, icon) in [Icon::Photo, Icon::Mic].iter().enumerate() {
-                paint::icon(canvas, p.cache, *icon, ix - (n as f32 + 1.0) * 84.0, field.y + h - COMPOSER_H / 2.0 - 30.0, 60.0, false, TEXT);
+                paint::icon(
+                    canvas,
+                    p.cache,
+                    *icon,
+                    ix - (n as f32 + 1.0) * 84.0,
+                    field.y + h - COMPOSER_H / 2.0 - 30.0,
+                    60.0,
+                    false,
+                    TEXT,
+                );
             }
         } else {
             let lines = &self.composer_lines;
@@ -1002,7 +1436,14 @@ impl Screen for ThreadScreen {
             for (n, line) in lines[lines.len() - shown..].iter().enumerate() {
                 paint::draw_line(canvas, line, tx, field.y + 24.0 + 40.0 + n as f32 * 52.0);
             }
-            paint::draw_text_right(canvas, "Send", field.x + field.w - 34.0, paint::baseline(field.y + h - COMPOSER_H / 2.0, BODY_BOLD), BODY_BOLD, BLUE);
+            paint::draw_text_right(
+                canvas,
+                "Send",
+                field.x + field.w - 34.0,
+                paint::baseline(field.y + h - COMPOSER_H / 2.0, BODY_BOLD),
+                BODY_BOLD,
+                BLUE,
+            );
         }
         if self.focused {
             let caret_line = self.composer_lines.len().clamp(1, 5) - 1;
@@ -1019,8 +1460,14 @@ impl Screen for ThreadScreen {
                 return Action::Pop;
             }
             let chat = store.chat(&self.chat);
-            if let Some(user) = chat.filter(|c| !c.is_group()).and_then(|c| model::chat_users(&c.ext).into_iter().next()) {
-                return Action::Push(Box::new(ProfileScreen::user(user.id.clone(), user.username.clone())));
+            if let Some(user) = chat
+                .filter(|c| !c.is_group())
+                .and_then(|c| model::chat_users(&c.ext).into_iter().next())
+            {
+                return Action::Push(Box::new(ProfileScreen::user(
+                    user.id.clone(),
+                    user.username.clone(),
+                )));
             }
             return Action::None;
         }
@@ -1057,18 +1504,29 @@ impl Screen for ThreadScreen {
             };
             if let Some(share) = message.ext.get("share") {
                 let kind = share["kind"].as_str().unwrap_or("");
-                let username = share["username"].as_str().or_else(|| share["author"].as_str()).unwrap_or("");
+                let username = share["username"]
+                    .as_str()
+                    .or_else(|| share["author"].as_str())
+                    .unwrap_or("");
                 match kind {
                     "post" | "reel" => {
-                        if let Some(url) = share["url"].as_str() {
-                            let _ = url;
+                        if let Some(code) = share["code"].as_str().filter(|code| !code.is_empty()) {
+                            return Action::Push(Box::new(super::post::PostScreen::by_code(
+                                code.to_owned(),
+                            )));
                         }
                         if !username.is_empty() {
-                            return Action::Push(Box::new(ProfileScreen::user(String::new(), Some(username.to_owned()))));
+                            return Action::Push(Box::new(ProfileScreen::user(
+                                String::new(),
+                                Some(username.to_owned()),
+                            )));
                         }
                     }
                     "profile" | "story" if !username.is_empty() => {
-                        return Action::Push(Box::new(ProfileScreen::user(String::new(), Some(username.to_owned()))));
+                        return Action::Push(Box::new(ProfileScreen::user(
+                            String::new(),
+                            Some(username.to_owned()),
+                        )));
                     }
                     "link" => {
                         if let Some(url) = share["url"].as_str() {
@@ -1100,7 +1558,8 @@ impl Screen for ThreadScreen {
             .split(' ')
             .map(|word| (word.to_owned(), BODY, TEXT))
             .collect();
-        self.composer_lines = paint::wrap_runs(&words, 1080.0 - 2.0 * MARGIN - 36.0 * DP - 220.0, 50).0;
+        self.composer_lines =
+            paint::wrap_runs(&words, 1080.0 - 2.0 * MARGIN - 36.0 * DP - 220.0, 50).0;
         Action::Redraw
     }
 
@@ -1113,8 +1572,13 @@ impl Screen for ThreadScreen {
             return Action::None;
         };
         let max = (self.height - (area.bottom - area.top)).max(0.0);
-        if thread.more && !thread.loading_older && area.offset > max - 1500.0
-            && let Some(first) = thread.messages.iter().find(|m| m.status.as_deref() != Some("pending"))
+        if thread.more
+            && !thread.loading_older
+            && area.offset > max - 1500.0
+            && let Some(first) = thread
+                .messages
+                .iter()
+                .find(|m| m.status.as_deref() != Some("pending"))
         {
             return Action::request(
                 "history",
@@ -1152,11 +1616,12 @@ pub fn spinner(canvas: &mut Canvas, cx: f32, cy: f32) {
     for n in 0..8 {
         let a = n as f32 * std::f32::consts::TAU / 8.0;
         let alpha = 0.25 + 0.75 * (n as f32 / 8.0);
-        canvas.fill_circle(cx + a.cos() * 26.0, cy + a.sin() * 26.0, 6.0, SECONDARY, alpha);
+        canvas.fill_circle(
+            cx + a.cos() * 26.0,
+            cy + a.sin() * 26.0,
+            6.0,
+            SECONDARY,
+            alpha,
+        );
     }
-}
-
-/// The user a 1:1 chat is with.
-pub fn chat_user(chat: &Chat) -> Option<User> {
-    model::chat_users(&chat.ext).into_iter().next()
 }

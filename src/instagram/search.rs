@@ -10,8 +10,8 @@ use serde_json::json;
 use super::app::{Action, Area, Screen};
 use super::model::{Hashtag, User};
 use super::paint::{
-    self, Icon, Paint, Ring, BG, BODY, BODY_BOLD, DP, FIELD, MARGIN, SAFE_BOTTOM, SECONDARY, SMALL, STATUS,
-    TAB_BAR, TEXT, TOP_BAR,
+    self, BG, BODY, BODY_BOLD, DP, FIELD, Icon, MARGIN, Paint, Ring, SAFE_BOTTOM, SECONDARY, SMALL,
+    STATUS, TAB_BAR, TEXT, TOP_BAR,
 };
 use super::profile::ProfileScreen;
 use super::store::{Ask, Store};
@@ -71,7 +71,10 @@ impl SearchScreen {
                         .search
                         .users
                         .iter()
-                        .filter(|user| user.handle().to_lowercase().contains(&q) || user.name.to_lowercase().contains(&q))
+                        .filter(|user| {
+                            user.handle().to_lowercase().contains(&q)
+                                || user.name.to_lowercase().contains(&q)
+                        })
                         .map(Row::User),
                 );
             }
@@ -82,7 +85,11 @@ impl SearchScreen {
 
 impl Screen for SearchScreen {
     fn viewport(&self, height: f32) -> (f32, f32) {
-        let bottom = if self.focused { height } else { height - SAFE_BOTTOM - TAB_BAR };
+        let bottom = if self.focused {
+            height
+        } else {
+            height - SAFE_BOTTOM - TAB_BAR
+        };
         (STATUS + TOP_BAR, bottom)
     }
 
@@ -111,34 +118,104 @@ impl Screen for SearchScreen {
                     paint::draw_text(canvas, label, MARGIN, cy + 14.0, paint::HEADLINE, TEXT);
                 }
                 Row::User(user) => {
-                    paint::avatar(canvas, p, user.avatar_ref(), MARGIN + AVATAR / 2.0, cy, AVATAR, Ring::from_story(user.story.as_deref()));
+                    paint::avatar(
+                        canvas,
+                        p,
+                        user.avatar_ref(),
+                        MARGIN + AVATAR / 2.0,
+                        cy,
+                        AVATAR,
+                        Ring::from_story(user.story.as_deref()),
+                    );
                     let x = MARGIN + AVATAR + 32.0;
                     let w = paint::draw_text(canvas, user.handle(), x, cy - 6.0, BODY_BOLD, TEXT);
                     if user.verified {
                         paint::verified(canvas, p.cache, x + w + 10.0, cy - 19.0, 34.0);
                     }
-                    paint::draw_text(canvas, &paint::fit(&user.name, SMALL, area.width - x - MARGIN), x, cy + 40.0, SMALL, SECONDARY);
+                    paint::draw_text(
+                        canvas,
+                        &paint::fit(&user.name, SMALL, area.width - x - MARGIN),
+                        x,
+                        cy + 40.0,
+                        SMALL,
+                        SECONDARY,
+                    );
                 }
                 Row::Tag(tag) => {
-                    canvas.stroke_circle(MARGIN + AVATAR / 2.0, cy, AVATAR / 2.0 - 2.0, 3.0, 0x363636, 1.0);
-                    paint::icon(canvas, p.cache, Icon::Hashtag, MARGIN + AVATAR / 2.0 - 28.0, cy - 28.0, 56.0, false, TEXT);
+                    canvas.stroke_circle(
+                        MARGIN + AVATAR / 2.0,
+                        cy,
+                        AVATAR / 2.0 - 2.0,
+                        3.0,
+                        0x363636,
+                        1.0,
+                    );
+                    paint::icon(
+                        canvas,
+                        p.cache,
+                        Icon::Hashtag,
+                        MARGIN + AVATAR / 2.0 - 28.0,
+                        cy - 28.0,
+                        56.0,
+                        false,
+                        TEXT,
+                    );
                     let x = MARGIN + AVATAR + 32.0;
-                    paint::draw_text(canvas, &format!("#{}", tag.name), x, cy - 6.0, BODY_BOLD, TEXT);
-                    paint::draw_text(canvas, &format!("{} posts", paint::count(tag.posts)), x, cy + 40.0, SMALL, SECONDARY);
+                    paint::draw_text(
+                        canvas,
+                        &format!("#{}", tag.name),
+                        x,
+                        cy - 6.0,
+                        BODY_BOLD,
+                        TEXT,
+                    );
+                    paint::draw_text(
+                        canvas,
+                        &format!("{} posts", paint::count(tag.posts)),
+                        x,
+                        cy + 40.0,
+                        SMALL,
+                        SECONDARY,
+                    );
                 }
             }
         }
-        if rows.is_empty() && !self.query.trim().is_empty() && !store.search.loading && store.search.query == self.query {
-            paint::draw_text_centered(canvas, &format!("No results for \"{}\"", self.query.trim()), area.width / 2.0, area.top + 200.0, BODY, SECONDARY);
+        if rows.is_empty()
+            && !self.query.trim().is_empty()
+            && !store.search.loading
+            && store.search.query == self.query
+        {
+            paint::draw_text_centered(
+                canvas,
+                &format!("No results for \"{}\"", self.query.trim()),
+                area.width / 2.0,
+                area.top + 200.0,
+                BODY,
+                SECONDARY,
+            );
         }
     }
 
     fn chrome(&mut self, canvas: &mut Canvas, p: &mut Paint, _store: &Store, area: Area) {
         canvas.fill_rect(0, 0, canvas.width, area.top as i32, BG, 1.0);
         let h = 38.0 * DP;
-        let field = RectF::new(MARGIN, STATUS + (TOP_BAR - h) / 2.0, area.width - 2.0 * MARGIN - if self.focused { 170.0 } else { 0.0 }, h);
+        let field = RectF::new(
+            MARGIN,
+            STATUS + (TOP_BAR - h) / 2.0,
+            area.width - 2.0 * MARGIN - if self.focused { 170.0 } else { 0.0 },
+            h,
+        );
         canvas.fill_rrect(field, 10.0 * DP, FIELD, 1.0);
-        paint::icon(canvas, p.cache, Icon::Search, field.x + 30.0, field.y + (h - 44.0) / 2.0, 44.0, false, SECONDARY);
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Search,
+            field.x + 30.0,
+            field.y + (h - 44.0) / 2.0,
+            44.0,
+            false,
+            SECONDARY,
+        );
         let tx = field.x + 96.0;
         let by = paint::baseline(field.y + h / 2.0, BODY);
         if self.query.is_empty() {
@@ -148,8 +225,16 @@ impl Screen for SearchScreen {
             paint::draw_text(canvas, &shown, tx, by, BODY, TEXT);
         }
         if self.focused {
-            let caret = tx + paint::measure(&paint::fit(&self.query, BODY, field.w - 140.0), BODY) + 3.0;
-            canvas.fill_rect(caret as i32, (field.y + 22.0) as i32, 3, (h - 44.0) as i32, paint::BLUE, 1.0);
+            let caret =
+                tx + paint::measure(&paint::fit(&self.query, BODY, field.w - 140.0), BODY) + 3.0;
+            canvas.fill_rect(
+                caret as i32,
+                (field.y + 22.0) as i32,
+                3,
+                (h - 44.0) as i32,
+                paint::BLUE,
+                1.0,
+            );
             paint::draw_text_right(canvas, "Cancel", area.width - MARGIN, by, BODY, TEXT);
         }
     }
@@ -169,8 +254,13 @@ impl Screen for SearchScreen {
             return Action::None;
         }
         match self.rows(store).get(index as usize) {
-            Some(Row::User(user)) => Action::Push(Box::new(ProfileScreen::user(user.id.clone(), user.username.clone()))),
-            Some(Row::Tag(_)) => Action::Toast("Hashtag pages aren't here: they're mostly Reels.".into()),
+            Some(Row::User(user)) => Action::Push(Box::new(ProfileScreen::user(
+                user.id.clone(),
+                user.username.clone(),
+            ))),
+            Some(Row::Tag(_)) => {
+                Action::Toast("Hashtag pages aren't here: they're mostly Reels.".into())
+            }
             _ => Action::None,
         }
     }
@@ -211,7 +301,13 @@ impl Screen for SearchScreen {
                             store.search.loading = true;
                         }
                     })),
-                    Action::request("instagram.search", json!({"query": query}), Ask::Search { query: self.query.clone() }),
+                    Action::request(
+                        "instagram.search",
+                        json!({"query": query}),
+                        Ask::Search {
+                            query: self.query.clone(),
+                        },
+                    ),
                 ]);
             }
         }

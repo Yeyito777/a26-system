@@ -7,8 +7,8 @@ use serde_json::json;
 
 use super::app::{Action, Area, Screen};
 use super::paint::{
-    self, Icon, Line, Paint, Ring, BG, BLUE, BODY, BODY_BOLD, DP, MARGIN, RED, SAFE_BOTTOM, SECONDARY, SEPARATOR,
-    SMALL, STATUS, TEXT, TOP_BAR,
+    self, BG, BLUE, BODY, BODY_BOLD, DP, Icon, Line, MARGIN, Paint, RED, Ring, SAFE_BOTTOM,
+    SECONDARY, SEPARATOR, SMALL, STATUS, TEXT, TOP_BAR,
 };
 use super::store::{Ask, Store};
 use crate::comms::Scroll;
@@ -49,8 +49,12 @@ impl SettingsScreen {
     fn note(store: &Store, item: Item) -> &'static str {
         match item {
             Item::Import if store.fixtures => "This bridge runs on made-up data (fixtures).",
-            Item::Import => "Sign in to instagram.com in the Browser first; this copies that session to the phone's Instagram bridge. It stays on the phone.",
-            Item::Writes => "Off: this app only reads. Nothing is sent, liked, followed, or marked seen or read. On: it acts as Instagram's app does.",
+            Item::Import => {
+                "Sign in to instagram.com in the Browser first; this copies that session to the phone's Instagram bridge. It stays on the phone."
+            }
+            Item::Writes => {
+                "Off: this app only reads. Nothing is sent, liked, followed, or marked seen or read. On: it acts as Instagram's app does."
+            }
             Item::Notifications => "New messages and activity, through Moon.",
             Item::Previews => "Show message text in notifications.",
             _ => "",
@@ -61,7 +65,11 @@ impl SettingsScreen {
 fn toggle(canvas: &mut Canvas, x: f32, cy: f32, on: bool) {
     let r = RectF::new(x, cy - TOGGLE_H / 2.0, TOGGLE_W, TOGGLE_H);
     canvas.fill_rrect(r, TOGGLE_H / 2.0, if on { BLUE } else { 0x3a3a3a }, 1.0);
-    let knob = if on { r.x + r.w - TOGGLE_H / 2.0 } else { r.x + TOGGLE_H / 2.0 };
+    let knob = if on {
+        r.x + r.w - TOGGLE_H / 2.0
+    } else {
+        r.x + TOGGLE_H / 2.0
+    };
     canvas.fill_circle(knob, cy, TOGGLE_H / 2.0 - 6.0, 0xffffff, 1.0);
 }
 
@@ -81,9 +89,33 @@ impl Screen for SettingsScreen {
         self.generation = store.generation;
         self.rows.clear();
         let mut y = 30.0;
-        for item in [Item::Account, Item::Import, Item::Writes, Item::Notifications, Item::Previews, Item::Logout] {
+        for item in [
+            Item::Account,
+            Item::Import,
+            Item::Writes,
+            Item::Notifications,
+            Item::Previews,
+            Item::Logout,
+        ] {
             let note = Self::note(store, item);
-            let lines = if note.is_empty() { Vec::new() } else { paint::wrap_plain(note, SMALL, SECONDARY, width - 2.0 * MARGIN - if matches!(item, Item::Writes | Item::Notifications | Item::Previews) { TOGGLE_W + 40.0 } else { 0.0 }, 6).0 };
+            let lines = if note.is_empty() {
+                Vec::new()
+            } else {
+                paint::wrap_plain(
+                    note,
+                    SMALL,
+                    SECONDARY,
+                    width
+                        - 2.0 * MARGIN
+                        - if matches!(item, Item::Writes | Item::Notifications | Item::Previews) {
+                            TOGGLE_W + 40.0
+                        } else {
+                            0.0
+                        },
+                    6,
+                )
+                .0
+            };
             let h = match item {
                 Item::Account => 64.0 * DP + 60.0,
                 _ => 130.0 + lines.len() as f32 * 46.0,
@@ -108,22 +140,63 @@ impl Screen for SettingsScreen {
                     let d = 56.0 * DP;
                     let cy = y + d / 2.0 + 20.0;
                     let account = store.account();
-                    paint::avatar(canvas, p, account.and_then(|a| a.avatar.as_ref()).map(|m| m.reference.as_str()), MARGIN + d / 2.0, cy, d, Ring::None);
+                    paint::avatar(
+                        canvas,
+                        p,
+                        account
+                            .and_then(|a| a.avatar.as_ref())
+                            .map(|m| m.reference.as_str()),
+                        MARGIN + d / 2.0,
+                        cy,
+                        d,
+                        Ring::None,
+                    );
                     let x = MARGIN + d + 34.0;
                     let name = account.map_or("Not signed in".to_owned(), |a| a.name.clone());
                     paint::draw_text(canvas, &name, x, cy - 8.0, BODY_BOLD, TEXT);
                     let state = match store.status.state.as_str() {
-                        "online" => account.and_then(|a| a.username.clone()).map_or("Online".to_owned(), |u| format!("@{u} · online")),
-                        _ => store.status.detail.clone().unwrap_or_else(|| super::direct::status_note(store)),
+                        "online" => account
+                            .and_then(|a| a.username.clone())
+                            .map_or("Online".to_owned(), |u| format!("@{u} · online")),
+                        _ => store
+                            .status
+                            .detail
+                            .clone()
+                            .unwrap_or_else(|| super::direct::status_note(store)),
                     };
-                    paint::draw_text(canvas, &paint::fit(&state, SMALL, right - x), x, cy + 40.0, SMALL, SECONDARY);
+                    paint::draw_text(
+                        canvas,
+                        &paint::fit(&state, SMALL, right - x),
+                        x,
+                        cy + 40.0,
+                        SMALL,
+                        SECONDARY,
+                    );
                     canvas.fill_rect(0, (y + h - 1.0) as i32, canvas.width, 1, SEPARATOR, 1.0);
                 }
                 Item::Import => {
-                    let label = if store.status.signed_out() { "Import session from Browser" } else { "Import session again" };
-                    paint::draw_text(canvas, label, MARGIN, y + 70.0, BODY_BOLD, if store.fixtures { SECONDARY } else { BLUE });
+                    let label = if store.status.signed_out() {
+                        "Import session from Browser"
+                    } else {
+                        "Import session again"
+                    };
+                    paint::draw_text(
+                        canvas,
+                        label,
+                        MARGIN,
+                        y + 70.0,
+                        BODY_BOLD,
+                        if store.fixtures { SECONDARY } else { BLUE },
+                    );
                     if let Some(login) = &store.login {
-                        paint::draw_text_right(canvas, &paint::fit(login, SMALL, 360.0), right, y + 70.0, SMALL, SECONDARY);
+                        paint::draw_text_right(
+                            canvas,
+                            &paint::fit(login, SMALL, 360.0),
+                            right,
+                            y + 70.0,
+                            SMALL,
+                            SECONDARY,
+                        );
                     }
                     for (n, line) in lines.iter().enumerate() {
                         paint::draw_line(canvas, line, MARGIN, y + 120.0 + n as f32 * 46.0);
@@ -142,7 +215,11 @@ impl Screen for SettingsScreen {
                     }
                 }
                 Item::Logout => {
-                    let label = if self.confirm_logout { "Tap again to log out" } else { "Log out" };
+                    let label = if self.confirm_logout {
+                        "Tap again to log out"
+                    } else {
+                        "Log out"
+                    };
                     paint::draw_text(canvas, label, MARGIN, y + 70.0, BODY_BOLD, RED);
                 }
             }
@@ -152,16 +229,40 @@ impl Screen for SettingsScreen {
     fn chrome(&mut self, canvas: &mut Canvas, p: &mut Paint, _store: &Store, area: Area) {
         canvas.fill_rect(0, 0, canvas.width, area.top as i32, BG, 1.0);
         let cy = STATUS + TOP_BAR / 2.0;
-        paint::icon(canvas, p.cache, Icon::Back, MARGIN - 10.0, cy - 36.0, 72.0, false, TEXT);
-        paint::draw_text(canvas, "Settings", MARGIN + 100.0, paint::baseline(cy, paint::TITLE), paint::TITLE, TEXT);
+        paint::icon(
+            canvas,
+            p.cache,
+            Icon::Back,
+            MARGIN - 10.0,
+            cy - 36.0,
+            72.0,
+            false,
+            TEXT,
+        );
+        paint::draw_text(
+            canvas,
+            "Settings",
+            MARGIN + 100.0,
+            paint::baseline(cy, paint::TITLE),
+            paint::TITLE,
+            TEXT,
+        );
     }
 
     fn tap(&mut self, store: &Store, x: f32, y: f32, area: Area) -> Action {
         if y < area.top {
-            return if x < MARGIN + 110.0 { Action::Pop } else { Action::None };
+            return if x < MARGIN + 110.0 {
+                Action::Pop
+            } else {
+                Action::None
+            };
         }
         let cy = y - area.top + area.offset;
-        let Some((_, _, item, _)) = self.rows.iter().find(|(row_y, h, _, _)| cy >= *row_y && cy < row_y + h) else {
+        let Some((_, _, item, _)) = self
+            .rows
+            .iter()
+            .find(|(row_y, h, _, _)| cy >= *row_y && cy < row_y + h)
+        else {
             return Action::None;
         };
         let item = *item;
@@ -170,12 +271,26 @@ impl Screen for SettingsScreen {
         }
         match item {
             Item::Import if !store.fixtures => Action::Many(vec![
-                Action::Mutate(Box::new(|store: &mut Store| store.login = Some("Importing…".into()))),
+                Action::Mutate(Box::new(|store: &mut Store| {
+                    store.login = Some("Importing…".into())
+                })),
                 Action::request("login.start", json!({"method": "browser"}), Ask::Login),
             ]),
-            Item::Writes => Action::request("settings.set", json!({"writes": !store.settings.writes}), Ask::Settings),
-            Item::Notifications => Action::request("settings.set", json!({"notifications": !store.settings.notifications}), Ask::Settings),
-            Item::Previews => Action::request("settings.set", json!({"previews": !store.settings.previews}), Ask::Settings),
+            Item::Writes => Action::request(
+                "settings.set",
+                json!({"writes": !store.settings.writes}),
+                Ask::Settings,
+            ),
+            Item::Notifications => Action::request(
+                "settings.set",
+                json!({"notifications": !store.settings.notifications}),
+                Ask::Settings,
+            ),
+            Item::Previews => Action::request(
+                "settings.set",
+                json!({"previews": !store.settings.previews}),
+                Ask::Settings,
+            ),
             Item::Logout => {
                 if self.confirm_logout {
                     self.confirm_logout = false;

@@ -8,7 +8,9 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::model::{self, Activity, Badge, Comment, Hashtag, Highlight, Post, Profile, Reel, ReelSummary, User};
+use super::model::{
+    self, Activity, Badge, Comment, Hashtag, Highlight, Post, Profile, Reel, ReelSummary, User,
+};
 use crate::social::proto::{BridgeError, Chat, Event, Message, Status};
 
 /// What a request was for: where its answer goes.
@@ -16,23 +18,61 @@ use crate::social::proto::{BridgeError, Chat, Event, Message, Status};
 pub enum Ask {
     Chats,
     Settings,
-    History { chat: String, older: bool },
-    Feed { cursor: Option<String>, cached: bool },
-    Tray { cached: bool },
+    History {
+        chat: String,
+        older: bool,
+    },
+    Feed {
+        cursor: Option<String>,
+        cached: bool,
+    },
+    Tray {
+        cached: bool,
+    },
     Reels,
-    Profile { key: String, cached: bool },
-    Posts { user: String, tagged: bool, more: bool },
-    Highlights { user: String },
-    Post { id: String },
-    Comments { post: String, more: bool },
-    Replies { post: String, comment: String },
-    Search { query: String },
+    Profile {
+        key: String,
+        cached: bool,
+    },
+    Posts {
+        user: String,
+        tagged: bool,
+        more: bool,
+    },
+    Highlights {
+        user: String,
+    },
+    Post {
+        id: String,
+    },
+    Comments {
+        post: String,
+        more: bool,
+    },
+    Replies {
+        post: String,
+        comment: String,
+    },
+    Search {
+        query: String,
+    },
     Recent,
-    Activity { cached: bool },
+    Activity {
+        cached: bool,
+    },
     Badge,
-    Send { chat: String, client_id: String },
-    Write { what: &'static str },
-    ChatWith { user: String },
+    Send {
+        chat: String,
+        client_id: String,
+    },
+    Write {
+        what: &'static str,
+    },
+    Follows {
+        user: String,
+        kind: &'static str,
+        more: bool,
+    },
     Login,
     Other,
 }
@@ -63,6 +103,14 @@ pub struct Feed {
 #[derive(Debug, Clone, Default)]
 pub struct Grid {
     pub posts: Vec<Post>,
+    pub cursor: Option<String>,
+    pub loading: bool,
+    pub loaded: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Users {
+    pub users: Vec<User>,
     pub cursor: Option<String>,
     pub loading: bool,
     pub loaded: bool,
@@ -130,6 +178,8 @@ pub struct Store {
     pub comments: HashMap<String, Comments>,
     pub search: Search,
     pub activity: ActivityData,
+    /// (user id, `followers` or `following`) → the list.
+    pub follows: HashMap<(String, &'static str), Users>,
     /// user id → 1:1 chat id (a profile's Message button).
     pub chat_with: HashMap<String, Option<String>>,
     /// Sends in flight: client id → (chat, text).
@@ -143,7 +193,12 @@ fn list<T: for<'de> serde::Deserialize<'de>>(value: &Value, key: &str) -> Vec<T>
     value
         .get(key)
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(|item| T::deserialize(item).ok()).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| T::deserialize(item).ok())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -152,7 +207,12 @@ fn opt_str(value: &Value, key: &str) -> Option<String> {
 }
 
 pub fn sort_chats(chats: &mut [Chat]) {
-    chats.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.ts.cmp(&a.ts)).then(a.id.cmp(&b.id)));
+    chats.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then(b.ts.cmp(&a.ts))
+            .then(a.id.cmp(&b.id))
+    });
 }
 
 impl Store {
@@ -169,16 +229,22 @@ impl Store {
     }
 
     pub fn inbox(&self) -> impl Iterator<Item = &Chat> {
-        self.chats.iter().filter(|chat| chat.folder.as_deref().unwrap_or("inbox") == "inbox")
+        self.chats
+            .iter()
+            .filter(|chat| chat.folder.as_deref().unwrap_or("inbox") == "inbox")
     }
 
     pub fn requests(&self) -> impl Iterator<Item = &Chat> {
-        self.chats.iter().filter(|chat| chat.folder.as_deref() == Some("requests"))
+        self.chats
+            .iter()
+            .filter(|chat| chat.folder.as_deref() == Some("requests"))
     }
 
     /// Unread chats in the inbox (the Messages tab's count).
     pub fn unread_chats(&self) -> u32 {
-        self.inbox().filter(|chat| chat.unread > 0 && !chat.muted).count() as u32
+        self.inbox()
+            .filter(|chat| chat.unread > 0 && !chat.muted)
+            .count() as u32
     }
 
     pub fn learn_user(&mut self, user: &User) {
@@ -216,13 +282,20 @@ impl Store {
                 };
                 if let Some(client) = &message.client_id {
                     thread.messages.retain(|known| {
-                        !(known.status.as_deref() == Some("pending") && known.client_id.as_ref() == Some(client))
+                        !(known.status.as_deref() == Some("pending")
+                            && known.client_id.as_ref() == Some(client))
                     });
                 }
-                match thread.messages.iter_mut().find(|known| known.id == message.id) {
+                match thread
+                    .messages
+                    .iter_mut()
+                    .find(|known| known.id == message.id)
+                {
                     Some(known) => *known = *message,
                     None => {
-                        let at = thread.messages.partition_point(|known| known.ts <= message.ts);
+                        let at = thread
+                            .messages
+                            .partition_point(|known| known.ts <= message.ts);
                         thread.messages.insert(at, *message);
                     }
                 }
@@ -269,7 +342,9 @@ impl Store {
                     thread.loading_older = false;
                     let mut merged: Vec<Message> = page
                         .into_iter()
-                        .filter(|message| !thread.messages.iter().any(|known| known.id == message.id))
+                        .filter(|message| {
+                            !thread.messages.iter().any(|known| known.id == message.id)
+                        })
                         .collect();
                     merged.append(&mut thread.messages);
                     thread.messages = merged;
@@ -282,13 +357,22 @@ impl Store {
                     let mut older: Vec<Message> = thread
                         .messages
                         .iter()
-                        .filter(|known| known.ts < first_ts && !is_pending(known) && !page.iter().any(|m| m.id == known.id))
+                        .filter(|known| {
+                            known.ts < first_ts
+                                && !is_pending(known)
+                                && !page.iter().any(|m| m.id == known.id)
+                        })
                         .cloned()
                         .collect();
                     let pending: Vec<Message> = thread
                         .messages
                         .iter()
-                        .filter(|known| is_pending(known) && !page.iter().any(|m| m.client_id.is_some() && m.client_id == known.client_id))
+                        .filter(|known| {
+                            is_pending(known)
+                                && !page.iter().any(|m| {
+                                    m.client_id.is_some() && m.client_id == known.client_id
+                                })
+                        })
                         .cloned()
                         .collect();
                     if older.is_empty() {
@@ -311,8 +395,10 @@ impl Store {
                 feed.loading = false;
                 feed.failed = None;
                 if cursor.is_some() {
-                    let known: std::collections::HashSet<String> = feed.posts.iter().map(|p| p.id.clone()).collect();
-                    feed.posts.extend(posts.into_iter().filter(|post| !known.contains(&post.id)));
+                    let known: std::collections::HashSet<String> =
+                        feed.posts.iter().map(|p| p.id.clone()).collect();
+                    feed.posts
+                        .extend(posts.into_iter().filter(|post| !known.contains(&post.id)));
                     feed.cursor = next;
                     feed.end = end;
                 } else if cached {
@@ -323,7 +409,12 @@ impl Store {
                     }
                 } else {
                     let same = feed.posts.len() >= posts.len().min(3)
-                        && feed.posts.iter().zip(&posts).take(3).all(|(a, b)| a.id == b.id);
+                        && feed
+                            .posts
+                            .iter()
+                            .zip(&posts)
+                            .take(3)
+                            .all(|(a, b)| a.id == b.id);
                     if feed.posts.is_empty() || feed.cached || same || !feed.loaded {
                         feed.posts = posts;
                         feed.cursor = next;
@@ -345,7 +436,9 @@ impl Store {
                     self.learn_user(&reel.user);
                 }
                 self.tray = reels;
-                self.own_reel = value.get("own").and_then(|own| serde_json::from_value(own.clone()).ok());
+                self.own_reel = value
+                    .get("own")
+                    .and_then(|own| serde_json::from_value(own.clone()).ok());
                 if !cached {
                     self.tray_loaded = true;
                 }
@@ -357,7 +450,9 @@ impl Store {
                 }
             }
             Ask::Profile { key, cached } => {
-                let profile: Option<Profile> = value.get("profile").and_then(|p| serde_json::from_value(p.clone()).ok());
+                let profile: Option<Profile> = value
+                    .get("profile")
+                    .and_then(|p| serde_json::from_value(p.clone()).ok());
                 let Some(profile) = profile else {
                     return false;
                 };
@@ -366,7 +461,8 @@ impl Store {
                 }
                 self.learn_user(&profile.user);
                 if let Some(thread) = value.get("thread") {
-                    self.chat_with.insert(profile.user.id.clone(), thread.as_str().map(str::to_owned));
+                    self.chat_with
+                        .insert(profile.user.id.clone(), thread.as_str().map(str::to_owned));
                 }
                 if key != profile.user.id {
                     self.usernames.insert(key, profile.user.id.clone());
@@ -375,7 +471,11 @@ impl Store {
             }
             Ask::Posts { user, tagged, more } => {
                 let posts: Vec<Post> = list(&value, "posts");
-                let map = if tagged { &mut self.tagged } else { &mut self.grids };
+                let map = if tagged {
+                    &mut self.tagged
+                } else {
+                    &mut self.grids
+                };
                 let grid = map.entry(user).or_default();
                 grid.loading = false;
                 grid.loaded = true;
@@ -390,7 +490,10 @@ impl Store {
                 self.highlights.insert(user, list(&value, "highlights"));
             }
             Ask::Post { id } => {
-                if let Some(post) = value.get("post").and_then(|p| serde_json::from_value::<Post>(p.clone()).ok()) {
+                if let Some(post) = value
+                    .get("post")
+                    .and_then(|p| serde_json::from_value::<Post>(p.clone()).ok())
+                {
                     self.learn_user(&post.author);
                     self.posts.insert(id, post);
                 }
@@ -413,7 +516,11 @@ impl Store {
             }
             Ask::Replies { post, comment } => {
                 let items: Vec<Comment> = list(&value, "comments");
-                self.comments.entry(post).or_default().replies.insert(comment, items);
+                self.comments
+                    .entry(post)
+                    .or_default()
+                    .replies
+                    .insert(comment, items);
             }
             Ask::Search { query } => {
                 if query != self.search.query {
@@ -444,7 +551,10 @@ impl Store {
             Ask::Badge => self.activity.badge = model::field(&value, "badge"),
             Ask::Send { chat, client_id } => {
                 self.sending.remove(&client_id);
-                if let Some(message) = value.get("message").and_then(|m| serde_json::from_value::<Message>(m.clone()).ok()) {
+                if let Some(message) = value
+                    .get("message")
+                    .and_then(|m| serde_json::from_value::<Message>(m.clone()).ok())
+                {
                     self.event(Event::Message {
                         message: Box::new(message),
                         live: true,
@@ -452,8 +562,18 @@ impl Store {
                 }
                 let _ = chat;
             }
-            Ask::ChatWith { user } => {
-                self.chat_with.insert(user, opt_str(&value, "chat"));
+            Ask::Follows { user, kind, more } => {
+                let users: Vec<User> = list(&value, "users");
+                self.learn_users(&users);
+                let entry = self.follows.entry((user, kind)).or_default();
+                entry.loading = false;
+                entry.loaded = true;
+                entry.cursor = opt_str(&value, "cursor");
+                if more {
+                    entry.users.extend(users);
+                } else {
+                    entry.users = users;
+                }
             }
             Ask::Login => self.login = Some("Imported. Connecting…".into()),
             Ask::Write { .. } | Ask::Other => {}
@@ -487,7 +607,11 @@ impl Store {
                 }
             }
             Ask::Posts { user, tagged, .. } => {
-                let map = if tagged { &mut self.tagged } else { &mut self.grids };
+                let map = if tagged {
+                    &mut self.tagged
+                } else {
+                    &mut self.grids
+                };
                 let grid = map.entry(user).or_default();
                 grid.loading = false;
                 grid.loaded = true;
@@ -498,6 +622,11 @@ impl Store {
                 comments.loaded = true;
             }
             Ask::Search { .. } => self.search.loading = false,
+            Ask::Follows { user, kind, .. } => {
+                let entry = self.follows.entry((user, kind)).or_default();
+                entry.loading = false;
+                entry.loaded = true;
+            }
             Ask::Send { chat, client_id } => {
                 self.sending.remove(&client_id);
                 if let Some(thread) = self.threads.get_mut(&chat)
@@ -510,7 +639,13 @@ impl Store {
                 }
                 self.notice = Some(message);
             }
-            Ask::Write { .. } | Ask::Login => self.notice = Some(if error.code == "read_only" { message } else { error.message.clone() }),
+            Ask::Write { .. } | Ask::Login => {
+                self.notice = Some(if error.code == "read_only" {
+                    message
+                } else {
+                    error.message.clone()
+                })
+            }
             Ask::Activity { .. } => self.activity.loaded = true,
             _ => {}
         }
@@ -521,14 +656,30 @@ impl Store {
     /// A request goes out: what it loads shows as loading.
     pub fn asking(&mut self, ask: &Ask) {
         match ask {
-            Ask::History { chat, older: true } => self.threads.entry(chat.clone()).or_default().loading_older = true,
-            Ask::Feed { cursor: Some(_), .. } => self.feed.loading = true,
+            Ask::History { chat, older: true } => {
+                self.threads.entry(chat.clone()).or_default().loading_older = true
+            }
+            Ask::Feed {
+                cursor: Some(_), ..
+            } => self.feed.loading = true,
             Ask::Posts { user, tagged, .. } => {
-                let map = if *tagged { &mut self.tagged } else { &mut self.grids };
+                let map = if *tagged {
+                    &mut self.tagged
+                } else {
+                    &mut self.grids
+                };
                 map.entry(user.clone()).or_default().loading = true;
             }
-            Ask::Comments { post, more: true } => self.comments.entry(post.clone()).or_default().loading = true,
+            Ask::Comments { post, more: true } => {
+                self.comments.entry(post.clone()).or_default().loading = true
+            }
             Ask::Search { .. } => self.search.loading = true,
+            Ask::Follows { user, kind, .. } => {
+                self.follows
+                    .entry((user.clone(), kind))
+                    .or_default()
+                    .loading = true
+            }
             _ => return,
         }
         self.bump();
@@ -553,7 +704,8 @@ impl Store {
             client_id: Some(client_id.to_owned()),
             ..Default::default()
         });
-        self.sending.insert(client_id.to_owned(), (chat.to_owned(), text.to_owned()));
+        self.sending
+            .insert(client_id.to_owned(), (chat.to_owned(), text.to_owned()));
         self.bump();
     }
 }
@@ -567,12 +719,30 @@ mod tests {
     fn a_fresh_feed_page_waits_while_the_user_reads() {
         let mut store = Store::default();
         let page = |ids: &[&str]| json!({"posts": ids.iter().map(|id| json!({"id": id, "author": {"id": "1", "name": "a"}})).collect::<Vec<_>>(), "cursor": "c"});
-        store.answer(Ask::Feed { cursor: None, cached: false }, Ok(page(&["1", "2", "3"])));
+        store.answer(
+            Ask::Feed {
+                cursor: None,
+                cached: false,
+            },
+            Ok(page(&["1", "2", "3"])),
+        );
         assert_eq!(store.feed.posts.len(), 3);
-        store.answer(Ask::Feed { cursor: None, cached: false }, Ok(page(&["9", "1", "2"])));
+        store.answer(
+            Ask::Feed {
+                cursor: None,
+                cached: false,
+            },
+            Ok(page(&["9", "1", "2"])),
+        );
         assert_eq!(store.feed.posts[0].id, "1");
         assert!(store.feed.pending.is_some());
-        store.answer(Ask::Feed { cursor: Some("c".into()), cached: false }, Ok(page(&["3", "4"])));
+        store.answer(
+            Ask::Feed {
+                cursor: Some("c".into()),
+                cached: false,
+            },
+            Ok(page(&["3", "4"])),
+        );
         assert_eq!(store.feed.posts.len(), 4);
     }
 
@@ -581,16 +751,29 @@ mod tests {
         let mut store = Store::default();
         let message = |id: &str, ts: i64| json!({"id": id, "chat": "c", "ts": ts, "author": {"id": "u", "name": "U"}, "text": id});
         store.answer(
-            Ask::History { chat: "c".into(), older: false },
+            Ask::History {
+                chat: "c".into(),
+                older: false,
+            },
             Ok(json!({"messages": [message("b", 2), message("c", 3)], "more": true})),
         );
         store.answer(
-            Ask::History { chat: "c".into(), older: true },
+            Ask::History {
+                chat: "c".into(),
+                older: true,
+            },
             Ok(json!({"messages": [message("a", 1)], "more": false})),
         );
         let event: Message = serde_json::from_value(message("d", 4)).unwrap();
-        store.event(Event::Message { message: Box::new(event), live: true });
-        let ids: Vec<&str> = store.threads["c"].messages.iter().map(|m| m.id.as_str()).collect();
+        store.event(Event::Message {
+            message: Box::new(event),
+            live: true,
+        });
+        let ids: Vec<&str> = store.threads["c"]
+            .messages
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
         assert_eq!(ids, ["a", "b", "c", "d"]);
         assert!(!store.threads["c"].more);
     }
