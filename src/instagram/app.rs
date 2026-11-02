@@ -187,8 +187,6 @@ pub struct Instagram {
     profile: bool,
     sends: u32,
     verify: bool,
-    /// The finger's newest row (profiling).
-    finger: Option<i32>,
     /// A chat being opened and since when (profiling).
     opening: Option<(String, Instant)>,
 }
@@ -230,7 +228,6 @@ impl Instagram {
                 || std::env::var_os("EXOCORTEX_APP_PROFILE").is_some(),
             sends: 0,
             verify: std::env::var_os("INSTAGRAM_APP_VERIFY").is_some(),
-            finger: None,
             opening: None,
         }
     }
@@ -717,21 +714,15 @@ impl App for Instagram {
 
     fn gesture(&mut self, cx: &mut Cx, gesture: Gesture) {
         let now = cx.now;
-        if self.profile {
-            match gesture {
-                Gesture::Down { y, .. } => {
-                    self.finger = Some(y.round() as i32);
-                    eprintln!(
-                        "instagram: press at {:.3} y {}",
-                        monotonic_ms(),
-                        y.round() as i32 + 124
-                    );
-                }
-                Gesture::DragStart { y, .. }
-                | Gesture::Drag { y, .. }
-                | Gesture::DragEnd { y, .. } => self.finger = Some(y.round() as i32),
-                _ => {}
-            }
+        // Profiling: a press, in screen rows (the bench times an open from it).
+        if self.profile
+            && let Gesture::Down { y, .. } = gesture
+        {
+            eprintln!(
+                "instagram: press at {:.3} y {}",
+                monotonic_ms(),
+                (y + crate::exocortex::wayland::SCREEN_TOP).round() as i32
+            );
         }
         let (width, height) = (cx.width, cx.height);
         if let Some(viewer) = &mut self.stories {
@@ -945,7 +936,6 @@ impl App for Instagram {
 
     fn draw(&mut self, canvas: &mut Canvas, cx: &mut DrawCx) {
         let now = cx.now;
-        let started = Instant::now();
         // A picture the last frame waited for arrived: draw it.
         let arrived = self.missing.iter().any(|want| {
             cx.media
@@ -1111,20 +1101,9 @@ impl App for Instagram {
         }
         self.dirty = false;
         self.frames += 1;
-        // Profiling (the perf bench reads the Exocortex app's lines): what
-        // the frame cost to draw (presenting is the shell's, after), when it
-        // was done and the finger it was drawn for.
+        // Profiling (the perf bench): when an opened chat first shows its
+        // messages (the shell logs each frame after this).
         if self.profile && kind != "none" {
-            eprintln!(
-                "instagram: frame drawn in {:.2} ms (layout 0.00), presented in 0.00 ms ({kind})",
-                started.elapsed().as_secs_f64() * 1000.0
-            );
-            // Screen rows: Moon puts the window under its 124-row status bar.
-            eprintln!(
-                "instagram: shown at {:.3} finger {}",
-                monotonic_ms(),
-                self.finger.map_or(-1, |y| y + 124)
-            );
             if let Some((chat, at)) = &self.opening
                 && self.stacks[Tab::Messages as usize]
                     .last()
