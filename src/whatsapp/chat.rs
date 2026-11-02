@@ -122,6 +122,8 @@ pub struct ChatView {
     button_shown: bool,
     /// Dragged or flung this frame.
     moving: bool,
+    /// A message held down: the action bar over the header, the reactions.
+    pub selected: Option<String>,
     /// Pictures the last frames drew without (`avatar::arrived`).
     pub waiting: Vec<avatar::Waiting>,
     /// An older page came: what is drawn stays where it is (the chat is
@@ -196,6 +198,7 @@ impl ChatView {
             push_name: None,
             button_shown: false,
             moving: false,
+            selected: None,
             waiting: Vec::new(),
             prepended: false,
             header_waiting: Vec::new(),
@@ -903,6 +906,10 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
                 if view.pressed.take().is_some() {
                     view.version += 1;
                 }
+                if view.selected.take().is_some() {
+                    view.version += 1;
+                    app.full = true;
+                }
                 // The chat scrolls from the bottom: dragging down shows older.
                 view.scroll.begin(-start_y, now);
                 view.scroll.moved(-y, max, now);
@@ -955,6 +962,14 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
                 cx.redraw();
             }
         }
+        Gesture::Tap { x, y }
+            if app
+                .chat
+                .as_ref()
+                .is_some_and(|view| view.selected.is_some()) =>
+        {
+            selection_tap(app, cx, x, y);
+        }
         Gesture::Tap { x, y } => {
             if let Some(view) = app.chat.as_mut()
                 && view.pressed.take().is_some()
@@ -993,32 +1008,13 @@ pub fn gesture(app: &mut WhatsApp, cx: &mut Cx, gesture: Gesture) {
             if let Some(Hit::Bubble { id, .. }) = hit(app, x, y, width, height, now)
                 && let Some(view) = app.chat.as_mut()
                 && let Some(message) = view.messages.iter().find(|m| m.id == id)
+                && !message.system
             {
-                if app.settings.writes && !message.system && !message.deleted {
-                    let reply = composer::Reply {
-                        id: message.id.clone(),
-                        author: if message.mine {
-                            "You".into()
-                        } else {
-                            message.author.name.clone()
-                        },
-                        text: if message.text.is_empty() {
-                            "Media".into()
-                        } else {
-                            message.text.replace('\n', " ")
-                        },
-                    };
-                    app.composer.reply = Some(reply);
-                    cx.haptic(Haptic::Medium);
-                    if !cx.keyboard_shown() {
-                        cx.show_keyboard(crate::control::KeyboardPurpose::Multiline);
-                    }
-                } else if !message.text.is_empty() {
-                    cx.copy(&message.text);
-                    cx.haptic(Haptic::Medium);
-                    let text = "Message copied";
-                    app.toast(cx, text);
-                }
+                view.selected = Some(id);
+                view.pressed = None;
+                view.version += 1;
+                cx.haptic(Haptic::Medium);
+                app.full = true;
                 cx.redraw();
             }
         }
@@ -1085,6 +1081,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
     let tops = &view.tops;
     let messages = &view.messages;
     let pressed = view.pressed.clone();
+    let selected = view.selected.clone();
     let rounded = &mut app.rounded;
     // Content rows are measured from the bottom (stable as older pages come).
     let translate = bottom + offset;
@@ -1116,6 +1113,7 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
                 y,
                 width,
                 pressed.as_deref(),
+                selected.as_deref(),
                 now,
             );
         }
@@ -1214,9 +1212,35 @@ pub fn draw(app: &mut WhatsApp, canvas: &mut Canvas, cx: &mut DrawCx, full: bool
             members: view.members,
             push_name: view.push_name.as_deref(),
         };
-        let mut header_pics = avatar::Pics::new(&mut *cx.media, &mut view.header_waiting, 0.0);
-        header_pics.span = (0.0, top);
-        draw_header(canvas, &mut header_pics, rounded, &header, width, now);
+        if view.selected.is_some() {
+            draw_action_bar(canvas, writes, width);
+        } else {
+            let mut header_pics = avatar::Pics::new(&mut *cx.media, &mut view.header_waiting, 0.0);
+            header_pics.span = (0.0, top);
+            draw_header(canvas, &mut header_pics, rounded, &header, width, now);
+        }
+    }
+    if writes
+        && let Some(view) = app.chat.as_ref()
+        && let Some(id) = &view.selected
+    {
+        let mine: Vec<String> = view
+            .messages
+            .iter()
+            .find(|m| &m.id == id)
+            .map(|m| {
+                m.reactions
+                    .iter()
+                    .filter(|r| r.mine)
+                    .map(|r| r.emoji.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        draw_reaction_bar(canvas, &mine, width);
+        let bar = reaction_bar(width);
+        app.damage
+            .rows
+            .push(((bar.y - 30.0) as i32, (bar.y + bar.h + 30.0) as i32));
     }
     if full {
         composer::draw(app, canvas, width, height);
@@ -1347,8 +1371,21 @@ fn draw_item(
     y: f32,
     width: f32,
     pressed: Option<&str>,
+    selected: Option<&str>,
     now: Instant,
 ) {
+    if let Item::Message { index, .. } = item
+        && selected == Some(messages[*index].id.as_str())
+    {
+        canvas.fill_rect(
+            0,
+            y as i32,
+            canvas.width,
+            item_height(item).ceil() as i32,
+            theme::GREEN,
+            0.14,
+        );
+    }
     match item {
         Item::Day(label) => chip(canvas, label, width / 2.0, y, 66.0, theme::SECONDARY),
         Item::Loading => {
@@ -1950,5 +1987,153 @@ fn draw_media(
                 1.0,
             );
         }
+    }
+}
+
+/// What a selected message offers: the reactions bar (writes on) under
+/// the header, the actions in it.
+const REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+const REACTION_SLOT: f32 = 128.0;
+
+fn reaction_bar(width: f32) -> RectF {
+    let w = REACTION_SLOT * REACTIONS.len() as f32 + 40.0;
+    RectF {
+        x: (width - w) / 2.0,
+        y: theme::TOP + theme::HEADER + 24.0,
+        w,
+        h: 136.0,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Action {
+    Clear,
+    Reply,
+    Copy,
+    React(usize),
+}
+
+fn action_at(writes: bool, x: f32, y: f32, width: f32) -> Action {
+    if y < theme::TOP + theme::HEADER {
+        if x > width - 170.0 {
+            return Action::Copy;
+        }
+        if writes && x > width - 330.0 {
+            return Action::Reply;
+        }
+        return Action::Clear;
+    }
+    let bar = reaction_bar(width);
+    if writes && bar.contains(x, y) {
+        let slot = ((x - bar.x - 20.0) / REACTION_SLOT).floor();
+        if slot >= 0.0 && (slot as usize) < REACTIONS.len() {
+            return Action::React(slot as usize);
+        }
+    }
+    Action::Clear
+}
+
+/// A tap while a message is selected: an action, or the selection ends.
+fn selection_tap(app: &mut WhatsApp, cx: &mut Cx, x: f32, y: f32) {
+    let writes = app.settings.writes;
+    let Some(view) = app.chat.as_mut() else {
+        return;
+    };
+    let Some(id) = view.selected.take() else {
+        return;
+    };
+    view.version += 1;
+    app.full = true;
+    let Some(message) = view.messages.iter().find(|m| m.id == id).cloned() else {
+        return;
+    };
+    let chat = view.id.clone();
+    match action_at(writes, x, y, cx.width) {
+        Action::Clear => {}
+        Action::Copy => {
+            if message.text.is_empty() {
+                app.toast(cx, "Nothing to copy");
+            } else {
+                cx.copy(&message.text);
+                app.toast(cx, "Message copied");
+            }
+        }
+        Action::Reply => {
+            app.composer.reply = Some(composer::Reply {
+                id: message.id.clone(),
+                author: if message.mine {
+                    "You".into()
+                } else {
+                    message.author.name.clone()
+                },
+                text: if message.text.is_empty() {
+                    "Media".into()
+                } else {
+                    message.text.replace('\n', " ")
+                },
+            });
+            if !cx.keyboard_shown() {
+                cx.show_keyboard(crate::control::KeyboardPurpose::Multiline);
+            }
+        }
+        Action::React(slot) => {
+            let emoji = REACTIONS[slot];
+            let remove = message.reactions.iter().any(|r| r.mine && r.emoji == emoji);
+            let args =
+                json!({"chat": chat, "message": message.id, "emoji": emoji, "remove": remove});
+            app.ask(cx, "react", args, Ask::Other("react"));
+        }
+    }
+    cx.redraw();
+}
+
+/// The header while a message is selected: WhatsApp's action bar.
+fn draw_action_bar(canvas: &mut Canvas, writes: bool, width: f32) {
+    canvas.fill_rect(
+        0,
+        0,
+        canvas.width,
+        (theme::TOP + theme::HEADER) as i32,
+        theme::CHAT_BAR,
+        1.0,
+    );
+    let cy = theme::TOP + theme::HEADER / 2.0;
+    icons::draw(canvas, Glyph::Back, 56.0, cy, 62.0, theme::TEXT, 1.0);
+    text::draw(
+        canvas,
+        "1",
+        150.0,
+        text::centered_baseline(cy, Weight::Medium, 48.0),
+        Weight::Medium,
+        48.0,
+        theme::TEXT,
+        1.0,
+    );
+    icons::shared(canvas, Icon::Copy, width - 90.0, cy, 58.0, theme::TEXT);
+    if writes {
+        icons::shared(canvas, Icon::Undo, width - 250.0, cy, 58.0, theme::TEXT);
+    }
+}
+
+fn draw_reaction_bar(canvas: &mut Canvas, mine: &[String], width: f32) {
+    let bar = reaction_bar(width);
+    canvas.shadow_rrect(bar, bar.h / 2.0, 14.0, 0x000000, 0.4);
+    canvas.fill_rrect(bar, bar.h / 2.0, theme::SURFACE_HI, 1.0);
+    for (n, emoji) in REACTIONS.iter().enumerate() {
+        let cx = bar.x + 20.0 + REACTION_SLOT * (n as f32 + 0.5);
+        if mine.iter().any(|m| m == emoji) {
+            canvas.fill_circle(cx, bar.y + bar.h / 2.0, 54.0, theme::SURFACE, 1.0);
+        }
+        let shown = rich::emojify(emoji);
+        text::draw_centered(
+            canvas,
+            &shown,
+            cx,
+            bar.y + bar.h / 2.0 + 24.0,
+            Weight::Regular,
+            66.0,
+            theme::TEXT,
+            1.0,
+        );
     }
 }

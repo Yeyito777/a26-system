@@ -310,6 +310,13 @@ impl WhatsApp {
             cx.redraw();
             return;
         }
+        if let Some(chat) = self.chat.as_mut()
+            && chat.selected.take().is_some()
+        {
+            self.full = true;
+            cx.redraw();
+            return;
+        }
         match self.page {
             Page::Chat => {
                 let to = if self
