@@ -499,7 +499,13 @@ impl Instagram {
 
     /// The bars and what floats over them, drawn again over a frame that
     /// otherwise kept its rows.
-    fn draw_bars(&mut self, canvas: &mut Canvas, media: &mut crate::social::media::Media, now: Instant, area: Area) {
+    fn draw_bars(
+        &mut self,
+        canvas: &mut Canvas,
+        media: &mut crate::social::media::Media,
+        now: Instant,
+        area: Area,
+    ) {
         let height = canvas.height as f32;
         let tab_bar = self.top().tab_bar();
         let store = &self.store;
@@ -1053,7 +1059,10 @@ impl App for Instagram {
                 .is_none_or(|rows| rows.iter().all(|&(a, _)| a != i32::MIN));
             // What the store changed, when the screen can say (else whole).
             let changed_rows = if self.changed && same && !cx.full && !self.dirty {
-                self.stacks[self.tab as usize].last_mut().expect("root").changed_rows(area)
+                self.stacks[self.tab as usize]
+                    .last_mut()
+                    .expect("root")
+                    .changed_rows(area)
             } else {
                 Some(Vec::new())
             };

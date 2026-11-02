@@ -524,7 +524,11 @@ fn tray_key(store: &Store) -> u64 {
         reel.user.avatar_ref().hash(&mut h);
     }
     store.own_reel.as_ref().map(|reel| reel.unseen).hash(&mut h);
-    store.account().and_then(|a| a.avatar.as_ref()).map(|m| m.reference.clone()).hash(&mut h);
+    store
+        .account()
+        .and_then(|a| a.avatar.as_ref())
+        .map(|m| m.reference.clone())
+        .hash(&mut h);
     h.finish()
 }
 
@@ -588,7 +592,12 @@ impl Screen for FeedScreen {
             .zip(&self.tops)
             .map(|(post, top)| (post.id.clone(), *top))
             .collect();
-        let old = (self.drawn_ids.clone(), self.height, self.tail, self.tray_key);
+        let old = (
+            self.drawn_ids.clone(),
+            self.height,
+            self.tail,
+            self.tray_key,
+        );
         self.tops.clear();
         let mut y = TRAY_H + 1.0;
         for post in &store.feed.posts {
@@ -611,9 +620,18 @@ impl Screen for FeedScreen {
             .posts
             .iter()
             .zip(&self.tops)
-            .map(|(post, top)| (post.id.clone(), *top, self.layouts.get(post, width, self.expanded.contains(&post.id)).signature))
+            .map(|(post, top)| {
+                (
+                    post.id.clone(),
+                    *top,
+                    self.layouts
+                        .get(post, width, self.expanded.contains(&post.id))
+                        .signature,
+                )
+            })
             .collect();
-        let appended = !old.0.is_empty() && ids.len() >= old.0.len() && ids[..old.0.len()] == old.0[..];
+        let appended =
+            !old.0.is_empty() && ids.len() >= old.0.len() && ids[..old.0.len()] == old.0[..];
         let tray_key = tray_key(store);
         self.changed = Some(match (appended, tray_key == old.3) {
             (true, tray_same) => (old.1 - old.2, !tray_same),

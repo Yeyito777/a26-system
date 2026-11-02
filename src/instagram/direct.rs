@@ -791,15 +791,17 @@ impl ThreadScreen {
         let added = self.placed.len().saturating_sub(before.len());
         let len = self.placed.len();
         let stable = !before.is_empty()
-            && before.iter().all(|&(index, from_bottom, height, signature)| {
-                (index + added < len)
-                    && self.placed.get(len - 1 - (index + added)).is_some_and(|p| {
-                        p.index == index + added
-                            && p.from_bottom == from_bottom
-                            && p.height == height
-                            && p.signature == signature
-                    })
-            });
+            && before
+                .iter()
+                .all(|&(index, from_bottom, height, signature)| {
+                    (index + added < len)
+                        && self.placed.get(len - 1 - (index + added)).is_some_and(|p| {
+                            p.index == index + added
+                                && p.from_bottom == from_bottom
+                                && p.height == height
+                                && p.signature == signature
+                        })
+                });
         self.stable_from = stable.then_some(old_height);
         self.relaid = true;
     }
@@ -1664,7 +1666,11 @@ impl Screen for ThreadScreen {
         let old = self.stable_from.take()?;
         let old_top = area.bottom + area.offset - old;
         let end = (old_top + 200.0).ceil() as i32;
-        Some(if end > area.top as i32 { vec![(area.top as i32, end)] } else { Vec::new() })
+        Some(if end > area.top as i32 {
+            vec![(area.top as i32, end)]
+        } else {
+            Vec::new()
+        })
     }
 
     fn tab_bar(&self) -> bool {
