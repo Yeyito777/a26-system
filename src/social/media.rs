@@ -525,9 +525,11 @@ fn decode_gif(reader: BufReader<File>) -> Option<Rgba> {
     })
 }
 
-/// Area-averaged resample of `source` for the box (bilinear-free: every
-/// output pixel averages the source pixels it covers, at least one), to
-/// premultiplied ARGB.
+/// Resamples `source` for the box, to premultiplied ARGB: Catmull-Rom
+/// (bicubic) filtering, widened when reducing so that every source pixel
+/// counts by how near it lies. Pictures come out as sharp as they can be at
+/// their size, edges smooth: no stair steps from averaging whole pixels, no
+/// blocks when a small picture is enlarged.
 fn resample(source: &Rgba, width: u32, height: u32, fit: Fit) -> Image {
     let (sw, sh) = (source.width as f32, source.height as f32);
     let (out_w, out_h, crop_x, crop_y, crop_w, crop_h) = match fit {
@@ -544,44 +546,140 @@ fn resample(source: &Rgba, width: u32, height: u32, fit: Fit) -> Image {
             (width, height, (sw - cw) / 2.0, (sh - ch) / 2.0, cw, ch)
         }
     };
-    let mut pixels = Vec::with_capacity((out_w * out_h) as usize);
-    let step_x = crop_w / out_w as f32;
-    let step_y = crop_h / out_h as f32;
+    let columns = Taps::new(source.width, crop_x, crop_w, out_w);
+    let rows = Taps::new(source.height, crop_y, crop_h, out_h);
+    let (left, right) = columns.span();
+    let (top, bottom) = rows.span();
+    let w = out_w as usize;
+    // Rows first (the filter is separable), premultiplied, each to the
+    // output's width; then columns.
+    let mut wide = vec![[0_u8; 4]; w * (bottom - top)];
+    let mut row = vec![[0_i32; 4]; right - left];
     let stride = source.width as usize * 4;
-    for y in 0..out_h {
-        let y0 = crop_y + y as f32 * step_y;
-        let ya = (y0.floor() as u32).min(source.height - 1);
-        let yb = (((y0 + step_y).ceil() as u32).max(ya + 1)).min(source.height);
-        for x in 0..out_w {
-            let x0 = crop_x + x as f32 * step_x;
-            let xa = (x0.floor() as u32).min(source.width - 1);
-            let xb = (((x0 + step_x).ceil() as u32).max(xa + 1)).min(source.width);
-            let (mut r, mut g, mut b, mut a, mut n) = (0_u32, 0_u32, 0_u32, 0_u32, 0_u32);
-            for sy in ya..yb {
-                let row = sy as usize * stride;
-                for sx in xa..xb {
-                    let i = row + sx as usize * 4;
-                    let alpha = u32::from(source.pixels[i + 3]);
-                    r += u32::from(source.pixels[i]) * alpha;
-                    g += u32::from(source.pixels[i + 1]) * alpha;
-                    b += u32::from(source.pixels[i + 2]) * alpha;
-                    a += alpha;
-                    n += 1;
+    for (y, out) in (top..bottom).zip(wide.chunks_exact_mut(w)) {
+        let pixels = &source.pixels[y * stride + left * 4..y * stride + right * 4];
+        for (rgba, premultiplied) in pixels.chunks_exact(4).zip(&mut row) {
+            let alpha = i32::from(rgba[3]);
+            let scale = |c: u8| (i32::from(c) * alpha + 127) / 255;
+            *premultiplied = [alpha, scale(rgba[0]), scale(rgba[1]), scale(rgba[2])];
+        }
+        for (x, out) in out.iter_mut().enumerate() {
+            let (first, weights) = columns.of(x);
+            let mut sum = [0_i32; 4];
+            for (pixel, &weight) in row[first - left..].iter().zip(weights) {
+                for (sum, value) in sum.iter_mut().zip(pixel) {
+                    *sum += value * weight;
                 }
             }
-            let n = n.max(1);
-            let alpha = a / n;
-            // Premultiplied: each channel averaged with its alpha.
-            let premultiplied = |c: u32| (c / n / 255).min(alpha);
-            pixels.push(
-                alpha << 24 | premultiplied(r) << 16 | premultiplied(g) << 8 | premultiplied(b),
-            );
+            *out = clamp_premultiplied(sum);
         }
+    }
+    let mut pixels = Vec::with_capacity(w * out_h as usize);
+    let mut line = vec![[0_i32; 4]; w];
+    for y in 0..out_h as usize {
+        let (first, weights) = rows.of(y);
+        line.fill([0; 4]);
+        for (wide_row, &weight) in wide[(first - top) * w..].chunks_exact(w).zip(weights) {
+            for (sum, value) in line.iter_mut().zip(wide_row) {
+                for (sum, &value) in sum.iter_mut().zip(value) {
+                    *sum += i32::from(value) * weight;
+                }
+            }
+        }
+        pixels.extend(line.iter().map(|&sum| {
+            let [a, r, g, b] = clamp_premultiplied(sum).map(u32::from);
+            a << 24 | r << 16 | g << 8 | b
+        }));
     }
     Image {
         width: out_w as i32,
         height: out_h as i32,
         pixels,
+    }
+}
+
+/// Weighted sums (alpha, red, green, blue; weights in 1/2^14) back to 8
+/// bits, no colour above its alpha (the filter's lobes can overshoot).
+fn clamp_premultiplied(sum: [i32; 4]) -> [u8; 4] {
+    let [alpha, red, green, blue] = sum.map(|sum| ((sum + (1 << 13)) >> 14).clamp(0, 255));
+    [alpha, red.min(alpha), green.min(alpha), blue.min(alpha)].map(|c| c as u8)
+}
+
+/// Catmull-Rom's cubic (a = -0.5): 1 at 0, 0 at the other whole numbers,
+/// a little negative between 1 and 2, which keeps edges sharp.
+fn cubic(x: f32) -> f32 {
+    let x = x.abs();
+    if x < 1.0 {
+        (1.5 * x - 2.5) * x * x + 1.0
+    } else if x < 2.0 {
+        ((-0.5 * x + 2.5) * x - 4.0) * x + 2.0
+    } else {
+        0.0
+    }
+}
+
+/// For each output pixel along an axis: the first source pixel it reads
+/// and each read pixel's weight in 1/2^14 (summing to exactly 2^14), as
+/// many for every pixel (some of them 0).
+struct Taps {
+    count: usize,
+    first: Vec<usize>,
+    weights: Vec<i32>,
+}
+
+impl Taps {
+    /// `out` pixels across `span` source pixels from `start`, of `len`.
+    fn new(len: u32, start: f32, span: f32, out: u32) -> Self {
+        const ONE: f32 = (1 << 14) as f32;
+        let len = len as usize;
+        let step = span / out as f32;
+        // Reducing, the cubic is stretched across the pixels each output
+        // pixel covers.
+        let stretch = step.max(1.0);
+        let reach = 2.0 * stretch;
+        let count = ((2.0 * reach).ceil() as usize + 1).min(len);
+        let mut first = Vec::with_capacity(out as usize);
+        let mut weights = Vec::with_capacity(out as usize * count);
+        for index in 0..out {
+            let center = start + (index as f32 + 0.5) * step;
+            let pixel = ((center - reach).floor().max(0.0) as usize).min(len - count);
+            first.push(pixel);
+            let shares: Vec<f32> = (pixel..pixel + count)
+                .map(|pixel| cubic((pixel as f32 + 0.5 - center) / stretch))
+                .collect();
+            let total: f32 = shares.iter().sum();
+            let at = weights.len();
+            weights.extend(
+                shares
+                    .iter()
+                    .map(|share| (share / total * ONE).round() as i32),
+            );
+            // Rounding's remainder to the largest, so a flat colour stays
+            // exactly itself.
+            let rounded: i32 = weights[at..].iter().sum();
+            if let Some(largest) = weights[at..].iter_mut().max() {
+                *largest += (1 << 14) - rounded;
+            }
+        }
+        Self {
+            count,
+            first,
+            weights,
+        }
+    }
+
+    fn of(&self, index: usize) -> (usize, &[i32]) {
+        (
+            self.first[index],
+            &self.weights[index * self.count..][..self.count],
+        )
+    }
+
+    /// The source pixels read: from the first to one past the last.
+    fn span(&self) -> (usize, usize) {
+        let first = self.first.iter().min().copied().unwrap_or(0);
+        let last = self.first.iter().max().copied().unwrap_or(0);
+        (first, last + self.count)
     }
 }
 
@@ -624,7 +722,71 @@ mod tests {
         };
         let image = resample(&source, 1, 1, Fit::Contain);
         let pixel = image.pixels[0];
-        assert_eq!(pixel >> 24, 127);
-        assert_eq!(pixel & 0xff, 127);
+        assert_eq!(pixel >> 24, 128);
+        assert_eq!(pixel & 0xff, 128);
+    }
+
+    fn grey(width: u32, height: u32, level: impl Fn(u32, u32) -> u8) -> Rgba {
+        let mut pixels = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let l = level(x, y);
+                pixels.extend_from_slice(&[l, l, l, 255]);
+            }
+        }
+        Rgba {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    #[test]
+    fn a_flat_picture_stays_flat_at_any_size() {
+        let source = grey(37, 23, |_, _| 200);
+        for (w, h, fit) in [
+            (100, 61, Fit::Contain),
+            (10, 10, Fit::Cover),
+            (37, 23, Fit::Contain),
+        ] {
+            let image = resample(&source, w, h, fit);
+            assert!(image.pixels.iter().all(|&p| p == 0xffc8_c8c8), "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn enlarging_is_smooth_not_blocky() {
+        // A black and white edge twice as large: the pixels either side of
+        // it step through the greys, none repeats its neighbour as whole
+        // pixels averaged would (a 2x2 block of each source pixel).
+        let source = grey(8, 1, |x, _| if x < 4 { 0 } else { 255 });
+        let image = resample(&source, 16, 2, Fit::Contain);
+        assert_eq!((image.width, image.height), (16, 2));
+        let levels: Vec<u32> = image.pixels[..16].iter().map(|p| p & 0xff).collect();
+        assert_eq!(&levels[..5], &[0, 0, 0, 0, 0]);
+        assert_eq!(&levels[11..], &[255, 255, 255, 255, 255]);
+        let edge = &levels[6..10];
+        assert!(edge.windows(2).all(|pair| pair[0] < pair[1]), "{levels:?}");
+    }
+
+    #[test]
+    fn reducing_weighs_every_pixel_by_how_near_it_lies() {
+        // A one-pixel line in a picture reduced by 3:2 stays one soft line
+        // where it was, whichever column it falls in: no column of the
+        // reduction is dropped or doubled.
+        for column in 0..12 {
+            let source = grey(12, 4, |x, _| if x == column { 255 } else { 0 });
+            let image = resample(&source, 8, 4, Fit::Contain);
+            let row: Vec<u32> = image.pixels[..8].iter().map(|p| p & 0xff).collect();
+            let total: u32 = row.iter().sum();
+            // The line's light, two thirds of it per output pixel's width.
+            assert!((150..=200).contains(&total), "column {column}: {row:?}");
+            let peak = row.iter().enumerate().max_by_key(|(_, l)| **l).unwrap().0;
+            let expected = (column as f32 + 0.5) * 8.0 / 12.0;
+            assert!(
+                (peak as f32 + 0.5 - expected).abs() <= 1.0,
+                "column {column}: {row:?}"
+            );
+        }
     }
 }
