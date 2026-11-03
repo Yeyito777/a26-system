@@ -623,11 +623,12 @@ fn resample(width: u32, height: u32, pixels: &[u32], to_w: u32, to_h: u32) -> Ve
     let rows = Spans::new(to_h, height, sy);
     let stride = width as usize;
     // The source's bytes as f32 (exact), in memory order: blue, green, red,
-    // alpha.
-    let source: Vec<[f32; 4]> = pixels
-        .iter()
-        .map(|p| p.to_le_bytes().map(f32::from))
-        .collect();
+    // alpha. Into a buffer kept between emoji: a strike's (278 kB) is past
+    // what the allocator keeps, so a fresh one would be mapped, faulted in
+    // page by page and unmapped every time.
+    let mut source = SOURCE.with(|cell| cell.take());
+    source.clear();
+    source.extend(pixels.iter().map(|p| p.to_le_bytes().map(f32::from)));
     let mut out = vec![0; (to_w * to_h) as usize];
     for y in 0..to_h as usize {
         let (first_row, wys) = rows.get(y);
@@ -650,8 +651,21 @@ fn resample(width: u32, height: u32, pixels: &[u32], to_w: u32, to_h: u32) -> Ve
                 channel(a) << 24 | channel(r) << 16 | channel(g) << 8 | channel(b);
         }
     }
+    // Kept for the next, unless an unusually large source made it big.
+    if source.capacity() <= SOURCE_KEPT {
+        SOURCE.with(|cell| cell.replace(source));
+    }
     out
 }
+
+thread_local! {
+    /// The scaling's f32 copy of its source, kept between calls.
+    static SOURCE: RefCell<Vec<[f32; 4]>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The most source pixels that copy is kept for (Noto's strikes are 136 by
+/// 128): 1 MB on each thread that scales emoji.
+const SOURCE_KEPT: usize = 1 << 16;
 
 /// Four f32 channels summed side by side: `add_scaled` is `sum[i] += p[i] *
 /// w` for each, a multiply and an add per lane exactly as the scalar code
