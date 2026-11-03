@@ -105,7 +105,7 @@ enum Shape {
     /// An emoji: its bitmap (premultiplied ARGB, drawn as is) is made on
     /// the emoji thread once the glyph is first wanted (a layout measures
     /// text before it draws it), or here if it is drawn before that.
-    Emoji(RefCell<Bitmap>),
+    Emoji(Rc<RefCell<Bitmap>>),
 }
 
 enum Bitmap {
@@ -227,7 +227,14 @@ struct Typefaces {
     strikes: Vec<(GlyphId, Rc<Strike>)>,
     /// The emoji font's bytes, for the emoji thread.
     emoji_data: Option<&'static [u8]>,
+    /// Emoji bitmaps by size and glyphs: the same emoji in another weight
+    /// (bold text, italics) is the same bitmap. Up to `EMOJI_SHARED`.
+    emoji: HashMap<(u16, Vec<GlyphId>), Rc<RefCell<Bitmap>>>,
 }
+
+/// Emoji bitmaps shared between weights, at most (past it the sharing
+/// starts again; the glyphs keep theirs).
+const EMOJI_SHARED: usize = 1024;
 
 /// An emoji's bitmap at the font's strike size, premultiplied ARGB.
 struct Strike {
@@ -529,8 +536,28 @@ fn ligate(face: &Face, mut glyphs: Vec<GlyphId>) -> Vec<GlyphId> {
     glyphs
 }
 
-/// Decodes a PNG strike glyph into premultiplied ARGB.
+/// Decodes a PNG strike glyph into premultiplied ARGB. A palette image
+/// (every Noto emoji) has its palette premultiplied once and each pixel
+/// looked up; the rest go through the png crate's expansion, a pixel of
+/// full or no cover kept or cleared as the arithmetic would leave it.
 pub(crate) fn decode_png(data: &[u8]) -> Option<(u32, u32, Vec<u32>)> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
+    decoder.set_transformations(png::Transformations::IDENTITY);
+    let mut reader = decoder.read_info().ok()?;
+    let info = reader.info();
+    if info.color_type == png::ColorType::Indexed
+        && info.bit_depth == png::BitDepth::Eight
+        && let Some(palette) = info.palette.as_deref()
+    {
+        let table = premultiplied_palette(palette, info.trns.as_deref().unwrap_or(&[]));
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let frame = reader.next_frame(&mut buffer).ok()?;
+        let pixels = buffer[..frame.buffer_size()]
+            .iter()
+            .map(|&index| table[usize::from(index)])
+            .collect();
+        return Some((frame.width, frame.height, pixels));
+    }
     let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
@@ -539,59 +566,178 @@ pub(crate) fn decode_png(data: &[u8]) -> Option<(u32, u32, Vec<u32>)> {
     let channels = info.color_type.samples();
     let pixels = buffer[..info.buffer_size()]
         .chunks_exact(channels)
-        .map(|p| {
-            let (r, g, b, a) = match channels {
-                4 => (p[0], p[1], p[2], p[3]),
-                3 => (p[0], p[1], p[2], 255),
-                2 => (p[0], p[0], p[0], p[1]),
-                _ => (p[0], p[0], p[0], 255),
-            };
-            let a32 = u32::from(a);
-            let pre = |c: u8| (u32::from(c) * a32 + 127) / 255;
-            a32 << 24 | pre(r) << 16 | pre(g) << 8 | pre(b)
+        .map(|p| match channels {
+            4 => premultiply(p[0], p[1], p[2], p[3]),
+            3 => premultiply(p[0], p[1], p[2], 255),
+            2 => premultiply(p[0], p[0], p[0], p[1]),
+            _ => premultiply(p[0], p[0], p[0], 255),
         })
         .collect();
     Some((info.width, info.height, pixels))
 }
 
+/// A pixel premultiplied: each colour times its cover, rounded. Full cover
+/// keeps the colour and none clears it, as the arithmetic gives.
+#[inline]
+fn premultiply(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    match a {
+        255 => 0xff00_0000 | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b),
+        0 => 0,
+        _ => {
+            let a32 = u32::from(a);
+            let pre = |c: u8| (u32::from(c) * a32 + 127) / 255;
+            a32 << 24 | pre(r) << 16 | pre(g) << 8 | pre(b)
+        }
+    }
+}
+
+/// A PNG palette and its tRNS covers as the png crate expands them,
+/// premultiplied: entries past the tRNS opaque, a tRNS longer than the
+/// palette ignored, indices past the palette opaque black.
+fn premultiplied_palette(palette: &[u8], trns: &[u8]) -> [u32; 256] {
+    let entries = palette.len() / 3;
+    let trns = if trns.len() <= entries { trns } else { &[] };
+    let mut table = [premultiply(0, 0, 0, 255); 256];
+    for (index, entry) in table.iter_mut().enumerate().take(entries) {
+        let rgb = &palette[index * 3..index * 3 + 3];
+        *entry = premultiply(
+            rgb[0],
+            rgb[1],
+            rgb[2],
+            trns.get(index).copied().unwrap_or(255),
+        );
+    }
+    table
+}
+
 /// Area-averaged downscale of premultiplied pixels (bitmap emoji are drawn
-/// well below their strike size).
+/// well below their strike size). Each output pixel sums the source pixels
+/// it covers, row by row, each times the part of it covered. It is the same
+/// to the bit as working that out pixel by pixel (the test keeps that
+/// version): the columns' and rows' parts are worked out once, with the
+/// same f32 arithmetic; the four channels are summed side by side, each a
+/// multiply then an add as before (never fused).
 fn resample(width: u32, height: u32, pixels: &[u32], to_w: u32, to_h: u32) -> Vec<u32> {
     let (sx, sy) = (width as f32 / to_w as f32, height as f32 / to_h as f32);
+    let columns = Spans::new(to_w, width, sx);
+    let rows = Spans::new(to_h, height, sy);
+    let stride = width as usize;
+    // The source's bytes as f32 (exact), in memory order: blue, green, red,
+    // alpha.
+    let source: Vec<[f32; 4]> = pixels
+        .iter()
+        .map(|p| p.to_le_bytes().map(f32::from))
+        .collect();
     let mut out = vec![0; (to_w * to_h) as usize];
-    for y in 0..to_h {
-        let (y0, y1) = (y as f32 * sy, (y + 1) as f32 * sy);
-        for x in 0..to_w {
-            let (x0, x1) = (x as f32 * sx, (x + 1) as f32 * sx);
-            let mut sum = [0.0_f32; 4];
-            let mut total = 0.0;
-            let mut yy = y0.floor() as u32;
-            while (yy as f32) < y1 && yy < height {
-                let wy = ((yy + 1) as f32).min(y1) - (yy as f32).max(y0);
-                let mut xx = x0.floor() as u32;
-                while (xx as f32) < x1 && xx < width {
-                    let wx = ((xx + 1) as f32).min(x1) - (xx as f32).max(x0);
+    for y in 0..to_h as usize {
+        let (first_row, wys) = rows.get(y);
+        for x in 0..to_w as usize {
+            let (first_column, wxs) = columns.get(x);
+            let mut sum = Lanes::ZERO;
+            let mut total = 0.0_f32;
+            for (row, &wy) in wys.iter().enumerate() {
+                let at = (first_row + row) * stride + first_column;
+                for (&wx, p) in wxs.iter().zip(&source[at..at + wxs.len()]) {
                     let w = wx * wy;
-                    let p = pixels[(yy * width + xx) as usize];
-                    for (channel, value) in sum.iter_mut().enumerate() {
-                        *value += (p >> (24 - 8 * channel) & 0xff) as f32 * w;
-                    }
+                    sum = sum.add_scaled(p, w);
                     total += w;
-                    xx += 1;
                 }
-                yy += 1;
             }
+            let [b, g, r, a] = sum.get();
             let total = total.max(1e-6);
-            out[(y * to_w + x) as usize] = sum
-                .iter()
-                .enumerate()
-                .map(|(channel, value)| {
-                    ((value / total + 0.5) as u32).min(255) << (24 - 8 * channel)
-                })
-                .fold(0, |pixel, part| pixel | part);
+            let channel = |value: f32| ((value / total + 0.5) as u32).min(255);
+            out[y * to_w as usize + x] =
+                channel(a) << 24 | channel(r) << 16 | channel(g) << 8 | channel(b);
         }
     }
     out
+}
+
+/// Four f32 channels summed side by side: `add_scaled` is `sum[i] += p[i] *
+/// w` for each, a multiply and an add per lane exactly as the scalar code
+/// (vector multiplies and adds round like scalar ones; nothing is fused).
+#[derive(Clone, Copy)]
+struct Lanes(Inner);
+
+#[cfg(target_arch = "aarch64")]
+type Inner = std::arch::aarch64::float32x4_t;
+#[cfg(target_arch = "x86_64")]
+type Inner = std::arch::x86_64::__m128;
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+type Inner = [f32; 4];
+
+impl Lanes {
+    const ZERO: Self = Self(
+        // SAFETY: four zero f32s and the 128-bit vector have the same size,
+        // and every bit pattern of either is valid.
+        unsafe { std::mem::transmute::<[f32; 4], Inner>([0.0; 4]) },
+    );
+
+    /// `self + p * w`, lane by lane.
+    #[inline(always)]
+    fn add_scaled(self, p: &[f32; 4], w: f32) -> Self {
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: NEON is part of every aarch64 target; the load reads the
+        // four f32s `p` points to.
+        unsafe {
+            use std::arch::aarch64::*;
+            Self(vaddq_f32(self.0, vmulq_n_f32(vld1q_f32(p.as_ptr()), w)))
+        }
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: SSE is part of every x86_64 target; the load reads the
+        // four f32s `p` points to (unaligned).
+        unsafe {
+            use std::arch::x86_64::*;
+            Self(_mm_add_ps(
+                self.0,
+                _mm_mul_ps(_mm_loadu_ps(p.as_ptr()), _mm_set1_ps(w)),
+            ))
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            let mut sum = self.0;
+            for (value, channel) in sum.iter_mut().zip(p) {
+                *value += channel * w;
+            }
+            Self(sum)
+        }
+    }
+
+    fn get(self) -> [f32; 4] {
+        // SAFETY: as for ZERO, the other way round.
+        unsafe { std::mem::transmute::<Inner, [f32; 4]>(self.0) }
+    }
+}
+
+/// For each output column (or row) of a downscale, the source columns it
+/// covers: the first, and how much of each.
+struct Spans {
+    spans: Vec<(usize, usize, usize)>,
+    weights: Vec<f32>,
+}
+
+impl Spans {
+    fn new(count: u32, source: u32, scale: f32) -> Self {
+        let mut spans = Vec::with_capacity(count as usize);
+        let mut weights = Vec::new();
+        for x in 0..count {
+            let (x0, x1) = (x as f32 * scale, (x + 1) as f32 * scale);
+            let first = x0.floor() as u32;
+            let start = weights.len();
+            let mut xx = first;
+            while (xx as f32) < x1 && xx < source {
+                weights.push(((xx + 1) as f32).min(x1) - (xx as f32).max(x0));
+                xx += 1;
+            }
+            spans.push((first as usize, start, weights.len()));
+        }
+        Self { spans, weights }
+    }
+
+    fn get(&self, index: usize) -> (usize, &[f32]) {
+        let (first, start, end) = self.spans[index];
+        (first, &self.weights[start..end])
+    }
 }
 
 /// The embedded faces, each parsed the first time it is needed (fontdue
@@ -634,6 +780,7 @@ impl Typefaces {
             gamma,
             strikes: Vec::new(),
             emoji_data: None,
+            emoji: HashMap::new(),
         }
     }
 
@@ -663,6 +810,14 @@ impl Typefaces {
         if let Some(glyph) = self.glyphs.get(&key) {
             return glyph.clone();
         }
+        self.new_glyph(key)
+    }
+
+    /// A glyph not made yet (out of line: text measured and drawn again
+    /// finds its glyphs made).
+    #[inline(never)]
+    fn new_glyph(&mut self, key: (Weight, u16, Cluster)) -> Rc<Glyph> {
+        let (weight, cluster) = (key.0, &key.2);
         let size = f32::from(key.1) / 2.0;
         let glyph = Rc::new(match cluster {
             Cluster::Char(character) => self.char_glyph(weight, size, *character),
@@ -797,6 +952,17 @@ impl Typefaces {
         if !any {
             return None;
         }
+        let key = ((size * 2.0).round() as u16, ids.to_vec());
+        if let Some(bitmap) = self.emoji.get(&key) {
+            return Some(Glyph {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                advance: pen,
+                shape: Shape::Emoji(bitmap.clone()),
+            });
+        }
         let job = Arc::new(Job {
             size,
             ids: ids.to_vec(),
@@ -811,13 +977,18 @@ impl Typefaces {
                 WAITING.fetch_sub(1, Ordering::Relaxed);
             }
         }
+        let bitmap = Rc::new(RefCell::new(Bitmap::Asked(job)));
+        if self.emoji.len() >= EMOJI_SHARED {
+            self.emoji.clear();
+        }
+        self.emoji.insert(key, bitmap.clone());
         Some(Glyph {
             x: 0,
             y: 0,
             width: 0,
             height: 0,
             advance: pen,
-            shape: Shape::Emoji(RefCell::new(Bitmap::Asked(job))),
+            shape: Shape::Emoji(bitmap),
         })
     }
 
@@ -912,6 +1083,21 @@ fn make_emoji(
     if parts.is_empty() {
         return None;
     }
+    // One part is the image (composing it on clear pixels would copy it: a
+    // part's pixel of no cover is all zero, its colours being sums no
+    // greater than its cover's).
+    if let [(left, top, w, h, _)] = parts[..] {
+        let pixels = parts.pop()?.4;
+        return Some(Made {
+            x: left,
+            y: top,
+            image: Image {
+                width: w as i32,
+                height: h as i32,
+                pixels,
+            },
+        });
+    }
     // One image covering every part.
     let x0 = parts.iter().map(|p| p.0).min()?;
     let y0 = parts.iter().map(|p| p.1).min()?;
@@ -939,6 +1125,71 @@ fn make_emoji(
             pixels,
         },
     })
+}
+
+/// Draws an emoji with the pen at (`pen`, `baseline`), its bitmap made
+/// first if need be (out of line: text is mostly not emoji).
+#[inline(never)]
+fn draw_emoji(
+    faces: &mut Typefaces,
+    canvas: &mut Canvas,
+    bitmap: &RefCell<Bitmap>,
+    pen: f32,
+    baseline: f32,
+    alpha: f32,
+) {
+    faces.made(bitmap);
+    if let Bitmap::Made(Some(made)) = &*bitmap.borrow() {
+        let (x, y) = (
+            pen.round() as i32 + made.x,
+            baseline.round() as i32 + made.y,
+        );
+        if alpha >= 1.0 {
+            blit(canvas, &made.image, x, y);
+        } else {
+            canvas.draw_image(&made.image, x, y, alpha);
+        }
+    }
+}
+
+/// Draws `image` (premultiplied) as Canvas::draw_image does at full alpha,
+/// pixel for pixel, within the clip only: a pixel of full cover replaces
+/// what is there, one of none leaves it, the rest are blended as it blends.
+fn blit(canvas: &mut Canvas, image: &Image, x: i32, y: i32) {
+    let (cx0, cy0, cx1, cy1) = canvas.clip();
+    let (x0, x1) = (
+        x.max(cx0).max(0),
+        (x + image.width).min(cx1).min(canvas.width),
+    );
+    let (y0, y1) = (
+        y.max(cy0).max(0),
+        (y + image.height).min(cy1).min(canvas.height),
+    );
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let (from, n) = ((x0 - x) as usize, (x1 - x0) as usize);
+    let (stride, source) = (canvas.width as usize, image.width as usize);
+    for ty in y0..y1 {
+        let at = (ty - y) as usize * source + from;
+        let src = &image.pixels[at..at + n];
+        let at = ty as usize * stride + x0 as usize;
+        for (d, &s) in canvas.pixels[at..at + n].iter_mut().zip(src) {
+            match s >> 24 {
+                0 => {}
+                255 => *d = s & 0x00ff_ffff,
+                sa => {
+                    let inverse = 256 - (sa + (sa >> 7));
+                    let scale = |shift: u32| {
+                        let channel = s >> shift & 0xff;
+                        let under = *d >> shift & 0xff;
+                        (channel + ((under * inverse) >> 8)).min(255) << shift
+                    };
+                    *d = scale(16) | scale(8) | scale(0);
+                }
+            }
+        }
+    }
 }
 
 /// Glyph `id`'s bitmap `data` decoded, from the cache when it was
@@ -1006,14 +1257,7 @@ pub fn draw_tracked(
         for cluster in clusters(text) {
             let glyph = faces.glyph(weight, size, &cluster);
             if let Shape::Emoji(bitmap) = &glyph.shape {
-                faces.made(bitmap);
-                if let Bitmap::Made(Some(made)) = &*bitmap.borrow() {
-                    let (gx, gy) = (
-                        pen.round() as i32 + made.x,
-                        baseline.round() as i32 + made.y,
-                    );
-                    canvas.draw_image(&made.image, gx, gy, alpha);
-                }
+                draw_emoji(&mut faces, canvas, bitmap, pen, baseline, alpha);
             } else if glyph.width > 0 && glyph.height > 0 {
                 let (gx, gy) = (
                     pen.round() as i32 + glyph.x,
@@ -1196,6 +1440,229 @@ mod tests {
         );
     }
 
+    /// The downscale as 59bf65f did it, pixel by pixel, to compare with.
+    fn reference_resample(
+        width: u32,
+        height: u32,
+        pixels: &[u32],
+        to_w: u32,
+        to_h: u32,
+    ) -> Vec<u32> {
+        let (sx, sy) = (width as f32 / to_w as f32, height as f32 / to_h as f32);
+        let mut out = vec![0; (to_w * to_h) as usize];
+        for y in 0..to_h {
+            let (y0, y1) = (y as f32 * sy, (y + 1) as f32 * sy);
+            for x in 0..to_w {
+                let (x0, x1) = (x as f32 * sx, (x + 1) as f32 * sx);
+                let mut sum = [0.0_f32; 4];
+                let mut total = 0.0;
+                let mut yy = y0.floor() as u32;
+                while (yy as f32) < y1 && yy < height {
+                    let wy = ((yy + 1) as f32).min(y1) - (yy as f32).max(y0);
+                    let mut xx = x0.floor() as u32;
+                    while (xx as f32) < x1 && xx < width {
+                        let wx = ((xx + 1) as f32).min(x1) - (xx as f32).max(x0);
+                        let w = wx * wy;
+                        let p = pixels[(yy * width + xx) as usize];
+                        for (channel, value) in sum.iter_mut().enumerate() {
+                            *value += (p >> (24 - 8 * channel) & 0xff) as f32 * w;
+                        }
+                        total += w;
+                        xx += 1;
+                    }
+                    yy += 1;
+                }
+                let total = total.max(1e-6);
+                out[(y * to_w + x) as usize] = sum
+                    .iter()
+                    .enumerate()
+                    .map(|(channel, value)| {
+                        ((value / total + 0.5) as u32).min(255) << (24 - 8 * channel)
+                    })
+                    .fold(0, |pixel, part| pixel | part);
+            }
+        }
+        out
+    }
+
+    /// The PNG decoding of 59bf65f, to compare with.
+    fn reference_decode_png(data: &[u8]) -> Option<(u32, u32, Vec<u32>)> {
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = decoder.read_info().ok()?;
+        let mut buffer = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buffer).ok()?;
+        let channels = info.color_type.samples();
+        let pixels = buffer[..info.buffer_size()]
+            .chunks_exact(channels)
+            .map(|p| {
+                let (r, g, b, a) = match channels {
+                    4 => (p[0], p[1], p[2], p[3]),
+                    3 => (p[0], p[1], p[2], 255),
+                    2 => (p[0], p[0], p[0], p[1]),
+                    _ => (p[0], p[0], p[0], 255),
+                };
+                let a32 = u32::from(a);
+                let pre = |c: u8| (u32::from(c) * a32 + 127) / 255;
+                a32 << 24 | pre(r) << 16 | pre(g) << 8 | pre(b)
+            })
+            .collect();
+        Some((info.width, info.height, pixels))
+    }
+
+    /// PNGs decode as they did: palette images with and without covers, a
+    /// short and an over-long tRNS, indices past the palette, 4-bit
+    /// palettes, and RGBA, RGB, grey with and without alpha, 16-bit.
+    #[test]
+    fn png_decodes_as_it_did() {
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let (width, height) = (37_u32, 23_u32);
+        let encode = |color: png::ColorType,
+                      depth: png::BitDepth,
+                      palette: Option<Vec<u8>>,
+                      trns: Option<Vec<u8>>,
+                      data: Vec<u8>| {
+            let mut out = Vec::new();
+            {
+                let mut encoder = png::Encoder::new(&mut out, width, height);
+                encoder.set_color(color);
+                encoder.set_depth(depth);
+                if let Some(palette) = palette {
+                    encoder.set_palette(palette);
+                }
+                if let Some(trns) = trns {
+                    encoder.set_trns(trns);
+                }
+                let mut writer = encoder.write_header().unwrap();
+                writer.write_image_data(&data).unwrap();
+            }
+            out
+        };
+        let mut cases = Vec::new();
+        let palette: Vec<u8> = (0..200 * 3).map(|_| next() as u8).collect();
+        let covers: Vec<u8> = (0..200)
+            .map(|i| match i % 4 {
+                0 => 0,
+                1 => 255,
+                _ => next() as u8,
+            })
+            .collect();
+        // Indices up to 255, past the palette's 200 entries.
+        let indices: Vec<u8> = (0..width * height).map(|_| next() as u8).collect();
+        for trns in [
+            None,
+            Some(covers.clone()),
+            Some(covers[..50].to_vec()),
+            Some(vec![7; 210]),
+        ] {
+            cases.push(encode(
+                png::ColorType::Indexed,
+                png::BitDepth::Eight,
+                Some(palette.clone()),
+                trns,
+                indices.clone(),
+            ));
+        }
+        let packed: Vec<u8> = (0..(width as usize).div_ceil(2) * height as usize)
+            .map(|_| next() as u8)
+            .collect();
+        cases.push(encode(
+            png::ColorType::Indexed,
+            png::BitDepth::Four,
+            Some(palette[..48].to_vec()),
+            Some(covers[..10].to_vec()),
+            packed,
+        ));
+        for (color, channels) in [
+            (png::ColorType::Rgba, 4),
+            (png::ColorType::Rgb, 3),
+            (png::ColorType::GrayscaleAlpha, 2),
+            (png::ColorType::Grayscale, 1),
+        ] {
+            let data: Vec<u8> = (0..width * height * channels)
+                .map(|i| {
+                    if channels % 2 == 0 && i % channels == channels - 1 {
+                        [0, 255, next() as u8][(next() % 3) as usize]
+                    } else {
+                        next() as u8
+                    }
+                })
+                .collect();
+            cases.push(encode(color, png::BitDepth::Eight, None, None, data));
+            let wide: Vec<u8> = (0..width * height * channels * 2)
+                .map(|_| next() as u8)
+                .collect();
+            cases.push(encode(color, png::BitDepth::Sixteen, None, None, wide));
+        }
+        for (n, data) in cases.iter().enumerate() {
+            assert_eq!(decode_png(data), reference_decode_png(data), "case {n}");
+        }
+        // And the emoji font's own, where it is installed.
+        TYPEFACES.with(|cell| {
+            let mut faces = cell.borrow_mut();
+            let Some(face) = faces.fallback(EMOJI) else {
+                return;
+            };
+            let mut checked = 0;
+            for id in (0..face.number_of_glyphs()).step_by(7) {
+                if let Some(image) = face.glyph_raster_image(GlyphId(id), u16::MAX)
+                    && image.format == RasterImageFormat::PNG
+                {
+                    assert_eq!(
+                        decode_png(image.data),
+                        reference_decode_png(image.data),
+                        "glyph {id}"
+                    );
+                    checked += 1;
+                }
+            }
+            eprintln!("png_decodes_as_it_did: {checked} of the emoji font's PNGs compared");
+        });
+    }
+
+    /// The downscale gives what it gave pixel by pixel, to the bit: every
+    /// size from 1 to 160 px of Noto's 136 by 128 strikes and of odd ones,
+    /// with transparent, opaque and half-covered pixels.
+    #[test]
+    fn resample_is_the_same_to_the_bit() {
+        let mut seed = 0x2545_f491_u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for (width, height) in [(136, 128), (136, 136), (97, 61), (3, 200), (200, 1)] {
+            let pixels: Vec<u32> = (0..width * height)
+                .map(|i| {
+                    let r = next();
+                    // Areas of nothing, of full cover, and edges between.
+                    let a = match (i / 7 + r % 5) % 4 {
+                        0 => 0,
+                        1 => 255,
+                        _ => r >> 24,
+                    };
+                    let c = |v: u32| ((v & 0xff) * a) / 255;
+                    a << 24 | c(r) << 16 | c(r >> 8) << 8 | c(r >> 16)
+                })
+                .collect();
+            for to_w in (1..=80).chain((81..=160).step_by(7)) {
+                let to_h = ((height as f32 * to_w as f32 / width as f32).round() as u32).max(1);
+                assert_eq!(
+                    resample(width, height, &pixels, to_w, to_h),
+                    reference_resample(width, height, &pixels, to_w, to_h),
+                    "{width}x{height} to {to_w}x{to_h}"
+                );
+            }
+        }
+    }
+
     /// Emoji as 9d191cb drew them, to compare with: the glyphs' ids as
     /// `char_glyph` and `emoji_glyph` found them, each part decoded and
     /// scaled on the spot. (x, y, image, advance)
@@ -1313,6 +1780,13 @@ mod tests {
             for (n, text) in emoji.iter().enumerate() {
                 let cluster = clusters(text).next().unwrap();
                 let size = (size * 2.0_f32).round() / 2.0;
+                // The same emoji in each weight shares its bitmap.
+                let weight = [
+                    Weight::Regular,
+                    Weight::Bold,
+                    Weight::Mono,
+                    Weight::MonoBold,
+                ][(round + n) % 4];
                 let Some((gx, gy, image, advance)) = TYPEFACES.with(|cell| {
                     let mut faces = cell.borrow_mut();
                     reference_emoji(faces.fallback(EMOJI).unwrap(), size, &cluster)
@@ -1321,12 +1795,12 @@ mod tests {
                 };
                 // Some measured before they are drawn (as a layout does).
                 if (round + n) % 2 == 0 {
-                    measure(&format!("a{text}b"), Weight::Regular, size);
+                    measure(&format!("a{text}b"), weight, size);
                     // And drawn once the emoji thread made it.
                     let start = std::time::Instant::now();
                     while start.elapsed().as_secs() < 5 {
                         let done = TYPEFACES.with(|cell| {
-                            let glyph = cell.borrow_mut().glyph(Weight::Regular, size, &cluster);
+                            let glyph = cell.borrow_mut().glyph(weight, size, &cluster);
                             match &glyph.shape {
                                 Shape::Emoji(bitmap) => match &*bitmap.borrow() {
                                     Bitmap::Asked(job) => {
@@ -1355,21 +1829,14 @@ mod tests {
                         expected.pixels.copy_from_slice(&drawn.pixels);
                         let line = format!("a{text}b");
                         let width = draw(
-                            &mut drawn,
-                            &line,
-                            x,
-                            baseline,
-                            Weight::Regular,
-                            size,
-                            0xe0e0e0,
-                            alpha,
+                            &mut drawn, &line, x, baseline, weight, size, 0xe0e0e0, alpha,
                         );
                         let mut pen = x + draw(
                             &mut expected,
                             "a",
                             x,
                             baseline,
-                            Weight::Regular,
+                            weight,
                             size,
                             0xe0e0e0,
                             alpha,
@@ -1391,7 +1858,7 @@ mod tests {
                             "b",
                             pen,
                             baseline,
-                            Weight::Regular,
+                            weight,
                             size,
                             0xe0e0e0,
                             alpha,
