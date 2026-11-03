@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Deterministically generate 220x220 BGRX icon bytes from the source PNGs."""
+"""Deterministically generate 336x336 BGRX icon bytes from the source PNGs.
+
+336 px is twice Moon's 168 px home-screen icon: Moon reduces the artwork to
+each size it draws by exact area averaging, so from 2x the icons are as crisp
+as if drawn at those sizes.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # The System app's icon, the Exocortex app's (scripts/draw-exocortex-icon.py) and
 # the social apps' (scripts/draw-social-icons.py).
 ICONS = ("system-app", "exocortex-app", "instagram-app", "whatsapp-app", "discord-app")
-SIZE = (220, 220)
+SIZE = (336, 336)
 PINNED_PILLOW = "12.1.1"
 
 
